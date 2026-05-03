@@ -231,15 +231,14 @@ async def import_with_retry(
                         return _merge_imported_sources(
                             imported, verified_imported, verified_imported_ids
                         )
+                    source_norms = [(source, _source_url_norm(source)) for source in sources]
                     removed_urls_norm = {
                         url
-                        for source in sources
-                        if (url := _source_url_norm(source)) in current_urls_norm
+                        for _, url in source_norms
+                        if url is not None and url in current_urls_norm
                     }
                     filtered_sources = [
-                        source
-                        for source in sources
-                        if _source_url_norm(source) not in current_urls_norm
+                        source for source, url in source_norms if url not in current_urls_norm
                     ]
                     if len(filtered_sources) != len(sources):
                         removed_count = len(sources) - len(filtered_sources)
