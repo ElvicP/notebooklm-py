@@ -202,14 +202,14 @@ Before starting workflows, verify the CLI is ready:
 Commands with `--json` return structured data for parsing:
 
 **Create notebook:**
-```
+```bash
 $ notebooklm create "Research" --json
 {"notebook": {"id": "abc123de-...", "title": "Research", "created_at": null}}
 # parse with: jq -r .notebook.id
 ```
 
 **Add source:**
-```
+```bash
 $ notebooklm source add "https://example.com" --json
 {"source": {"id": "def456...", "title": "Example", "type": "SourceType.URL", "url": "https://example.com"}}
 # parse with: jq -r .source.id
@@ -217,20 +217,20 @@ $ notebooklm source add "https://example.com" --json
 ```
 
 **Generate artifact:**
-```
+```bash
 $ notebooklm generate audio "Focus on key points" --json
 {"task_id": "xyz789...", "status": "pending"}
 # When run with --wait, completed status also includes a `url` field.
 ```
 
 **Chat with references:**
-```
+```bash
 $ notebooklm ask "What is X?" --json
 {"answer": "X is... [1] [2]", "conversation_id": "...", "turn_number": 1, "is_follow_up": false, "references": [{"source_id": "abc123...", "citation_number": 1, "cited_text": "Relevant passage from source..."}, {"source_id": "def456...", "citation_number": 2, "cited_text": "Another passage..."}]}
 ```
 
 **Source fulltext (get indexed content):**
-```
+```bash
 $ notebooklm source fulltext <source_id> --json
 {"source_id": "...", "title": "...", "content": "Full indexed text...", "url": null, "char_count": 12345}
 ```
