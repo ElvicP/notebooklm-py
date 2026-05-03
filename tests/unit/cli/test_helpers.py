@@ -1089,7 +1089,7 @@ class TestImportWithRetry:
         verification path. To bound the worst-case duplicate inflation, the
         retry loop must give up after a small number of attempts rather than
         burning the full ``max_elapsed`` budget — otherwise a persistent
-        timeout still produces 5–6× duplicate reports.
+        timeout still produces 5-6x duplicate reports.
 
         Patches ``time.monotonic`` to never advance past budget, so the only
         thing that can bound the loop is an explicit retry cap on the
