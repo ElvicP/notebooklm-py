@@ -219,15 +219,14 @@ class TestWindowsUTF8Mode:
         stderr = DummyStream()
         policies = []
 
+        monkeypatch.setitem(
+            notebooklm_cli.asyncio.__dict__,
+            "WindowsSelectorEventLoopPolicy",
+            DummyPolicy,
+        )
         monkeypatch.setattr(notebooklm_cli.sys, "platform", "win32")
         monkeypatch.setattr(notebooklm_cli.sys, "stdout", stdout)
         monkeypatch.setattr(notebooklm_cli.sys, "stderr", stderr)
-        monkeypatch.setattr(
-            notebooklm_cli.asyncio,
-            "WindowsSelectorEventLoopPolicy",
-            DummyPolicy,
-            raising=False,
-        )
         monkeypatch.setattr(
             notebooklm_cli.asyncio,
             "set_event_loop_policy",
