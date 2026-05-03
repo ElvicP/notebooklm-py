@@ -86,11 +86,11 @@ def test_extract_account_limits_returns_empty_for_malformed_response(response):
 
 
 def test_extract_account_tier_from_nested_response():
-    response = [[[[None, "1", 627], [[1613, [None, "NOTEBOOKLM_TIER_PRO_CONSUMER_USER"]]], 0]]]
+    response = [[[[None, "1", 627], [[1613, [None, "NOTEBOOKLM_TIER_PRO"]]], 0]]]
 
     assert extract_account_tier(response) == AccountTier(
-        tier="NOTEBOOKLM_TIER_PRO_CONSUMER_USER",
-        plan_name="Google AI Pro Consumer",
+        tier="NOTEBOOKLM_TIER_PRO",
+        plan_name="Google AI Pro",
     )
 
 

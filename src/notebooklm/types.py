@@ -82,7 +82,7 @@ class AccountLimits:
 
 @dataclass(frozen=True)
 class AccountTier:
-    """NotebookLM subscription tier returned by the homepage tier RPC."""
+    """Raw NotebookLM tier metadata returned by the homepage tier RPC."""
 
     tier: str | None = None
     plan_name: str | None = None

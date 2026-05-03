@@ -18,7 +18,6 @@ _TIER_PLAN_NAMES = {
     "NOTEBOOKLM_TIER_STANDARD": "Standard",
     "NOTEBOOKLM_TIER_PLUS": "Google AI Plus",
     "NOTEBOOKLM_TIER_PRO": "Google AI Pro",
-    "NOTEBOOKLM_TIER_PRO_CONSUMER_USER": "Google AI Pro Consumer",
     "NOTEBOOKLM_TIER_PRO_DASHER_END_USER": "Google Workspace Pro",
     "NOTEBOOKLM_TIER_ULTRA": "Google AI Ultra",
 }

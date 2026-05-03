@@ -1379,6 +1379,9 @@ await rpc_call(
 # "NOTEBOOKLM_TIER_PRO"
 # "NOTEBOOKLM_TIER_PRO_CONSUMER_USER"
 # "NOTEBOOKLM_TIER_PRO_DASHER_END_USER"
+#
+# Treat this as internal account metadata. Use GET_USER_SETTINGS limits for
+# notebook/source quota decisions.
 ```
 
 ### RPC: GET_USER_SETTINGS (ZwVcOc)

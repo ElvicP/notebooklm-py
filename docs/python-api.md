@@ -700,7 +700,7 @@ result = await client.settings.set_output_language("ja")  # Japanese
 print(f"Language set to: {result}")
 ```
 
-**Important:** Language is a **GLOBAL setting** that affects all notebooks in your account. Supported languages include:
+**Important:** Language is a **GLOBAL setting** that affects all notebooks in your account. The tier string is internal NotebookLM metadata; use `get_account_limits()` for quota decisions because the raw tier name may not match the active notebook/source limits. Supported languages include:
 - `en` (English), `ja` (日本語), `zh_Hans` (中文简体), `zh_Hant` (中文繁體)
 - `ko` (한국어), `es` (Español), `fr` (Français), `de` (Deutsch), `pt_BR` (Português)
 - And [over 70 other languages](cli-reference.md#language-commands-notebooklm-language-cmd)
