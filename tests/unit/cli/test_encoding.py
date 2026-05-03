@@ -21,6 +21,9 @@ class TestReplaceUnencodable:
     def test_uses_utf8_when_stream_encoding_is_missing(self):
         assert replace_unencodable("web 🌐", DummyStream(None)) == "web 🌐"
 
+    def test_uses_utf8_when_stream_is_none(self):
+        assert replace_unencodable("web 🌐", None) == "web 🌐"
+
     def test_unknown_encoding_falls_back_to_ascii_replacement(self):
         assert replace_unencodable("web 🌐", DummyStream("not-a-codec")) == "web ?"
 

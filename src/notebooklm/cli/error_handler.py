@@ -45,7 +45,7 @@ def _output_error(
         response: dict = {"error": True, "code": code, "message": message}
         if extra:
             response.update(extra)
-        safe_echo(json.dumps(response, indent=2))
+        click.echo(json.dumps(response, indent=2))  # json.dumps defaults to ASCII-safe output.
     else:
         safe_echo(message, err=True)
         if hint:

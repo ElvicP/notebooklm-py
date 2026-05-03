@@ -189,6 +189,12 @@ class TestWindowsUTF8Mode:
 
         notebooklm_cli._reconfigure_output_stream(object())
 
+    def test_reconfigure_output_stream_ignores_missing_stream(self):
+        """Detached Windows processes may not have standard streams."""
+        from notebooklm import notebooklm_cli
+
+        notebooklm_cli._reconfigure_output_stream(None)
+
     def test_reconfigure_output_stream_ignores_reconfigure_errors(self):
         """A failed best-effort reconfigure should not abort CLI startup."""
         from notebooklm import notebooklm_cli

@@ -44,6 +44,8 @@ from pathlib import Path
 
 def _reconfigure_output_stream(stream) -> None:
     """Use UTF-8 with replacement for active Windows text streams."""
+    if stream is None:
+        return
     reconfigure = getattr(stream, "reconfigure", None)
     if not callable(reconfigure):
         return
@@ -201,7 +203,6 @@ cli.add_command(profile)
 
 
 def main():
-    _configure_windows_runtime()
     cli()
 
 
