@@ -211,7 +211,7 @@ $ notebooklm create "Research" --json
 **Add source:**
 ```bash
 $ notebooklm source add "https://example.com" --json
-{"source": {"id": "def456...", "title": "Example", "type": "SourceType.URL", "url": "https://example.com"}}
+{"source": {"id": "def456...", "title": "Example", "type": "SourceType.WEB_PAGE", "url": "https://example.com"}}
 # parse with: jq -r .source.id
 # Note: no `status` field on add — use `source list --json` or `source wait` to check processing state.
 ```
@@ -232,7 +232,7 @@ $ notebooklm ask "What is X?" --json
 **Source fulltext (get indexed content):**
 ```bash
 $ notebooklm source fulltext <source_id> --json
-{"source_id": "...", "title": "...", "content": "Full indexed text...", "url": null, "char_count": 12345}
+{"source_id": "...", "title": "...", "content": "Full indexed text...", "_type_code": null, "url": null, "char_count": 12345}
 ```
 
 **Understanding citations:** The `cited_text` in references is often a snippet or section header, not the full quoted passage. The `start_char`/`end_char` positions reference NotebookLM's internal chunked index, not the raw fulltext. Use `SourceFulltext.find_citation_context()` to locate citations:
@@ -444,12 +444,12 @@ notebooklm artifact list --json
 
 `notebooklm source list --json`:
 ```json
-{"notebook_id": "...", "notebook_title": "...", "sources": [{"index": 1, "id": "...", "title": "...", "type": "SourceType.URL", "url": "...", "status": "ready|processing|error", "status_id": 1, "created_at": "..."}], "count": 1}
+{"notebook_id": "...", "notebook_title": "...", "sources": [{"index": 1, "id": "...", "title": "...", "type": "SourceType.WEB_PAGE", "url": "...", "status": "ready|processing|error", "status_id": 1, "created_at": "..."}], "count": 1}
 ```
 
 `notebooklm artifact list --json`:
 ```json
-{"notebook_id": "...", "notebook_title": "...", "artifacts": [{"index": 1, "id": "...", "title": "...", "type": "Audio Overview", "type_id": 1, "status": "in_progress|pending|completed|unknown", "status_id": 1, "created_at": "..."}], "count": 1}
+{"notebook_id": "...", "notebook_title": "...", "artifacts": [{"index": 1, "id": "...", "title": "...", "type": "Audio", "type_id": 1, "status": "in_progress|pending|completed|unknown", "status_id": 1, "created_at": "..."}], "count": 1}
 ```
 
 **Status values:**
