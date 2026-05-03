@@ -31,6 +31,7 @@ from notebooklm.exceptions import (
     UnknownRPCMethodError,
     ValidationError,
 )
+from notebooklm.types import AccountLimits, AccountTier
 
 
 class TestExceptionHierarchy:
@@ -102,6 +103,13 @@ class TestExceptionHierarchy:
         """NotebookLimitError is available from the public package namespace."""
         assert notebooklm.NotebookLimitError is NotebookLimitError
         assert "NotebookLimitError" in notebooklm.__all__
+
+    def test_account_types_are_exported_from_package(self):
+        """Account limit and tier types are available from the public package namespace."""
+        assert notebooklm.AccountLimits is AccountLimits
+        assert notebooklm.AccountTier is AccountTier
+        assert "AccountLimits" in notebooklm.__all__
+        assert "AccountTier" in notebooklm.__all__
 
 
 class TestRPCErrorAttributes:
@@ -231,7 +239,7 @@ class TestDomainExceptions:
 
         assert e.current_count == 499
         assert e.limit == 500
-        assert e.known_limits == (100, 500)
+        assert e.known_limits == ()
         assert e.original_error is original
         assert "499/500" in str(e)
         assert "notebook limit" in str(e).lower()
@@ -244,7 +252,6 @@ class TestDomainExceptions:
         assert e.to_error_response_extra() == {
             "current_count": 499,
             "limit": 500,
-            "known_limits": [100, 500],
             "method_id": "CCqFvf",
             "rpc_code": 3,
         }
@@ -255,6 +262,14 @@ class TestDomainExceptions:
 
         assert e.known_limits == ()
         assert "Known NotebookLM limits include" not in str(e)
+
+    def test_notebook_limit_error_preserves_explicit_known_limits(self):
+        """NotebookLimitError keeps explicit known limits for compatibility."""
+        e = NotebookLimitError(499, limit=500, known_limits=(100, 500))
+
+        assert e.known_limits == (100, 500)
+        assert "Known NotebookLM limits include: 100, 500" in str(e)
+        assert e.to_error_response_extra()["known_limits"] == [100, 500]
 
     def test_source_not_found_has_source_id(self):
         """SourceNotFoundError stores source_id."""

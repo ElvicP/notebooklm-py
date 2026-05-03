@@ -126,7 +126,7 @@ class TestHandleErrorsJsonOutput:
         assert data["code"] == "NOTEBOOK_LIMIT"
         assert data["current_count"] == 499
         assert data["limit"] == 500
-        assert data["known_limits"] == [100, 500]
+        assert "known_limits" not in data
         assert "method_id" not in data
         assert "rpc_code" not in data
 

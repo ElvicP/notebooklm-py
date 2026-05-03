@@ -305,11 +305,6 @@ class NotebookError(NotebookLMError):
     """Base for notebook operations."""
 
 
-# Observed in issue #309 reports from May 2026. Keep detection conservative:
-# these service-side limits can change before the API exposes typed quota errors.
-KNOWN_NOTEBOOK_LIMITS = (100, 500)
-
-
 class NotebookNotFoundError(NotebookError):
     """Notebook not found.
 
@@ -327,8 +322,8 @@ class NotebookLimitError(NotebookError):
 
     Attributes:
         current_count: Number of owned notebooks returned by the list API.
-        limit: Inferred NotebookLM notebook limit, if known.
-        known_limits: Known free/paid NotebookLM notebook limits.
+        limit: Server-reported NotebookLM notebook limit, if known.
+        known_limits: Optional known NotebookLM notebook limits to include in output.
         original_error: The underlying RPC failure from create.
     """
 
@@ -337,7 +332,7 @@ class NotebookLimitError(NotebookError):
         current_count: int,
         *,
         limit: int | None = None,
-        known_limits: tuple[int, ...] = KNOWN_NOTEBOOK_LIMITS,
+        known_limits: tuple[int, ...] = (),
         original_error: RPCError | None = None,
     ):
         self.current_count = current_count
@@ -366,8 +361,9 @@ class NotebookLimitError(NotebookError):
         extra: dict[str, Any] = {
             "current_count": self.current_count,
             "limit": self.limit,
-            "known_limits": list(self.known_limits),
         }
+        if self.known_limits:
+            extra["known_limits"] = list(self.known_limits)
         if self.original_error is not None:
             if self.original_error.method_id is not None:
                 extra["method_id"] = self.original_error.method_id

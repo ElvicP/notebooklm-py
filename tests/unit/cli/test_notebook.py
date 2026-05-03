@@ -172,7 +172,7 @@ class TestNotebookCreate:
             assert data["code"] == "NOTEBOOK_LIMIT"
             assert data["current_count"] == 499
             assert data["limit"] == 500
-            assert data["known_limits"] == [100, 500]
+            assert "known_limits" not in data
             assert data["method_id"] == RPCMethod.CREATE_NOTEBOOK.value
             assert data["rpc_code"] == 3
 

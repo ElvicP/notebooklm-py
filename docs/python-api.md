@@ -677,6 +677,8 @@ await client.notes.delete_mind_map(nb_id, mind_map_id)
 | Method | Parameters | Returns | Description |
 |--------|------------|---------|-------------|
 | `get_output_language()` | none | `Optional[str]` | Get current output language setting |
+| `get_account_limits()` | none | `AccountLimits` | Get account-level limits such as max notebooks and sources per notebook |
+| `get_account_tier()` | none | `AccountTier` | Get current NotebookLM subscription tier |
 | `set_output_language(language)` | `str` | `Optional[str]` | Set output language for artifact generation |
 
 **Example:**
@@ -684,6 +686,14 @@ await client.notes.delete_mind_map(nb_id, mind_map_id)
 # Get current language setting
 lang = await client.settings.get_output_language()
 print(f"Current language: {lang}")  # e.g., "en", "ja", "zh_Hans"
+
+# Get server-reported account limits
+limits = await client.settings.get_account_limits()
+print(f"Notebook limit: {limits.notebook_limit}")
+
+# Get current NotebookLM subscription tier
+tier = await client.settings.get_account_tier()
+print(f"Account tier: {tier.plan_name or tier.tier}")
 
 # Set language for artifact generation
 result = await client.settings.set_output_language("ja")  # Japanese
