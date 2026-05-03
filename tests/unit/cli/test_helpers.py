@@ -1108,7 +1108,7 @@ class TestImportWithRetry:
                 "notebooklm.cli.helpers.time.monotonic",
                 return_value=0.0,
             ),
-            patch("notebooklm.cli.helpers.asyncio.sleep", new_callable=AsyncMock),
+            patch("notebooklm.cli.helpers.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
             patch("notebooklm.cli.helpers.console"),
             pytest.raises(RPCTimeoutError),
         ):
@@ -1126,8 +1126,11 @@ class TestImportWithRetry:
                 initial_delay=1,
             )
 
-        # At most 2 attempts (1 original + 1 retry) before raising — bounded.
-        assert client.research.import_sources.await_count <= 2
+        # Exactly 2 attempts (1 original + 1 retry) before raising. `<= 2`
+        # would also pass if the retry disappeared entirely, which would mask
+        # a regression — assert the cap and the single backoff sleep.
+        assert client.research.import_sources.await_count == 2
+        mock_sleep.assert_awaited_once_with(1)
 
     @pytest.mark.asyncio
     async def test_falls_back_to_retry_when_post_timeout_probe_raises(self):
