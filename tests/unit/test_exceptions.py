@@ -2,6 +2,7 @@
 
 import pytest
 
+import notebooklm
 from notebooklm.exceptions import (
     ArtifactDownloadError,
     ArtifactError,
@@ -15,6 +16,7 @@ from notebooklm.exceptions import (
     DecodingError,
     NetworkError,
     NotebookError,
+    NotebookLimitError,
     NotebookLMError,
     NotebookNotFoundError,
     RateLimitError,
@@ -50,6 +52,7 @@ class TestExceptionHierarchy:
             RPCTimeoutError,
             NotebookError,
             NotebookNotFoundError,
+            NotebookLimitError,
             ChatError,
             SourceError,
             SourceAddError,
@@ -94,6 +97,11 @@ class TestExceptionHierarchy:
         assert issubclass(ArtifactNotReadyError, ArtifactError)
         assert issubclass(ArtifactParseError, ArtifactError)
         assert issubclass(ArtifactDownloadError, ArtifactError)
+
+    def test_notebook_limit_error_is_exported_from_package(self):
+        """NotebookLimitError is available from the public package namespace."""
+        assert notebooklm.NotebookLimitError is NotebookLimitError
+        assert "NotebookLimitError" in notebooklm.__all__
 
 
 class TestRPCErrorAttributes:
@@ -215,6 +223,38 @@ class TestDomainExceptions:
         e = NotebookNotFoundError("nb_123")
         assert e.notebook_id == "nb_123"
         assert "nb_123" in str(e)
+
+    def test_notebook_limit_error_has_count_and_limit(self):
+        """NotebookLimitError stores quota context."""
+        original = RPCError("create failed", method_id="CCqFvf", rpc_code=3)
+        e = NotebookLimitError(499, limit=500, original_error=original)
+
+        assert e.current_count == 499
+        assert e.limit == 500
+        assert e.known_limits == (100, 500)
+        assert e.original_error is original
+        assert "499/500" in str(e)
+        assert "notebook limit" in str(e).lower()
+
+    def test_notebook_limit_error_json_extra_includes_original_rpc_context(self):
+        """NotebookLimitError exposes structured JSON metadata."""
+        original = RPCError("create failed", method_id="CCqFvf", rpc_code=3)
+        e = NotebookLimitError(499, limit=500, original_error=original)
+
+        assert e.to_error_response_extra() == {
+            "current_count": 499,
+            "limit": 500,
+            "known_limits": [100, 500],
+            "method_id": "CCqFvf",
+            "rpc_code": 3,
+        }
+
+    def test_notebook_limit_error_handles_empty_known_limits(self):
+        """NotebookLimitError omits known-limit sentence when none are provided."""
+        e = NotebookLimitError(499, limit=500, known_limits=())
+
+        assert e.known_limits == ()
+        assert "Known NotebookLM limits include" not in str(e)
 
     def test_source_not_found_has_source_id(self):
         """SourceNotFoundError stores source_id."""

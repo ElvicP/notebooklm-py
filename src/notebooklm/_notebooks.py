@@ -5,6 +5,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from ._core import ClientCore
+from .exceptions import KNOWN_NOTEBOOK_LIMITS, NotebookLimitError, RPCError
 from .rpc import RPCMethod
 from .types import Notebook, NotebookDescription, SuggestedTopic
 
@@ -12,6 +13,16 @@ if TYPE_CHECKING:
     from ._sources import SourcesAPI
 
 logger = logging.getLogger(__name__)
+
+CREATE_NOTEBOOK_QUOTA_RPC_CODE = 3
+
+
+def _infer_known_notebook_limit(count: int) -> int | None:
+    """Infer whether a notebook count is at or one short of a known limit."""
+    for limit in sorted(KNOWN_NOTEBOOK_LIMITS, reverse=True):
+        if limit - 1 <= count <= limit:
+            return limit
+    return None
 
 
 class NotebooksAPI:
@@ -67,10 +78,48 @@ class NotebooksAPI:
         """
         logger.debug("Creating notebook: %s", title)
         params = [title, None, None, [2], [1]]
-        result = await self._core.rpc_call(RPCMethod.CREATE_NOTEBOOK, params)
+        try:
+            result = await self._core.rpc_call(RPCMethod.CREATE_NOTEBOOK, params)
+        except RPCError as exc:
+            await self._raise_quota_error_if_detected(exc)
+            raise
         notebook = Notebook.from_api_response(result)
         logger.debug("Created notebook: %s", notebook.id)
         return notebook
+
+    async def _raise_quota_error_if_detected(self, error: RPCError) -> None:
+        """Convert CREATE_NOTEBOOK invalid-argument failures into quota errors."""
+        if (
+            error.method_id != RPCMethod.CREATE_NOTEBOOK.value
+            or error.rpc_code != CREATE_NOTEBOOK_QUOTA_RPC_CODE
+        ):
+            return
+
+        # The backend reports quota exhaustion as code 3 rather than a typed
+        # limit error, so verify with a one-off count before changing the error.
+        try:
+            notebooks = await self.list()
+        except Exception:
+            logger.debug(
+                "Could not list notebooks after CREATE_NOTEBOOK failure; "
+                "leaving original RPC error unchanged",
+                exc_info=True,
+            )
+            return
+
+        owned_count = sum(1 for notebook in notebooks if notebook.is_owner)
+        # Keep the window intentionally tight to avoid hiding genuine invalid
+        # argument failures for accounts that are not near a known limit.
+        inferred_limit = _infer_known_notebook_limit(owned_count)
+        if inferred_limit is None:
+            return
+
+        raise NotebookLimitError(
+            owned_count,
+            limit=inferred_limit,
+            known_limits=KNOWN_NOTEBOOK_LIMITS,
+            original_error=error,
+        ) from error
 
     async def get(self, notebook_id: str) -> Notebook:
         """Get notebook details.

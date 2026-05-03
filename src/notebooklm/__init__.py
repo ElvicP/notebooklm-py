@@ -66,6 +66,7 @@ from .exceptions import (
     NetworkError,
     # Domain: Notebooks
     NotebookError,
+    NotebookLimitError,
     # Base
     NotebookLMError,
     NotebookNotFoundError,
@@ -170,6 +171,7 @@ __all__ = [
     # Domain Exceptions: Notebooks
     "NotebookError",
     "NotebookNotFoundError",
+    "NotebookLimitError",
     # Domain Exceptions: Chat
     "ChatError",
     # Domain Exceptions: Sources
