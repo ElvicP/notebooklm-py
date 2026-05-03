@@ -33,7 +33,7 @@ from ..types import ArtifactType
 from ._encoding import safe_echo
 
 if TYPE_CHECKING:
-    from ..types import Artifact
+    from ..types import Artifact, Source
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -112,7 +112,7 @@ def _has_no_url_entry(sources: list[dict]) -> bool:
     return any(_source_url_norm(source) is None for source in sources)
 
 
-def _imported_source_entry(source) -> dict[str, str]:
+def _imported_source_entry(source: "Source") -> dict[str, str]:
     return {"id": source.id, "title": source.title or source.url or ""}
 
 
