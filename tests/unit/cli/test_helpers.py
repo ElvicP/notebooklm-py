@@ -29,7 +29,7 @@ from notebooklm.cli.helpers import (
     set_current_notebook,
     with_client,
 )
-from notebooklm.exceptions import RPCTimeoutError
+from notebooklm.exceptions import NetworkError, RPCTimeoutError
 from notebooklm.types import ArtifactType
 
 # =============================================================================
@@ -909,9 +909,10 @@ class TestImportWithRetry:
 
     @pytest.mark.asyncio
     async def test_returned_list_includes_non_url_sources_like_research_reports(self):
-        """Sources without a URL (e.g. deep-research report entries) must
-        still be surfaced in the imported list when they're new — filtering
-        by ID rather than by URL match handles that.
+        """When the request includes a research-report entry (no URL, only
+        title + ``report_markdown``), the verified-success return value must
+        surface the matching new no-URL source so callers can count it as
+        imported.
         """
         # A new research-report entry with no URL.
         report_src = MagicMock(id="src_report", title="Research Report", url=None)
@@ -936,12 +937,60 @@ class TestImportWithRetry:
                 client,
                 "nb_123",
                 "task_123",
-                [{"url": "https://example.com", "title": "Source 1"}],
+                [
+                    # Mixed request: one URL + one report entry.
+                    {"url": "https://example.com", "title": "Source 1"},
+                    {
+                        "title": "Research Report",
+                        "report_markdown": "# Findings\n...",
+                        "result_type": 5,
+                    },
+                ],
             )
 
         # Both sources are returned — the report (no URL) and the URL source.
         ids_returned = {entry["id"] for entry in imported}
         assert ids_returned == {"src_report", "src_new"}
+
+    @pytest.mark.asyncio
+    async def test_does_not_over_report_concurrent_no_url_source(self):
+        """When the request has NO no-URL entries (URLs only), a concurrent
+        no-URL source added during the timeout window must NOT be reported
+        as imported — even if the requested URL itself was successfully
+        written. Otherwise the caller's `len(imported)` overstates what this
+        call actually added.
+        """
+        # The user's URL did import successfully.
+        new_src = MagicMock(id="src_new", title="Source 1", url="https://example.com")
+        # A concurrent session added a research report during the same window.
+        concurrent_report = MagicMock(
+            id="src_concurrent_report", title="Unrelated Report", url=None
+        )
+        client = MagicMock()
+        client.sources.list = AsyncMock(
+            side_effect=[
+                [],  # empty baseline
+                [new_src, concurrent_report],
+            ]
+        )
+        client.research.import_sources = AsyncMock(
+            side_effect=RPCTimeoutError("Timed out", timeout_seconds=30.0)
+        )
+
+        with (
+            patch("notebooklm.cli.helpers.asyncio.sleep", new_callable=AsyncMock),
+            patch("notebooklm.cli.helpers.console"),
+        ):
+            imported = await import_with_retry(
+                client,
+                "nb_123",
+                "task_123",
+                [{"url": "https://example.com", "title": "Source 1"}],
+            )
+
+        # Only the requested URL's source is returned; the concurrent report
+        # is not part of this call's contribution.
+        assert imported == [{"id": "src_new", "title": "Source 1"}]
 
     @pytest.mark.asyncio
     async def test_does_not_falsely_succeed_on_unrelated_concurrent_source(self):
@@ -1092,7 +1141,7 @@ class TestImportWithRetry:
         client.sources.list = AsyncMock(
             side_effect=[
                 [],  # baseline
-                ConnectionError("probe down"),  # post-timeout probe fails
+                NetworkError("probe down"),  # post-timeout probe fails
                 [new_src],  # post-retry probe (would succeed if reached, unused)
             ]
         )

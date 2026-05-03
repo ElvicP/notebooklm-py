@@ -27,7 +27,7 @@ from ..auth import (
     fetch_tokens,
     load_auth_from_storage,
 )
-from ..exceptions import RPCTimeoutError
+from ..exceptions import NetworkError, RPCError, RPCTimeoutError
 from ..paths import get_context_path
 from ..types import ArtifactType
 
@@ -126,6 +126,13 @@ async def import_with_retry(
     requested_urls_norm = {
         _normalize_url(url) for s in sources if isinstance((url := s.get("url")), str) and url
     }
+    # Track whether the request itself includes any non-URL entries (research
+    # reports, pasted text). If it doesn't, we must NOT include concurrent
+    # no-URL additions in the synthesized return — those would be unrelated
+    # sources reported as "imported" by this call.
+    requested_has_no_url_entry = any(
+        not (isinstance(s.get("url"), str) and s.get("url")) for s in sources
+    )
 
     # Snapshot baseline source IDs so the post-timeout probe can identify
     # truly-new sources. We anchor the verified-success condition on URLs of
@@ -135,7 +142,7 @@ async def import_with_retry(
     try:
         baseline = await client.sources.list(notebook_id)
         baseline_ids = {src.id for src in baseline}
-    except (RPCTimeoutError, ConnectionError, OSError) as snapshot_exc:
+    except (NetworkError, RPCError) as snapshot_exc:
         logger.warning(
             "Pre-import sources.list snapshot failed for %s: %s; "
             "verified-success path disabled for this call",
@@ -177,16 +184,21 @@ async def import_with_retry(
                                 f"verified {len(requested_urls_norm)} requested "
                                 f"sources — skipping retry.[/yellow]"
                             )
-                        # Return only new sources that match a requested URL
-                        # (or have no URL — captures research-report entries).
+                        # Return only new sources that match a requested URL.
+                        # No-URL new sources (research reports, pasted text)
+                        # are included only if the request itself had no-URL
+                        # entries — otherwise they're concurrent unrelated
+                        # additions and don't belong in the return.
                         return [
                             {"id": src.id, "title": src.title or src.url or ""}
                             for src in new_sources
-                            if not src.url or _normalize_url(src.url) in requested_urls_norm
+                            if (src.url and _normalize_url(src.url) in requested_urls_norm)
+                            or (not src.url and requested_has_no_url_entry)
                         ]
-                except asyncio.CancelledError:
-                    raise
-                except (RPCTimeoutError, ConnectionError, OSError) as probe_exc:
+                except (NetworkError, RPCError) as probe_exc:
+                    # CancelledError is a BaseException, not Exception, and is
+                    # not in this tuple — it propagates naturally for callers
+                    # that need to cancel the operation cleanly.
                     logger.warning(
                         "Failed to probe server state after timeout: %s; falling back to retry",
                         probe_exc,
