@@ -49,6 +49,8 @@ MINIMUM_REQUIRED_COOKIES = {"SID"}
 # Includes googleusercontent.com for authenticated media downloads
 ALLOWED_COOKIE_DOMAINS = {
     ".google.com",
+    # Playwright storage_state may preserve the leading dot for NotebookLM cookies.
+    ".notebooklm.google.com",
     "notebooklm.google.com",
     ".googleusercontent.com",
 }

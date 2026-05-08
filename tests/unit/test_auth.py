@@ -80,6 +80,49 @@ class TestExtractCookies:
         assert cookies["OSID"] == "osid_value"
         assert "OTHER" not in cookies
 
+    def test_extracts_osid_from_notebooklm_subdomain(self):
+        """Test OSID extraction from .notebooklm.google.com (Issue #329)."""
+        storage_state = {
+            "cookies": [
+                {"name": "SID", "value": "sid_value", "domain": ".google.com"},
+                {
+                    "name": "OSID",
+                    "value": "osid_subdomain",
+                    "domain": ".notebooklm.google.com",
+                },
+                {
+                    "name": "__Secure-OSID",
+                    "value": "secure_osid_subdomain",
+                    "domain": ".notebooklm.google.com",
+                },
+            ]
+        }
+
+        cookies = extract_cookies_from_storage(storage_state)
+
+        assert cookies["SID"] == "sid_value"
+        assert cookies["OSID"] == "osid_subdomain"
+        assert cookies["__Secure-OSID"] == "secure_osid_subdomain"
+
+    def test_prefers_base_domain_cookie_over_notebooklm_subdomain(self):
+        """Test .google.com still wins duplicate names from NotebookLM subdomain."""
+        storage_state = {
+            "cookies": [
+                {
+                    "name": "OSID",
+                    "value": "osid_subdomain",
+                    "domain": ".notebooklm.google.com",
+                },
+                {"name": "SID", "value": "sid_value", "domain": ".google.com"},
+                {"name": "OSID", "value": "osid_base", "domain": ".google.com"},
+            ]
+        }
+
+        cookies = extract_cookies_from_storage(storage_state)
+
+        assert cookies["SID"] == "sid_value"
+        assert cookies["OSID"] == "osid_base"
+
     def test_raises_if_missing_sid(self):
         storage_state = {
             "cookies": [
@@ -686,6 +729,7 @@ class TestAllowedCookieDomains:
         from notebooklm.auth import ALLOWED_COOKIE_DOMAINS
 
         assert ".google.com" in ALLOWED_COOKIE_DOMAINS
+        assert ".notebooklm.google.com" in ALLOWED_COOKIE_DOMAINS
         assert "notebooklm.google.com" in ALLOWED_COOKIE_DOMAINS
 
 
@@ -736,6 +780,11 @@ class TestIsGoogleDomain:
             (".google.zz", False),  # Invalid ccTLD
             (".google.xyz", False),  # Not in whitelist
             (".google.com.fake", False),  # Not in whitelist
+            (".notebooklm.google.com", False),  # Accepted by auth allowlist, not here
+            (".mail.google.com", False),
+            (".drive.google.com", False),
+            (".evilnotebooklm.google.com", False),
+            (".notebooklm.google.com.evil", False),
             (".notgoogle.com", False),
             (".evil-google.com", False),
             ("google.com", False),  # Missing leading dot
@@ -804,19 +853,21 @@ class TestIsGoogleDomain:
     @pytest.mark.parametrize(
         "domain",
         [
-            # Subdomains are not matched by _is_google_domain
+            # Subdomains without leading dot are still rejected
             "accounts.google.com",
             "lh3.google.com",
-            "accounts.google.de",  # Subdomain of regional
-            "lh3.google.co.uk",  # Subdomain of regional
-            ".accounts.google.de",  # With leading dot
+            # Subdomains of regional domains are still rejected (not whitelisted)
+            "accounts.google.de",
+            "lh3.google.co.uk",
+            ".accounts.google.de",  # Leading dot but regional subdomain
         ],
     )
     def test_rejects_subdomains(self, domain):
-        """Test that subdomains are rejected by _is_google_domain.
+        """Test that non-canonical subdomains are rejected by _is_google_domain.
 
-        _is_google_domain only matches domain-level cookies (with leading dot).
-        Subdomain matching is handled by _is_allowed_cookie_domain's suffix matching.
+        _is_google_domain only accepts .google.com and regional root domains
+        (.google.com.sg, etc). Auth extraction uses ALLOWED_COOKIE_DOMAINS for
+        auth-specific subdomains.
         """
         from notebooklm.auth import _is_google_domain
 
@@ -848,6 +899,7 @@ class TestIsAllowedAuthDomain:
 
         assert _is_allowed_auth_domain(".google.com") is True
         assert _is_allowed_auth_domain("notebooklm.google.com") is True
+        assert _is_allowed_auth_domain(".notebooklm.google.com") is True  # Issue #329
         assert _is_allowed_auth_domain(".googleusercontent.com") is True
 
     def test_accepts_all_regional_patterns(self):
@@ -879,6 +931,10 @@ class TestIsAllowedAuthDomain:
         from notebooklm.auth import _is_allowed_auth_domain
 
         assert _is_allowed_auth_domain("google.com.evil.sg") is False
+        assert _is_allowed_auth_domain(".mail.google.com") is False
+        assert _is_allowed_auth_domain(".evilnotebooklm.google.com") is False
+        assert _is_allowed_auth_domain(".google.com.evil") is False
+        assert _is_allowed_auth_domain(".evilnotebooklm.google.com.evil") is False
         assert _is_allowed_auth_domain(".not-google.com.sg") is False
         assert _is_allowed_auth_domain(".google.zz") is False  # Invalid ccTLD
 
@@ -1235,3 +1291,37 @@ class TestConvertRookiepyCookies:
         ]
         result = convert_rookiepy_cookies_to_storage_state(raw)
         assert len(result["cookies"]) == 1
+
+    def test_notebooklm_subdomain_included(self):
+        """Playwright-style NotebookLM subdomain cookies are kept."""
+        raw = [
+            {
+                "domain": ".notebooklm.google.com",
+                "name": "OSID",
+                "value": "x",
+                "path": "/",
+                "secure": True,
+                "expires": None,
+                "http_only": False,
+            }
+        ]
+        result = convert_rookiepy_cookies_to_storage_state(raw)
+        assert len(result["cookies"]) == 1
+        assert result["cookies"][0]["domain"] == ".notebooklm.google.com"
+        assert result["cookies"][0]["name"] == "OSID"
+
+    def test_other_google_subdomains_filtered(self):
+        """Auth conversion only keeps explicitly allowed Google subdomains."""
+        raw = [
+            {
+                "domain": ".mail.google.com",
+                "name": "OSID",
+                "value": "x",
+                "path": "/",
+                "secure": True,
+                "expires": None,
+                "http_only": False,
+            }
+        ]
+        result = convert_rookiepy_cookies_to_storage_state(raw)
+        assert result == {"cookies": [], "origins": []}
