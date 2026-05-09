@@ -407,6 +407,12 @@ class SourceSummary:
         }
 
 
+def _extract_notebook_sources_count(data: list[Any]) -> int:
+    """Extract the embedded source count from a notebook API payload."""
+    sources = data[1] if len(data) > 1 else None
+    return len(sources) if isinstance(sources, list) else 0
+
+
 @dataclass
 class Notebook:
     """Represents a NotebookLM notebook."""
@@ -429,7 +435,7 @@ class Notebook:
         """
         raw_title = data[0] if len(data) > 0 and isinstance(data[0], str) else ""
         title = raw_title.replace("thought\n", "").strip()
-        sources_count = len(data[1]) if len(data) > 1 and isinstance(data[1], list) else 0
+        sources_count = _extract_notebook_sources_count(data)
         notebook_id = data[2] if len(data) > 2 and isinstance(data[2], str) else ""
 
         created_at = None
