@@ -2161,11 +2161,13 @@ class TestPokeConcurrencyThrottling:
         _stale_storage(storage_path, age_seconds=120)
 
         gate = asyncio.Event()
+        entered = asyncio.Event()
         post_calls = 0
 
         async def slow_post(*_args, **_kwargs):
             nonlocal post_calls
             post_calls += 1
+            entered.set()
             await gate.wait()
             return httpx.Response(
                 200,
@@ -2176,14 +2178,15 @@ class TestPokeConcurrencyThrottling:
             client.post = slow_post  # type: ignore[method-assign]
             # L2-style: bare ``_rotate_cookies``, no per-profile async lock.
             task_l2 = asyncio.create_task(auth_module._rotate_cookies(client, storage_path))
-            for _ in range(50):
-                if post_calls >= 1:
-                    break
-                await asyncio.sleep(0.005)
+            # Wait for slow_post to enter via an event rather than a timed
+            # poll — busy-waits in the 100s of ms range can flake on loaded
+            # CI runners (notably Windows) where the first task switch after
+            # ``create_task`` doesn't always land in time.
+            await asyncio.wait_for(entered.wait(), timeout=2.0)
             assert post_calls == 1, "L2 task should be parked inside slow_post"
             # L1-style: ``_poke_session`` acquires the per-profile async lock
             # (uncontended because L2 didn't take it) and reads the per-profile
-            # timestamp. Stamped early, this short-circuits without a 2nd POST.
+            # timestamp. Claimed early, this short-circuits without a 2nd POST.
             await auth_module._poke_session(client, storage_path)
             assert (
                 post_calls == 1

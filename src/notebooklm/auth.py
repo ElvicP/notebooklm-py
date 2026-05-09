@@ -1302,16 +1302,15 @@ _KEEPALIVE_PRECISION_TOLERANCE = 2.0
 # stale lock could be returned to a new loop that happens to allocate at the
 # same address.
 #
-# ``_POKE_STATE_LOCK`` (sync ``threading.Lock``) protects three module-level
+# ``_POKE_STATE_LOCK`` (sync ``threading.Lock``) protects two module-level
 # operations that must be atomic across threads:
-#   1. ``_get_poke_lock``: get-or-create the per-(loop, profile) async lock.
+#   1. ``_get_poke_lock``: get-or-create the per-(loop, profile) async lock
+#      so two threads with their own loops don't race on dict insertion.
 #   2. ``_try_claim_rotation``: atomic check-and-stamp of the per-profile
 #      timestamp. Without this, two direct ``_rotate_cookies`` callers (e.g.
 #      two layer-2 keepalive loops on the same profile, or a layer-1 +
 #      layer-2 pair on different event loops) can each read a stale 0.0
 #      and both fire the POST.
-#   3. Reads of ``_LAST_POKE_ATTEMPT_MONOTONIC`` from layer-1's pre-claim
-#      fast-path inside ``_poke_session``.
 # It is held briefly, never across an ``await``, so it cannot deadlock against
 # any asyncio primitive.
 _POKE_STATE_LOCK = threading.Lock()
