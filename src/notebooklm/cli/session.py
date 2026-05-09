@@ -1193,9 +1193,23 @@ def register_session_commands(cli):
         """
         from ..auth import fetch_tokens_with_domains
 
+        # NOTEBOOKLM_AUTH_JSON has no writable backing store, so a keepalive
+        # poke would rotate SIDTS server-side but the rotated value would
+        # vanish on process exit — silent no-op in cron. Refuse with a clear
+        # message instead of pretending to succeed.
+        if os.environ.get("NOTEBOOKLM_AUTH_JSON"):
+            click.echo(
+                "Error: 'auth refresh' is incompatible with NOTEBOOKLM_AUTH_JSON. "
+                "The keepalive needs a writable storage_state.json to persist "
+                "rotated cookies. Either unset NOTEBOOKLM_AUTH_JSON for this "
+                "process and use a profile-backed storage file, or arrange for "
+                "the env var to be refreshed externally.",
+                err=True,
+            )
+            raise SystemExit(1)
+
         profile = ctx.obj.get("profile") if ctx.obj else None
-        has_env_var = bool(os.environ.get("NOTEBOOKLM_AUTH_JSON"))
-        storage_path = None if has_env_var else get_storage_path(profile=profile)
+        storage_path = get_storage_path(profile=profile)
 
         try:
             run_async(fetch_tokens_with_domains(storage_path, profile))
@@ -1204,5 +1218,4 @@ def register_session_commands(cli):
             raise SystemExit(1) from exc
 
         if not quiet:
-            target = "NOTEBOOKLM_AUTH_JSON" if has_env_var else f"refreshed: {storage_path}"
-            console.print(f"[green]ok[/green] {target}")
+            console.print(f"[green]ok[/green] refreshed: {storage_path}")

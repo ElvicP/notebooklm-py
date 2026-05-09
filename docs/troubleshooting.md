@@ -82,7 +82,7 @@ Google rotates `__Secure-1PSIDTS` (the freshness partner of `__Secure-1PSID`) on
    </dict>
    </plist>
    ```
-   Load: `launchctl load ~/Library/LaunchAgents/com.user.notebooklm-keepalive.plist`. Note that `StartInterval` does not fire while the Mac is asleep; that's fine — the next call after wake recovers via layer 1.
+   Load: `launchctl load ~/Library/LaunchAgents/com.user.notebooklm-keepalive.plist`. Note that `StartInterval` is wall-clock-based but launchd does not fire missed firings on wake from sleep — a Mac that sleeps for hours will skip every interval until the next active tick. Layer 1 (the per-call poke) covers the next user-driven call automatically; if the gap is long enough that SIDTS expired during sleep, layer 2 (`NOTEBOOKLM_REFRESH_CMD`) is your recovery.
 
    **Linux systemd user timer** (`~/.config/systemd/user/notebooklm-keepalive.{service,timer}`):
    ```ini
@@ -111,8 +111,9 @@ Google rotates `__Secure-1PSIDTS` (the freshness partner of `__Secure-1PSID`) on
 
    **POSIX cron** (works on Linux / macOS, simplest fallback):
    ```cron
-   */20 * * * * /abs/path/.venv/bin/notebooklm --profile work auth refresh --quiet >>~/.notebooklm-keepalive.log 2>&1
+   7,27,47 * * * * /abs/path/.venv/bin/notebooklm --profile work auth refresh --quiet >>~/.notebooklm-keepalive.log 2>&1
    ```
+   (Offset minutes — `7,27,47` instead of `*/20` — keeps you off the global cron fleet's `:00 / :20 / :40` collision marks; harmless either way for a single user, but a good habit if your cookie surface ever gets per-IP-rate-limited.)
 
    **Windows Task Scheduler** — create a task triggered "On a schedule, repeat every 20 minutes indefinitely", action "Start a program":
    - Program: `C:\path\to\.venv\Scripts\notebooklm.exe`
@@ -124,9 +125,11 @@ Google rotates `__Secure-1PSIDTS` (the freshness partner of `__Secure-1PSID`) on
    $action = New-ScheduledTaskAction -Execute "C:\path\to\.venv\Scripts\notebooklm.exe" `
      -Argument "--profile work auth refresh --quiet"
    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
-     -RepetitionInterval (New-TimeSpan -Minutes 20)
+     -RepetitionInterval (New-TimeSpan -Minutes 20) `
+     -RepetitionDuration ([TimeSpan]::FromDays(36500))
    Register-ScheduledTask -TaskName "NotebookLM Keepalive" -Action $action -Trigger $trigger
    ```
+   `-RepetitionDuration` is required; `-RepetitionInterval` alone defaults to a 24-hour repetition window and the task silently stops firing after a day. The `36500` days (~100 years) is the idiomatic "indefinitely" value for `New-ScheduledTaskTrigger`.
 
    **Docker / k8s** — run as a sidecar with an entrypoint loop, or a CronJob:
    ```yaml
@@ -134,7 +137,10 @@ Google rotates `__Secure-1PSIDTS` (the freshness partner of `__Secure-1PSID`) on
    kind: CronJob
    metadata: {name: notebooklm-keepalive}
    spec:
-     schedule: "*/20 * * * *"
+     schedule: "7,27,47 * * * *"
+     concurrencyPolicy: Forbid    # don't double-run if a fire is slow
+     successfulJobsHistoryLimit: 1
+     failedJobsHistoryLimit: 3
      jobTemplate:
        spec:
          template:
@@ -149,6 +155,7 @@ Google rotates `__Secure-1PSIDTS` (the freshness partner of `__Secure-1PSID`) on
              volumes:
                - {name: storage, persistentVolumeClaim: {claimName: notebooklm-storage}}
    ```
+   `concurrencyPolicy: Forbid` ensures a slow fire (e.g. a 60s `_run_refresh_cmd` timeout if you also have layer 2 wired up) doesn't overlap with the next 20-minute schedule and end up with two writers racing on `storage_state.json`.
 
    What L4 cannot fix: server-side revocation (account locked, password changed, force sign-out) — that's still layer 2's job. Long device sleep where the OS scheduler doesn't fire — when the device wakes, the next call recovers via layer 1 if SIDTS is still alive, otherwise via layer 2.
 

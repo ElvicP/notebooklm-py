@@ -2037,6 +2037,21 @@ class TestAuthRefreshCommand:
         assert result.exit_code == 1
         assert "ConnectTimeout" in result.output
 
+    def test_auth_refresh_rejects_env_var_auth(self, runner, monkeypatch, mock_storage_path):
+        """NOTEBOOKLM_AUTH_JSON has no writable backing store; refreshing it
+        would silently rotate SIDTS but persist nothing. Refuse loudly."""
+        monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON", '{"cookies":[]}')
+        with patch(
+            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        ) as mock_fetch:
+            result = runner.invoke(cli, ["auth", "refresh"])
+        assert result.exit_code == 1
+        assert "NOTEBOOKLM_AUTH_JSON" in result.output
+        assert "incompatible" in result.output.lower()
+        # Critical: no token fetch should run when the env var is set —
+        # otherwise we'd be doing a server-side rotation that gets lost.
+        mock_fetch.assert_not_awaited()
+
     def test_auth_refresh_propagates_global_profile_flag(self, runner, tmp_path):
         """`notebooklm --profile work auth refresh` resolves the work profile.
 
