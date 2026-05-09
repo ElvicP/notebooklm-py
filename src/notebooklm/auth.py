@@ -1000,7 +1000,7 @@ def save_cookies_to_storage(cookie_jar: httpx.Cookies, path: Path | None = None)
                     suffix=".tmp",
                     delete=False,
                 ) as temp_file:
-                    temp_file.write(json.dumps(storage_data, indent=2))
+                    temp_file.write(json.dumps(storage_data, indent=2, ensure_ascii=False))
                     temp_path = Path(temp_file.name)
                 os.chmod(temp_path, 0o600)
                 temp_path.replace(path)

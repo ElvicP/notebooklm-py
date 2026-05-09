@@ -439,7 +439,7 @@ class TestSaveCookiesUnification:
         lock_held_during_save: list[bool] = []
 
         def spy(jar, path):
-            # If the in-process lock is properly held, this assertion is true.
+            """Record whether ``_save_lock`` is held at the moment of the disk write."""
             lock_held_during_save.append(core._save_lock.locked())
 
         monkeypatch.setattr("notebooklm._core.save_cookies_to_storage", spy)
@@ -492,7 +492,7 @@ class TestSaveCookiesUnification:
         save_calls: list[bool] = []
 
         def spy(jar, path):
-            # Lock must be held when refresh_auth's save fires
+            """Record whether ``_save_lock`` is held when refresh_auth's save fires."""
             save_calls.append(client._core._save_lock.locked())
 
         monkeypatch.setattr("notebooklm._core.save_cookies_to_storage", spy)
@@ -534,6 +534,7 @@ class TestCrossProcessFileLock:
         original_flock = fcntl.flock
 
         def spy_flock(fd, op):
+            """Record each ``fcntl.flock`` operation while still performing it."""
             flock_calls.append(op)
             return original_flock(fd, op)
 

@@ -249,6 +249,7 @@ class ClientCore:
         snapshot = httpx.Cookies(jar)
 
         def _save(s=snapshot, p=effective_path, lock=self._save_lock) -> None:
+            """Worker-thread save: hold the in-process lock around the disk write."""
             with lock:
                 save_cookies_to_storage(s, p)
 
