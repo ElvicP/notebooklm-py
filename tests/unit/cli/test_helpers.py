@@ -1092,6 +1092,11 @@ class TestImportWithRetry:
 
         assert imported == []
         assert client.research.import_sources.await_count == 2
+        assert client.sources.list.await_count == 3
+        assert all(
+            awaited_call.kwargs.get("strict") is True
+            for awaited_call in client.sources.list.await_args_list
+        )
         assert client.research.import_sources.await_args_list[0].args[2] == sources
         assert client.research.import_sources.await_args_list[1].args[2] == [
             {"url": "https://two.example.com", "title": "Source 2"},

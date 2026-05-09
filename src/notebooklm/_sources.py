@@ -59,7 +59,7 @@ class SourcesAPI:
         strict: bool,
         error_detail: str = "API response structure changed",
     ) -> list[Source]:
-        logger.warning(message, notebook_id, *log_args)
+        logger.warning("SourcesAPI.list: " + message, notebook_id, *log_args)
         if strict:
             raise RPCError(f"Could not list sources for {notebook_id}: {error_detail}")
         return []
