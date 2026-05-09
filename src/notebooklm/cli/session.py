@@ -1164,15 +1164,23 @@ def register_session_commands(cli):
     )
     @click.pass_context
     def auth_refresh(ctx, quiet):
-        """Refresh stored cookies by poking accounts.google.com.
+        """Refresh stored cookies by exercising the auth path once.
 
-        One-shot keepalive: opens a session, GETs accounts.google.com to
-        elicit __Secure-1PSIDTS rotation, persists the rotated cookies to
-        storage_state.json, and exits. Designed to be scheduled by the OS
-        (launchd / systemd / cron) to keep an idle profile from staling out.
+        One-shot keepalive: opens a session, runs the layer-1 poke against
+        ``accounts.google.com`` to elicit ``__Secure-1PSIDTS`` rotation,
+        fetches CSRF + session ID from ``notebooklm.google.com`` (discarded;
+        their side effect is the cookie jar), and persists the rotated jar
+        to ``storage_state.json`` on close. Designed to be scheduled by the
+        OS (launchd / systemd / cron) so that an otherwise-idle profile
+        does not stale out between user-driven calls.
 
-        Cadence: comfortably below the SIDTS server window (~30 min observed).
-        15-20 minutes is a safe interval.
+        Cadence: 15-20 minutes is the recommended interval. Tighter is
+        wasteful; significantly looser may cross the SIDTS server-side
+        validity window for your account/region.
+
+        Transient errors (e.g. ``httpx.RequestError`` from a flaky network)
+        are surfaced as exit 1 rather than retried in-process; the OS
+        scheduler's next firing is the retry mechanism.
 
         \b
         Examples:
@@ -1192,7 +1200,7 @@ def register_session_commands(cli):
         try:
             run_async(fetch_tokens_with_domains(storage_path, profile))
         except Exception as exc:
-            click.echo(f"Error: {exc}", err=True)
+            click.echo(f"Error: {type(exc).__name__}: {exc}", err=True)
             raise SystemExit(1) from exc
 
         if not quiet:

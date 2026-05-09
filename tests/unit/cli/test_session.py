@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import click
+import httpx
 import pytest
 from click.testing import CliRunner
 
@@ -2024,3 +2025,45 @@ class TestAuthRefreshCommand:
             result = runner.invoke(cli, ["auth", "refresh"])
         assert result.exit_code == 1
         assert "authentication expired" in result.output.lower()
+
+    def test_auth_refresh_failure_includes_exception_class(self, runner, mock_storage_path):
+        """Sparse exception messages (e.g. httpx.ConnectTimeout) still get a
+        diagnostic class name in the cron log."""
+        with patch(
+            "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+        ) as mock_fetch:
+            mock_fetch.side_effect = httpx.ConnectTimeout("")  # empty message
+            result = runner.invoke(cli, ["auth", "refresh"])
+        assert result.exit_code == 1
+        assert "ConnectTimeout" in result.output
+
+    def test_auth_refresh_propagates_global_profile_flag(self, runner, tmp_path):
+        """`notebooklm --profile work auth refresh` resolves the work profile.
+
+        Guards against the launchd/cron case where the global -p flag must
+        flow through ctx.obj into fetch_tokens_with_domains.
+        """
+        work_storage = tmp_path / "work_storage_state.json"
+        work_storage.write_text(
+            json.dumps({"cookies": [{"name": "SID", "value": "y", "domain": ".google.com"}]})
+        )
+
+        def fake_storage_path(profile=None):
+            assert profile == "work", f"expected profile='work', got {profile!r}"
+            return work_storage
+
+        with (
+            patch("notebooklm.cli.session.get_storage_path", side_effect=fake_storage_path),
+            patch(
+                "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+            ) as mock_fetch,
+        ):
+            mock_fetch.return_value = ("csrf_ok", "session_ok")
+            result = runner.invoke(cli, ["--profile", "work", "auth", "refresh"])
+
+        assert result.exit_code == 0, result.output
+        # fetch_tokens_with_domains(path, profile) — verify the work profile
+        # was threaded through to the auth layer.
+        called_args = mock_fetch.call_args
+        assert called_args.args[0] == work_storage
+        assert called_args.args[1] == "work"

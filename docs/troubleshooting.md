@@ -60,7 +60,7 @@ Google rotates `__Secure-1PSIDTS` (the freshness partner of `__Secure-1PSID`) on
    notebooklm --profile work auth refresh  # against a named profile
    ```
 
-   Internally it opens a client (which triggers the layer-1 poke against `accounts.google.com`) and persists rotated cookies to `storage_state.json`. Cadence should be comfortably below the SIDTS server window — 15-20 minutes is a safe choice (the observed window is ~30 min).
+   Internally it opens a client (which triggers the layer-1 poke against `accounts.google.com` and a follow-on GET to `notebooklm.google.com` whose CSRF/session response is discarded — only the cookie-jar side effect matters) and persists rotated cookies to `storage_state.json`. Recommended cadence is **15-20 minutes**; tighter is wasteful, significantly looser may cross the SIDTS server-side validity window for your account/region.
 
    **macOS launchd** (`~/Library/LaunchAgents/com.user.notebooklm-keepalive.plist`):
    ```xml
