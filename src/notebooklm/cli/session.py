@@ -141,7 +141,9 @@ def _handle_rookiepy_error(e: Exception, browser_name: str) -> None:
         console.print(f"[red]Failed to read cookies from {browser_name}:[/red] {e}")
 
 
-def _login_with_browser_cookies(storage_path: Path, browser_name: str) -> None:
+def _login_with_browser_cookies(
+    storage_path: Path, browser_name: str, profile: str | None = None
+) -> None:
     """Extract Google cookies from an installed browser via rookiepy.
 
     Args:
@@ -231,7 +233,7 @@ def _login_with_browser_cookies(storage_path: Path, browser_name: str) -> None:
 
     # Verify that cookies work.
     try:
-        run_async(fetch_tokens_with_domains(storage_path))
+        run_async(fetch_tokens_with_domains(storage_path, profile))
         logger.info("Cookies verified successfully")
         console.print("[green]Cookies verified successfully.[/green]")
     except ValueError as e:
@@ -422,7 +424,8 @@ def register_session_commands(cli):
         default=False,
         help="Start with a clean browser session (deletes cached browser profile). Use to switch Google accounts.",
     )
-    def login(storage, browser, browser_cookies, fresh):
+    @click.pass_context
+    def login(ctx, storage, browser, browser_cookies, fresh):
         """Log in to NotebookLM via browser.
 
         Opens a browser window for Google login. After logging in,
@@ -452,11 +455,25 @@ def register_session_commands(cli):
                     "[yellow]Warning: --fresh has no effect with --browser-cookies "
                     "(no browser profile is used).[/yellow]"
                 )
-            resolved_storage = Path(storage) if storage else get_storage_path()
-            _login_with_browser_cookies(resolved_storage, browser_cookies)
+            profile = ctx.obj.get("profile") if ctx.obj else None
+            resolved_storage = (
+                Path(storage)
+                if storage
+                else get_storage_path(profile=profile)
+                if profile
+                else get_storage_path()
+            )
+            _login_with_browser_cookies(resolved_storage, browser_cookies, profile)
             return
 
-        storage_path = Path(storage) if storage else get_storage_path()
+        profile = ctx.obj.get("profile") if ctx.obj else None
+        storage_path = (
+            Path(storage)
+            if storage
+            else get_storage_path(profile=profile)
+            if profile
+            else get_storage_path()
+        )
         browser_profile = get_browser_profile_dir()
 
         if fresh and browser_profile.exists():
@@ -942,7 +959,8 @@ def register_session_commands(cli):
         "--test", "test_fetch", is_flag=True, help="Test token fetch (makes network request)"
     )
     @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
-    def auth_check(test_fetch, json_output):
+    @click.pass_context
+    def auth_check(ctx, test_fetch, json_output):
         """Check authentication status and diagnose issues.
 
         Validates that authentication is properly configured by checking:
@@ -962,7 +980,8 @@ def register_session_commands(cli):
         """
         from ..auth import extract_cookies_from_storage, fetch_tokens_with_domains
 
-        storage_path = get_storage_path()
+        profile = ctx.obj.get("profile") if ctx.obj else None
+        storage_path = get_storage_path(profile=profile) if profile else get_storage_path()
         has_env_var = bool(os.environ.get("NOTEBOOKLM_AUTH_JSON"))
         has_home_env = bool(os.environ.get("NOTEBOOKLM_HOME"))
 
@@ -1039,7 +1058,7 @@ def register_session_commands(cli):
         if test_fetch:
             try:
                 token_path = None if has_env_var else storage_path
-                csrf, session_id = run_async(fetch_tokens_with_domains(token_path))
+                csrf, session_id = run_async(fetch_tokens_with_domains(token_path, profile))
                 checks["token_fetch"] = True
                 details["csrf_length"] = len(csrf)
                 details["session_id_length"] = len(session_id)

@@ -32,7 +32,9 @@ import json
 import logging
 import os
 import re
+import subprocess
 import tempfile
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeAlias
@@ -229,8 +231,6 @@ class AuthTokens:
             auth = await AuthTokens.from_storage(profile="work")
         """
         if path is None and (profile is not None or "NOTEBOOKLM_AUTH_JSON" not in os.environ):
-            from .paths import get_storage_path
-
             path = get_storage_path(profile=profile)
 
         storage_state = _load_storage_state(path)
@@ -238,7 +238,7 @@ class AuthTokens:
 
         # Build domain-preserving jar and use it for token fetch
         jar = build_cookie_jar(cookies=cookies)
-        csrf_token, session_id = await _fetch_tokens_with_refresh(jar, path, profile)
+        csrf_token, session_id, _ = await _fetch_tokens_with_refresh(jar, path, profile)
 
         # Persist any refreshed cookies from the token fetch
         save_cookies_to_storage(jar, path)
@@ -1021,6 +1021,13 @@ def _replace_cookie_jar(target: httpx.Cookies, source: httpx.Cookies) -> None:
 
 NOTEBOOKLM_REFRESH_CMD_ENV = "NOTEBOOKLM_REFRESH_CMD"
 _REFRESH_ATTEMPTED_ENV = "_NOTEBOOKLM_REFRESH_ATTEMPTED"
+# The ContextVar prevents same-task retry loops in the parent process. The env
+# flag is passed only to child refresh commands so recursive CLI calls skip refresh.
+_REFRESH_ATTEMPTED_CONTEXT: ContextVar[bool] = ContextVar(
+    "_REFRESH_ATTEMPTED_CONTEXT", default=False
+)
+_REFRESH_LOCK = asyncio.Lock()
+_REFRESH_GENERATIONS: dict[str, int] = {}
 _AUTH_ERROR_SIGNALS = (
     "authentication expired",
     "redirected to",
@@ -1030,7 +1037,7 @@ _AUTH_ERROR_SIGNALS = (
 
 def _should_try_refresh(err: Exception) -> bool:
     """True when an auth failure should trigger NOTEBOOKLM_REFRESH_CMD."""
-    if os.environ.get(_REFRESH_ATTEMPTED_ENV):
+    if _REFRESH_ATTEMPTED_CONTEXT.get() or os.environ.get(_REFRESH_ATTEMPTED_ENV) == "1":
         return False
     if not os.environ.get(NOTEBOOKLM_REFRESH_CMD_ENV):
         return False
@@ -1039,7 +1046,7 @@ def _should_try_refresh(err: Exception) -> bool:
 
 
 async def _run_refresh_cmd(storage_path: Path | None = None, profile: str | None = None) -> None:
-    """Run ``NOTEBOOKLM_REFRESH_CMD`` once per process to refresh stored cookies.
+    """Run ``NOTEBOOKLM_REFRESH_CMD`` to refresh stored cookies.
 
     Raises:
         RuntimeError: If the refresh command is missing, times out, or exits
@@ -1049,33 +1056,28 @@ async def _run_refresh_cmd(storage_path: Path | None = None, profile: str | None
     if not cmd:
         raise RuntimeError(f"{NOTEBOOKLM_REFRESH_CMD_ENV} is not set; cannot refresh cookies.")
     refresh_env = os.environ.copy()
+    refresh_env[_REFRESH_ATTEMPTED_ENV] = "1"
     refresh_env["NOTEBOOKLM_REFRESH_PROFILE"] = resolve_profile(profile)
     refresh_env["NOTEBOOKLM_REFRESH_STORAGE_PATH"] = str(
         storage_path or get_storage_path(profile=profile)
     )
-    os.environ[_REFRESH_ATTEMPTED_ENV] = "1"
     try:
-        process = await asyncio.create_subprocess_shell(
+        result = await asyncio.to_thread(
+            subprocess.run,
             cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
             env=refresh_env,
         )
-    except OSError as refresh_err:
+    except (subprocess.TimeoutExpired, OSError) as refresh_err:
         raise RuntimeError(
             f"{NOTEBOOKLM_REFRESH_CMD_ENV} failed to execute: {refresh_err}"
         ) from refresh_err
-    try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
-    except asyncio.TimeoutError as refresh_err:
-        process.kill()
-        await process.communicate()
-        raise RuntimeError(
-            f"{NOTEBOOKLM_REFRESH_CMD_ENV} failed to execute: {refresh_err}"
-        ) from refresh_err
-    if process.returncode != 0:
-        output = (stderr or stdout).decode(errors="replace").strip()
-        raise RuntimeError(f"{NOTEBOOKLM_REFRESH_CMD_ENV} exited {process.returncode}: {output}")
+    if result.returncode != 0:
+        output = (result.stderr or result.stdout).strip()
+        raise RuntimeError(f"{NOTEBOOKLM_REFRESH_CMD_ENV} exited {result.returncode}: {output}")
     logger.info("NotebookLM cookies refreshed via %s", NOTEBOOKLM_REFRESH_CMD_ENV)
 
 
@@ -1083,10 +1085,11 @@ async def _fetch_tokens_with_refresh(
     cookie_jar: httpx.Cookies,
     storage_path: Path | None = None,
     profile: str | None = None,
-) -> tuple[str, str]:
+) -> tuple[str, str, bool]:
     """Fetch tokens, optionally running NOTEBOOKLM_REFRESH_CMD on auth expiry."""
     try:
-        return await _fetch_tokens_with_jar(cookie_jar)
+        csrf, session_id = await _fetch_tokens_with_jar(cookie_jar)
+        return csrf, session_id, False
     except ValueError as err:
         if not _should_try_refresh(err):
             raise
@@ -1095,12 +1098,21 @@ async def _fetch_tokens_with_refresh(
             err,
             NOTEBOOKLM_REFRESH_CMD_ENV,
         )
-        await _run_refresh_cmd(storage_path, profile)
-        fresh_jar = build_httpx_cookies_from_storage(storage_path)
-        _replace_cookie_jar(cookie_jar, fresh_jar)
-        tokens = await _fetch_tokens_with_jar(cookie_jar)
-        os.environ.pop(_REFRESH_ATTEMPTED_ENV, None)
-        return tokens
+        refresh_storage_path = storage_path or get_storage_path(profile=profile)
+        refresh_key = str(refresh_storage_path)
+        refresh_generation = _REFRESH_GENERATIONS.get(refresh_key, 0)
+        refresh_token = _REFRESH_ATTEMPTED_CONTEXT.set(True)
+        try:
+            async with _REFRESH_LOCK:
+                if _REFRESH_GENERATIONS.get(refresh_key, 0) == refresh_generation:
+                    await _run_refresh_cmd(refresh_storage_path, profile)
+                    _REFRESH_GENERATIONS[refresh_key] = refresh_generation + 1
+                fresh_jar = build_httpx_cookies_from_storage(refresh_storage_path)
+                _replace_cookie_jar(cookie_jar, fresh_jar)
+            csrf, session_id = await _fetch_tokens_with_jar(cookie_jar)
+            return csrf, session_id, True
+        finally:
+            _REFRESH_ATTEMPTED_CONTEXT.reset(refresh_token)
 
 
 def _cookie_map_from_jar(cookie_jar: httpx.Cookies) -> DomainCookieMap:
@@ -1108,7 +1120,10 @@ def _cookie_map_from_jar(cookie_jar: httpx.Cookies) -> DomainCookieMap:
     return {
         (cookie.name, cookie.domain): cookie.value
         for cookie in cookie_jar.jar
-        if cookie.name and cookie.domain and _is_allowed_auth_domain(cookie.domain)
+        if cookie.name
+        and cookie.domain
+        and cookie.value is not None
+        and _is_allowed_auth_domain(cookie.domain)
     }
 
 
@@ -1117,7 +1132,7 @@ def _update_cookie_input(target: CookieInput, fresh: DomainCookieMap) -> None:
     use_domain_keys = any(isinstance(key, tuple) for key in target)
     target.clear()
     if use_domain_keys:
-        target.update(fresh)  # type: ignore[arg-type]
+        target.update(fresh)
     else:
         target.update(flatten_cookie_map(fresh))  # type: ignore[arg-type]
 
@@ -1196,10 +1211,11 @@ async def fetch_tokens(
         RuntimeError: If ``NOTEBOOKLM_REFRESH_CMD`` is set but fails
     """
     jar = build_cookie_jar(cookies=cookies, storage_path=storage_path)
-    result = await _fetch_tokens_with_refresh(jar, storage_path, profile)
-    fresh = _cookie_map_from_jar(jar)
-    _update_cookie_input(cookies, fresh)
-    return result
+    csrf, session_id, refreshed = await _fetch_tokens_with_refresh(jar, storage_path, profile)
+    if refreshed:
+        fresh = _cookie_map_from_jar(jar)
+        _update_cookie_input(cookies, fresh)
+    return csrf, session_id
 
 
 async def fetch_tokens_with_domains(
@@ -1224,7 +1240,9 @@ async def fetch_tokens_with_domains(
         ValueError: If tokens cannot be extracted from response.
         RuntimeError: If ``NOTEBOOKLM_REFRESH_CMD`` is set but fails.
     """
+    if path is None and (profile is not None or "NOTEBOOKLM_AUTH_JSON" not in os.environ):
+        path = get_storage_path(profile=profile)
     jar = build_httpx_cookies_from_storage(path)
-    result = await _fetch_tokens_with_refresh(jar, path, profile)
+    csrf, session_id, _ = await _fetch_tokens_with_refresh(jar, path, profile)
     save_cookies_to_storage(jar, path)
-    return result
+    return csrf, session_id

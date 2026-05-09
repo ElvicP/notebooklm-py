@@ -2,6 +2,9 @@
 
 import json
 import os
+import shlex
+import subprocess
+import sys
 from pathlib import Path
 
 import httpx
@@ -647,6 +650,23 @@ class TestFetchTokens:
         assert session_id == "session_id_456"
 
     @pytest.mark.asyncio
+    async def test_fetch_tokens_success_preserves_input_without_refresh(
+        self, httpx_mock: HTTPXMock
+    ):
+        """Successful fetch without refresh does not rewrite caller cookies."""
+        html = '"SNlM0e":"csrf_ok" "FdrFJe":"sess_ok"'
+        httpx_mock.add_response(url="https://notebooklm.google.com/", content=html.encode())
+
+        cookies = {("SID", ".google.com"): "test_sid", ("APP_COOKIE", "example.com"): "keep"}
+        original = cookies.copy()
+
+        csrf, session_id = await fetch_tokens(cookies)
+
+        assert csrf == "csrf_ok"
+        assert session_id == "sess_ok"
+        assert cookies == original
+
+    @pytest.mark.asyncio
     async def test_fetch_tokens_redirect_to_login(self, httpx_mock: HTTPXMock):
         """Test raises error when redirected to login page."""
         httpx_mock.add_response(
@@ -808,6 +828,12 @@ class TestFetchTokensAutoRefresh:
         monkeypatch.delenv("_NOTEBOOKLM_REFRESH_ATTEMPTED", raising=False)
         monkeypatch.delenv("NOTEBOOKLM_REFRESH_CMD", raising=False)
 
+    @staticmethod
+    def _python_refresh_cmd(script: Path) -> str:
+        if os.name != "nt":
+            return shlex.join([sys.executable, str(script)])
+        return subprocess.list2cmdline([sys.executable, str(script)])
+
     @pytest.mark.asyncio
     async def test_no_refresh_when_env_unset(self, httpx_mock: HTTPXMock):
         """Auth error propagates unchanged when NOTEBOOKLM_REFRESH_CMD is not set."""
@@ -834,17 +860,23 @@ class TestFetchTokensAutoRefresh:
         storage_file.write_text(
             json.dumps({"cookies": [{"name": "SID", "value": "stale", "domain": ".google.com"}]})
         )
-        monkeypatch.setattr("notebooklm.auth.get_storage_path", lambda: storage_file)
+        monkeypatch.setattr("notebooklm.auth.get_storage_path", lambda profile=None: storage_file)
 
         # Refresh command rewrites the file with a fresh SID
         fresh_file = tmp_path / "fresh_cookies.json"
         fresh_file.write_text(
             json.dumps({"cookies": [{"name": "SID", "value": "fresh", "domain": ".google.com"}]})
         )
-        refresh_script = tmp_path / "refresh.sh"
-        refresh_script.write_text(f"#!/usr/bin/env bash\ncp {fresh_file} {storage_file}\n")
-        refresh_script.chmod(0o755)
-        monkeypatch.setenv("NOTEBOOKLM_REFRESH_CMD", str(refresh_script))
+        refresh_script = tmp_path / "refresh.py"
+        refresh_script.write_text(
+            "\n".join(
+                [
+                    "import shutil",
+                    f"shutil.copyfile({str(fresh_file)!r}, {str(storage_file)!r})",
+                ]
+            )
+        )
+        monkeypatch.setenv("NOTEBOOKLM_REFRESH_CMD", self._python_refresh_cmd(refresh_script))
 
         # First HTTP call: auth redirect
         httpx_mock.add_response(
@@ -869,19 +901,183 @@ class TestFetchTokensAutoRefresh:
         assert cookies["SID"] == "fresh"
 
     @pytest.mark.asyncio
+    async def test_refresh_reloads_explicit_storage_path(
+        self, tmp_path, monkeypatch, httpx_mock: HTTPXMock
+    ):
+        """Refresh reloads from the caller's explicit storage path."""
+        storage_file = tmp_path / "custom_storage_state.json"
+        storage_file.write_text(
+            json.dumps({"cookies": [{"name": "SID", "value": "stale", "domain": ".google.com"}]})
+        )
+
+        fresh_file = tmp_path / "fresh_cookies.json"
+        fresh_file.write_text(
+            json.dumps({"cookies": [{"name": "SID", "value": "fresh", "domain": ".google.com"}]})
+        )
+        refresh_script = tmp_path / "refresh.py"
+        refresh_script.write_text(
+            "\n".join(
+                [
+                    "import shutil",
+                    f"shutil.copyfile({str(fresh_file)!r}, {str(storage_file)!r})",
+                ]
+            )
+        )
+        monkeypatch.setenv("NOTEBOOKLM_REFRESH_CMD", self._python_refresh_cmd(refresh_script))
+
+        httpx_mock.add_response(
+            url="https://notebooklm.google.com/",
+            status_code=302,
+            headers={"Location": "https://accounts.google.com/signin"},
+        )
+        httpx_mock.add_response(
+            url="https://accounts.google.com/signin",
+            content=b"<html>Login</html>",
+        )
+        html = '"SNlM0e":"csrf_ok" "FdrFJe":"sess_ok"'
+        httpx_mock.add_response(url="https://notebooklm.google.com/", content=html.encode())
+
+        cookies = {"SID": "stale"}
+        csrf, session_id = await fetch_tokens(cookies, storage_file)
+
+        assert csrf == "csrf_ok"
+        assert session_id == "sess_ok"
+        assert cookies["SID"] == "fresh"
+
+    @pytest.mark.asyncio
+    async def test_refresh_command_receives_profile_storage_path(
+        self, tmp_path, monkeypatch, httpx_mock: HTTPXMock
+    ):
+        """Profile-based auth exposes the profile storage path to refresh commands."""
+        monkeypatch.setenv("NOTEBOOKLM_HOME", str(tmp_path))
+        storage_file = tmp_path / "profiles" / "work" / "storage_state.json"
+        storage_file.parent.mkdir(parents=True)
+        storage_file.write_text(
+            json.dumps({"cookies": [{"name": "SID", "value": "stale", "domain": ".google.com"}]})
+        )
+
+        refresh_script = tmp_path / "refresh.py"
+        refresh_script.write_text(
+            "\n".join(
+                [
+                    "import json",
+                    "import os",
+                    "from pathlib import Path",
+                    "assert os.environ['_NOTEBOOKLM_REFRESH_ATTEMPTED'] == '1'",
+                    "assert os.environ['NOTEBOOKLM_REFRESH_PROFILE'] == 'work'",
+                    "storage = Path(os.environ['NOTEBOOKLM_REFRESH_STORAGE_PATH'])",
+                    f"assert storage == Path({str(storage_file)!r})",
+                    "storage.write_text(json.dumps({'cookies': [",
+                    "    {'name': 'SID', 'value': 'fresh', 'domain': '.google.com'},",
+                    "]}))",
+                ]
+            )
+        )
+        monkeypatch.setenv("NOTEBOOKLM_REFRESH_CMD", self._python_refresh_cmd(refresh_script))
+
+        httpx_mock.add_response(
+            url="https://notebooklm.google.com/",
+            status_code=302,
+            headers={"Location": "https://accounts.google.com/signin"},
+        )
+        httpx_mock.add_response(
+            url="https://accounts.google.com/signin",
+            content=b"<html>Login</html>",
+        )
+        html = '"SNlM0e":"csrf_ok" "FdrFJe":"sess_ok"'
+        httpx_mock.add_response(url="https://notebooklm.google.com/", content=html.encode())
+
+        tokens = await AuthTokens.from_storage(profile="work")
+
+        assert tokens.flat_cookies["SID"] == "fresh"
+        assert tokens.csrf_token == "csrf_ok"
+        assert tokens.session_id == "sess_ok"
+        assert "_NOTEBOOKLM_REFRESH_ATTEMPTED" not in os.environ
+
+    @pytest.mark.asyncio
+    async def test_fetch_tokens_with_profile_reloads_profile_storage_path(
+        self, tmp_path, monkeypatch, httpx_mock: HTTPXMock
+    ):
+        """fetch_tokens(profile=...) reloads from that profile's storage after refresh."""
+        monkeypatch.setenv("NOTEBOOKLM_HOME", str(tmp_path))
+        storage_file = tmp_path / "profiles" / "work" / "storage_state.json"
+        storage_file.parent.mkdir(parents=True)
+        storage_file.write_text(
+            json.dumps({"cookies": [{"name": "SID", "value": "stale", "domain": ".google.com"}]})
+        )
+
+        refresh_script = tmp_path / "refresh.py"
+        refresh_script.write_text(
+            "\n".join(
+                [
+                    "import json",
+                    "import os",
+                    "from pathlib import Path",
+                    "assert os.environ['_NOTEBOOKLM_REFRESH_ATTEMPTED'] == '1'",
+                    "assert os.environ['NOTEBOOKLM_REFRESH_PROFILE'] == 'work'",
+                    "storage = Path(os.environ['NOTEBOOKLM_REFRESH_STORAGE_PATH'])",
+                    f"assert storage == Path({str(storage_file)!r})",
+                    "storage.write_text(json.dumps({'cookies': [",
+                    "    {'name': 'SID', 'value': 'fresh', 'domain': '.google.com'},",
+                    "]}))",
+                ]
+            )
+        )
+        monkeypatch.setenv("NOTEBOOKLM_REFRESH_CMD", self._python_refresh_cmd(refresh_script))
+
+        httpx_mock.add_response(
+            url="https://notebooklm.google.com/",
+            status_code=302,
+            headers={"Location": "https://accounts.google.com/signin"},
+        )
+        httpx_mock.add_response(
+            url="https://accounts.google.com/signin",
+            content=b"<html>Login</html>",
+        )
+        html = '"SNlM0e":"csrf_ok" "FdrFJe":"sess_ok"'
+        httpx_mock.add_response(url="https://notebooklm.google.com/", content=html.encode())
+
+        cookies = {"SID": "stale"}
+        csrf, session_id = await fetch_tokens(cookies, profile="work")
+
+        assert csrf == "csrf_ok"
+        assert session_id == "sess_ok"
+        assert cookies["SID"] == "fresh"
+        assert "_NOTEBOOKLM_REFRESH_ATTEMPTED" not in os.environ
+
+    @pytest.mark.asyncio
+    async def test_fetch_tokens_with_domains_loads_profile_storage_path(
+        self, tmp_path, monkeypatch, httpx_mock: HTTPXMock
+    ):
+        """fetch_tokens_with_domains(profile=...) loads that profile's storage."""
+        monkeypatch.setenv("NOTEBOOKLM_HOME", str(tmp_path))
+        storage_file = tmp_path / "profiles" / "work" / "storage_state.json"
+        storage_file.parent.mkdir(parents=True)
+        storage_file.write_text(
+            json.dumps({"cookies": [{"name": "SID", "value": "fresh", "domain": ".google.com"}]})
+        )
+
+        html = '"SNlM0e":"csrf_ok" "FdrFJe":"sess_ok"'
+        httpx_mock.add_response(url="https://notebooklm.google.com/", content=html.encode())
+
+        csrf, session_id = await fetch_tokens_with_domains(profile="work")
+
+        assert csrf == "csrf_ok"
+        assert session_id == "sess_ok"
+
+    @pytest.mark.asyncio
     async def test_refresh_does_not_loop(self, tmp_path, monkeypatch, httpx_mock: HTTPXMock):
         """If refresh fails to fix auth, second failure propagates (no infinite loop)."""
         storage_file = tmp_path / "storage_state.json"
         storage_file.write_text(
             json.dumps({"cookies": [{"name": "SID", "value": "stale", "domain": ".google.com"}]})
         )
-        monkeypatch.setattr("notebooklm.auth.get_storage_path", lambda: storage_file)
+        monkeypatch.setattr("notebooklm.auth.get_storage_path", lambda profile=None: storage_file)
 
         # Refresh is a no-op (still stale after)
-        refresh_script = tmp_path / "refresh.sh"
-        refresh_script.write_text("#!/usr/bin/env bash\nexit 0\n")
-        refresh_script.chmod(0o755)
-        monkeypatch.setenv("NOTEBOOKLM_REFRESH_CMD", str(refresh_script))
+        refresh_script = tmp_path / "refresh.py"
+        refresh_script.write_text("")
+        monkeypatch.setenv("NOTEBOOKLM_REFRESH_CMD", self._python_refresh_cmd(refresh_script))
 
         # Both attempts hit the same redirect
         for _ in range(2):
@@ -897,16 +1093,18 @@ class TestFetchTokensAutoRefresh:
 
         with pytest.raises(ValueError, match="Authentication expired"):
             await fetch_tokens({"SID": "stale"})
+        assert "_NOTEBOOKLM_REFRESH_ATTEMPTED" not in os.environ
 
     @pytest.mark.asyncio
     async def test_refresh_cmd_nonzero_exit_becomes_runtime_error(
         self, tmp_path, monkeypatch, httpx_mock: HTTPXMock
     ):
         """Refresh command failure surfaces as RuntimeError, not silent auth error."""
-        refresh_script = tmp_path / "refresh.sh"
-        refresh_script.write_text("#!/usr/bin/env bash\necho 'vault unavailable' >&2\nexit 1\n")
-        refresh_script.chmod(0o755)
-        monkeypatch.setenv("NOTEBOOKLM_REFRESH_CMD", str(refresh_script))
+        refresh_script = tmp_path / "refresh.py"
+        refresh_script.write_text(
+            "import sys\nprint('vault unavailable', file=sys.stderr)\nsys.exit(1)\n"
+        )
+        monkeypatch.setenv("NOTEBOOKLM_REFRESH_CMD", self._python_refresh_cmd(refresh_script))
 
         httpx_mock.add_response(
             url="https://notebooklm.google.com/",
@@ -920,6 +1118,7 @@ class TestFetchTokensAutoRefresh:
 
         with pytest.raises(RuntimeError, match="exited 1"):
             await fetch_tokens({"SID": "stale"})
+        assert "_NOTEBOOKLM_REFRESH_ATTEMPTED" not in os.environ
 
 
 class TestAuthTokensFromStorage:

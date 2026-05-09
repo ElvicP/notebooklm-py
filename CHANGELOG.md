@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Auto-refresh on auth expiry** - `fetch_tokens` now optionally runs a user-provided refresh command when a Google session cookie has expired, reloads cookies from storage, and retries once. Opt in by setting the `NOTEBOOKLM_REFRESH_CMD` environment variable to a script that rewrites `~/.notebooklm/storage_state.json` (e.g. a sync script reading from a cookie vault). Covers every CLI entry point without changing the public API. A process-scoped flag prevents retry loops.
+- **Auto-refresh on auth expiry** - `fetch_tokens` now optionally runs a user-provided shell command when a Google session cookie has expired, reloads cookies from the same storage path, and retries once. Opt in by setting the `NOTEBOOKLM_REFRESH_CMD` environment variable to a command that rewrites `storage_state.json` (e.g. a sync script reading from a cookie vault). Refresh commands receive `NOTEBOOKLM_REFRESH_STORAGE_PATH` and `NOTEBOOKLM_REFRESH_PROFILE` so profile-aware scripts can target the active auth file. Covers every CLI entry point without changing the public API. Retry guards prevent refresh loops.
 
 ## [0.3.4] - 2026-03-12
 
