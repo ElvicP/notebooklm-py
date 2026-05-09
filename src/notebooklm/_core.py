@@ -13,7 +13,7 @@ from urllib.parse import urlencode
 
 import httpx
 
-from .auth import AuthTokens, _poke_session, build_cookie_jar, save_cookies_to_storage
+from .auth import AuthTokens, _rotate_cookies, build_cookie_jar, save_cookies_to_storage
 from .rpc import (
     BATCHEXECUTE_URL,
     AuthError,
@@ -285,7 +285,7 @@ class ClientCore:
         """Background loop that periodically pokes the identity surface.
 
         Sleeps ``interval`` seconds between iterations, then calls
-        :func:`notebooklm.auth._poke_session` to elicit ``__Secure-1PSIDTS``
+        :func:`notebooklm.auth._rotate_cookies` to elicit ``__Secure-1PSIDTS``
         rotation. Any rotated cookies are persisted to ``storage_state.json``
         immediately (off-loop, via :func:`asyncio.to_thread`) so a long-lived
         client's freshness survives a crash.
@@ -311,10 +311,13 @@ class ClientCore:
                     return
 
                 try:
-                    # No storage_path: the per-call mtime guard targets rapid
-                    # ``from_storage()`` invocations; this loop is already
-                    # paced by ``keepalive_min_interval``.
-                    await _poke_session(client)
+                    # Bypass the layer-1 dedup guards: this loop is self-paced
+                    # by ``keepalive_min_interval`` and never runs concurrently
+                    # with itself. Calling ``_rotate_cookies`` directly still
+                    # bumps the in-process timestamp so concurrent layer-1
+                    # callers (e.g. spawned ``fetch_tokens`` tasks) see the
+                    # fresh rotation and skip their own pokes.
+                    await _rotate_cookies(client)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001 - opportunistic best-effort

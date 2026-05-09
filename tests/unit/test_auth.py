@@ -1,5 +1,6 @@
 """Tests for authentication module."""
 
+import asyncio
 import json
 import os
 import re
@@ -1939,6 +1940,210 @@ class TestIsRecentlyRotated:
         future = path.stat().st_mtime + 3600
         os.utime(path, (future, future))
         assert auth_module._is_recently_rotated(path) is False
+
+
+class TestPokeConcurrencyThrottling:
+    """In-process and cross-process throttling of ``_poke_session``."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_default_keepalive_mock
+    async def test_concurrent_async_callers_share_single_post(
+        self, tmp_path, httpx_mock: HTTPXMock
+    ):
+        """``asyncio.gather`` over 10 fresh callers must fire exactly one POST.
+
+        The disk mtime guard alone can't do this — none of the callers have
+        written storage_state.json yet, so they all see the same stale mtime.
+        The in-process ``asyncio.Lock`` + monotonic timestamp is what dedupes
+        them.
+        """
+        storage_path = tmp_path / "storage_state.json"
+        storage_path.write_text(json.dumps({"cookies": []}))
+        # Backdate so the disk mtime fast path doesn't pre-empt the poke.
+        _stale_storage(storage_path, age_seconds=120)
+
+        httpx_mock.add_response(
+            url=_POKE_URL_RE,
+            status_code=200,
+            is_reusable=True,
+        )
+
+        async with httpx.AsyncClient() as client:
+            await asyncio.gather(
+                *(auth_module._poke_session(client, storage_path) for _ in range(10))
+            )
+
+        poke_requests = [r for r in httpx_mock.get_requests() if _POKE_URL_RE.match(str(r.url))]
+        assert len(poke_requests) == 1, (
+            f"expected exactly one RotateCookies POST across 10 concurrent callers, "
+            f"got {len(poke_requests)}"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_default_keepalive_mock
+    async def test_skips_when_external_process_holds_flock(
+        self, tmp_path, monkeypatch, httpx_mock: HTTPXMock
+    ):
+        """If another process holds the ``.rotate.lock`` flock, skip silently."""
+        storage_path = tmp_path / "storage_state.json"
+        storage_path.write_text(json.dumps({"cookies": []}))
+        _stale_storage(storage_path, age_seconds=120)
+
+        # Simulate an external process holding the flock by making the
+        # non-blocking acquire raise OSError. ``_file_lock_try_exclusive``
+        # treats this as "lock held elsewhere" and yields False.
+        if sys.platform == "win32":
+            import msvcrt
+
+            def fail_lock(*_args, **_kwargs):
+                raise OSError("simulated external lock holder")
+
+            monkeypatch.setattr(msvcrt, "locking", fail_lock)
+        else:
+            import fcntl
+
+            original_flock = fcntl.flock
+
+            def maybe_fail(fd, op):
+                if op & fcntl.LOCK_NB:
+                    raise OSError("simulated external lock holder")
+                return original_flock(fd, op)
+
+            monkeypatch.setattr(fcntl, "flock", maybe_fail)
+
+        async with httpx.AsyncClient() as client:
+            await auth_module._poke_session(client, storage_path)
+
+        poke_requests = [r for r in httpx_mock.get_requests() if _POKE_URL_RE.match(str(r.url))]
+        assert (
+            poke_requests == []
+        ), "expected no RotateCookies POST when another process holds the rotation lock"
+
+    def test_rotation_lock_path_is_sibling_of_storage(self, tmp_path):
+        """Lock sentinel sits next to the storage file with a ``.rotate.lock`` suffix."""
+        storage_path = tmp_path / "storage_state.json"
+        lock_path = auth_module._rotation_lock_path(storage_path)
+        assert lock_path == tmp_path / ".storage_state.json.rotate.lock"
+
+    def test_rotation_lock_path_returns_none_for_no_storage(self):
+        assert auth_module._rotation_lock_path(None) is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_default_keepalive_mock
+    async def test_flock_released_after_poke(self, tmp_path, httpx_mock: HTTPXMock):
+        """A successful poke releases the rotation flock so the next call can acquire."""
+        if sys.platform == "win32":
+            pytest.skip("POSIX-specific test; Windows uses msvcrt.locking")
+
+        import fcntl
+
+        storage_path = tmp_path / "storage_state.json"
+        storage_path.write_text(json.dumps({"cookies": []}))
+        _stale_storage(storage_path, age_seconds=120)
+
+        httpx_mock.add_response(
+            url=_POKE_URL_RE,
+            status_code=200,
+            is_reusable=True,
+        )
+
+        async with httpx.AsyncClient() as client:
+            await auth_module._poke_session(client, storage_path)
+
+        # After the poke, an external attempt to acquire LOCK_EX | LOCK_NB
+        # should succeed — proving we released our hold.
+        lock_path = auth_module._rotation_lock_path(storage_path)
+        assert lock_path is not None and lock_path.exists()
+        fd = os.open(lock_path, os.O_RDWR)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_default_keepalive_mock
+    async def test_rotate_cookies_honours_disable_env(self, monkeypatch, httpx_mock: HTTPXMock):
+        """``NOTEBOOKLM_DISABLE_KEEPALIVE_POKE=1`` short-circuits the bare path too.
+
+        Layer-1 ``_poke_session`` already honoured the env var, but the
+        layer-2 keepalive loop bypasses ``_poke_session`` and calls
+        ``_rotate_cookies`` directly. Without the env-var check on the bare
+        function, setting the variable would silently fail to disable the
+        background loop.
+        """
+        monkeypatch.setenv(NOTEBOOKLM_DISABLE_KEEPALIVE_POKE_ENV, "1")
+
+        async with httpx.AsyncClient() as client:
+            await auth_module._rotate_cookies(client)
+
+        poke_requests = [r for r in httpx_mock.get_requests() if _POKE_URL_RE.match(str(r.url))]
+        assert (
+            poke_requests == []
+        ), "_rotate_cookies must short-circuit when NOTEBOOKLM_DISABLE_KEEPALIVE_POKE=1"
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_default_keepalive_mock
+    async def test_failed_poke_blocks_in_process_retries_within_window(
+        self, tmp_path, httpx_mock: HTTPXMock
+    ):
+        """A failed POST must still consume the rate-limit window.
+
+        Otherwise 10 fanned-out callers would each wait the full 15 s timeout
+        against a hung accounts.google.com — sequential failure stampede.
+        """
+        storage_path = tmp_path / "storage_state.json"
+        storage_path.write_text(json.dumps({"cookies": []}))
+        _stale_storage(storage_path, age_seconds=120)
+
+        httpx_mock.add_response(
+            url=_POKE_URL_RE,
+            status_code=503,
+            is_reusable=True,
+        )
+
+        async with httpx.AsyncClient() as client:
+            await auth_module._poke_session(client, storage_path)
+            _stale_storage(storage_path, age_seconds=120)
+            await auth_module._poke_session(client, storage_path)
+
+        poke_requests = [r for r in httpx_mock.get_requests() if _POKE_URL_RE.match(str(r.url))]
+        assert len(poke_requests) == 1, (
+            f"failed poke must still bump the in-process attempt timestamp; "
+            f"got {len(poke_requests)} POSTs (the second should have skipped)"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_default_keepalive_mock
+    async def test_in_process_timestamp_blocks_within_window(self, tmp_path, httpx_mock: HTTPXMock):
+        """A second call before storage save lands still skips via the monotonic timestamp.
+
+        Storage save happens in the caller (``_fetch_tokens_with_jar``) after
+        ``_poke_session`` returns, so two successive direct calls would both
+        see stale mtime. The monotonic timestamp inside the async lock catches
+        the second one.
+        """
+        storage_path = tmp_path / "storage_state.json"
+        storage_path.write_text(json.dumps({"cookies": []}))
+        _stale_storage(storage_path, age_seconds=120)
+
+        httpx_mock.add_response(
+            url=_POKE_URL_RE,
+            status_code=200,
+            is_reusable=True,
+        )
+
+        async with httpx.AsyncClient() as client:
+            await auth_module._poke_session(client, storage_path)
+            # storage_state.json mtime is intentionally NOT refreshed between
+            # calls — proving the in-memory timestamp is what gates this.
+            _stale_storage(storage_path, age_seconds=120)
+            await auth_module._poke_session(client, storage_path)
+
+        poke_requests = [r for r in httpx_mock.get_requests() if _POKE_URL_RE.match(str(r.url))]
+        assert (
+            len(poke_requests) == 1
+        ), f"second poke should skip via monotonic timestamp; got {len(poke_requests)} POSTs"
 
 
 class TestKeepalivePoke:

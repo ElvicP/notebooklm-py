@@ -853,40 +853,52 @@ def build_cookie_jar(
 
 
 @contextlib.contextmanager
-def _file_lock_exclusive(lock_path: Path) -> Any:
-    """Cross-process exclusive lock on ``lock_path`` for the duration of the block.
+def _file_lock(lock_path: Path, *, blocking: bool, log_prefix: str) -> Any:
+    """Cross-process exclusive lock on ``lock_path``. Yields ``True`` if held.
 
-    Multiple Python processes that all save to the same ``storage_state.json``
-    (e.g. a long-running ``NotebookLMClient(keepalive=...)`` worker plus a
-    cron-driven ``notebooklm auth refresh``) would otherwise race on the read-
-    merge-write cycle and lose updates. The lock is held on a sentinel file
-    sibling to the storage file (``.storage_state.json.lock``), since locking
-    the storage file itself would interfere with the atomic temp-rename below.
+    POSIX uses ``fcntl.flock``, Windows uses ``msvcrt.locking``. When
+    ``blocking`` is true the call waits for the lock; otherwise ``LOCK_NB``
+    semantics apply and a contended lock yields ``False`` immediately.
 
-    POSIX uses ``fcntl.flock``, Windows uses ``msvcrt.locking``; both are
-    blocking. The lock is per-process: threads within one process aren't
-    serialized — that's the intra-process ``threading.Lock`` in ``ClientCore``.
-    If the lock can't be acquired (e.g. unsupported filesystem like NFS where
-    flock semantics vary), the save proceeds without locking and a DEBUG log
-    line records the fallback; correctness on NFS is best-effort.
+    Acquisition failure (unsupported filesystem like NFS, contention in
+    non-blocking mode, mkdir/open permission errors) is reported via the
+    yielded bool plus a DEBUG log line tagged with ``log_prefix``. Callers
+    decide how to handle "not locked" — :func:`_file_lock_exclusive`
+    proceeds anyway (best-effort on NFS); :func:`_file_lock_try_exclusive`
+    skips its work entirely.
     """
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as exc:
+        # Filesystem unavailable / permissions / disk full. Best-effort:
+        # yield "not held" so callers fall through to their no-lock path
+        # rather than aborting the surrounding auth/save flow.
+        logger.debug("%s: could not open lock file %s (%s)", log_prefix, lock_path, exc)
+        yield False
+        return
     locked = False
     try:
         try:
             if sys.platform == "win32":
                 import msvcrt
 
-                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+                msvcrt.locking(fd, msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK, 1)
             else:
                 import fcntl
 
-                fcntl.flock(fd, fcntl.LOCK_EX)
+                op = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
+                fcntl.flock(fd, op)
             locked = True
         except OSError as exc:
-            logger.debug("save_cookies_to_storage: file lock unavailable (%s); proceeding", exc)
-        yield
+            # The blocking caller (``_file_lock_exclusive`` for storage saves)
+            # falls through and proceeds anyway — best-effort on NFS, where
+            # flock semantics vary. The non-blocking caller
+            # (``_file_lock_try_exclusive`` for the rotation poke) skips its
+            # work entirely; "lock contended" and "lock unsupported" are
+            # treated identically because both warrant a skip.
+            logger.debug("%s: file lock not held (%s)", log_prefix, exc)
+        yield locked
     finally:
         if locked:
             try:
@@ -899,8 +911,28 @@ def _file_lock_exclusive(lock_path: Path) -> Any:
 
                     fcntl.flock(fd, fcntl.LOCK_UN)
             except OSError as exc:
-                logger.debug("save_cookies_to_storage: failed to release file lock (%s)", exc)
+                logger.debug("%s: failed to release file lock (%s)", log_prefix, exc)
         os.close(fd)
+
+
+@contextlib.contextmanager
+def _file_lock_exclusive(lock_path: Path) -> Any:
+    """Blocking cross-process exclusive lock on ``lock_path``.
+
+    Multiple Python processes that all save to the same ``storage_state.json``
+    (e.g. a long-running ``NotebookLMClient(keepalive=...)`` worker plus a
+    cron-driven ``notebooklm auth refresh``) would otherwise race on the read-
+    merge-write cycle and lose updates. The lock is held on a sentinel file
+    sibling to the storage file (``.storage_state.json.lock``), since locking
+    the storage file itself would interfere with the atomic temp-rename below.
+
+    The lock is per-process: threads within one process aren't serialized —
+    that's the intra-process ``threading.Lock`` in ``ClientCore``. If the
+    lock can't be acquired (e.g. NFS where flock semantics vary), the save
+    proceeds anyway; correctness on NFS is best-effort.
+    """
+    with _file_lock(lock_path, blocking=True, log_prefix="save_cookies_to_storage"):
+        yield
 
 
 def save_cookies_to_storage(cookie_jar: httpx.Cookies, path: Path | None = None) -> None:
@@ -1239,6 +1271,43 @@ _KEEPALIVE_RATE_LIMIT_SECONDS = 60.0
 # Windows + older Python where the clock is coarser than NTFS mtime). Tolerate
 # that without re-opening the "future mtime wedges the guard" bug.
 _KEEPALIVE_PRECISION_TOLERANCE = 2.0
+# In-process serializer for the rotation poke. Without this, an
+# ``asyncio.gather`` over 10 fresh ``from_storage()`` calls would all see the
+# same stale storage mtime and fire the POST in parallel, defeating the guard.
+_POKE_ASYNC_LOCK: asyncio.Lock = asyncio.Lock()
+# Monotonic timestamp of the last in-process poke *attempt* (success or
+# failure). Updated in the ``_rotate_cookies`` finally clause so that:
+#  - On success, concurrent layer-1 callers see "this process just rotated" and
+#    skip — bridging the gap between POST-success and on-disk save.
+#  - On failure (timeout, 5xx, network blip), concurrent and follow-up callers
+#    *also* skip for the rate-limit window, preventing a failure stampede where
+#    10 fanned-out callers each wait 15 s on a hung accounts.google.com. The
+#    next sequential call after the window will retry.
+_LAST_POKE_ATTEMPT_MONOTONIC: float = 0.0
+
+
+def _rotation_lock_path(storage_path: Path | None) -> Path | None:
+    """Sibling sentinel used by ``_poke_session`` for cross-process coordination.
+
+    Distinct from the ``.storage_state.json.lock`` used by ``save_cookies_to_storage``
+    so a long-running save doesn't block rotations or vice versa.
+    """
+    if storage_path is None:
+        return None
+    return storage_path.with_name(f".{storage_path.name}.rotate.lock")
+
+
+@contextlib.contextmanager
+def _file_lock_try_exclusive(lock_path: Path) -> Any:
+    """Non-blocking exclusive flock. Yields ``True`` if acquired, ``False`` otherwise.
+
+    Mirrors :func:`_file_lock_exclusive` but with ``LOCK_NB`` semantics: when
+    the lock is already held by another process we want to *skip* the poke
+    (the holder is rotating; we don't need to re-rotate immediately) rather
+    than queue behind it.
+    """
+    with _file_lock(lock_path, blocking=False, log_prefix="rotate lock") as acquired:
+        yield acquired
 
 
 def _is_recently_rotated(storage_path: Path | None) -> bool:
@@ -1269,13 +1338,38 @@ async def _poke_session(client: httpx.AsyncClient, storage_path: Path | None = N
     optimisation. The caller's request to notebooklm.google.com is the
     authoritative health check.
 
+    Three layered guards keep the POST from stampeding ``accounts.google.com``:
+
+    1. **Disk mtime fast path.** If ``storage_state.json`` was rewritten within
+       the rate-limit window, skip without any locking. Covers the common
+       sequential-CLI case at zero cost.
+    2. **In-process ``asyncio.Lock``.** Inside the lock, re-check the disk
+       mtime (a sibling task may have rotated and saved during the wait) and
+       a monotonic in-memory timestamp (a sibling may have rotated but not
+       yet saved). Together these dedupe an ``asyncio.gather`` fan-out so
+       only one POST fires per process per rate-limit window.
+    3. **Cross-process non-blocking flock.** When ``storage_path`` is set, try
+       to acquire ``.storage_state.json.rotate.lock`` with ``LOCK_NB``. If
+       another process holds it, skip — they're rotating right now. This
+       handles ``xargs -P``, parallel MCP workers, and similar parallel
+       launches without queueing.
+
+       Known gap: the flock is released as soon as the POST returns, but the
+       caller's storage-state save happens *after* this function returns. A
+       second process that starts in that narrow window observes the still-
+       stale on-disk mtime and an unheld flock, and will fire its own POST.
+       Worst case is two pokes back-to-back across processes — bounded, not
+       a stampede. Closing this fully would require holding the flock past
+       ``_poke_session`` until the save completes, which would entangle this
+       throttle with the caller's lifecycle. Not worth the complexity here.
+
     Args:
         client: Live ``httpx.AsyncClient`` whose cookie jar should receive the
             rotated ``Set-Cookie``.
         storage_path: Optional path to the on-disk ``storage_state.json``. When
-            provided, the poke is skipped if the file was modified within the
-            last 60 s — guards accounts.google.com from rapid sequential
-            invocations.
+            provided, gates the poke via the disk mtime and the cross-process
+            flock; when ``None`` (env-var auth) only the in-process serializer
+            applies.
 
     Set ``NOTEBOOKLM_DISABLE_KEEPALIVE_POKE=1`` to disable (e.g., environments
     that block ``accounts.google.com``).
@@ -1289,6 +1383,77 @@ async def _poke_session(client: httpx.AsyncClient, storage_path: Path | None = N
             _KEEPALIVE_RATE_LIMIT_SECONDS,
         )
         return
+
+    async with _POKE_ASYNC_LOCK:
+        # Re-check after acquiring the in-process lock — another task may have
+        # rotated and persisted while we were waiting.
+        if _is_recently_rotated(storage_path):
+            logger.debug(
+                "Keepalive RotateCookies skipped: storage refreshed while waiting for lock"
+            )
+            return
+        # In-process tasks contend on the async lock before storage_state.json
+        # has been written (the save happens in the caller, after this returns).
+        # The monotonic timestamp closes that gap. We track *attempts*, not
+        # successes, so a failed POST also blocks follow-ups within the window
+        # — preventing 10 fanned-out callers from sequentially waiting on a
+        # hung accounts.google.com.
+        in_process_age = time.monotonic() - _LAST_POKE_ATTEMPT_MONOTONIC
+        if in_process_age <= _KEEPALIVE_RATE_LIMIT_SECONDS:
+            logger.debug(
+                "Keepalive RotateCookies skipped: in-process poke %.1fs ago",
+                in_process_age,
+            )
+            return
+
+        rotate_lock_path = _rotation_lock_path(storage_path)
+        if rotate_lock_path is None:
+            # No on-disk path → cross-process flock has no anchor. The
+            # in-process lock + monotonic timestamp is the only protection.
+            await _rotate_cookies(client)
+            return
+
+        with _file_lock_try_exclusive(rotate_lock_path) as acquired:
+            if not acquired:
+                logger.debug(
+                    "Keepalive RotateCookies skipped: %s held by another process",
+                    rotate_lock_path,
+                )
+                return
+            # One last disk recheck: another process may have completed its
+            # rotation + save between our top-of-function check and acquiring
+            # this flock.
+            if _is_recently_rotated(storage_path):
+                logger.debug(
+                    "Keepalive RotateCookies skipped: storage refreshed before flock acquired"
+                )
+                return
+            await _rotate_cookies(client)
+
+
+async def _rotate_cookies(client: httpx.AsyncClient) -> None:
+    """Fire the ``RotateCookies`` POST. Bare operation; no guards.
+
+    Used directly by the layer-2 keepalive loop, which is already self-paced
+    via ``keepalive_min_interval`` and does not need the layer-1 dedup
+    serialization. ``_poke_session`` calls this through its guard stack.
+
+    Honours ``NOTEBOOKLM_DISABLE_KEEPALIVE_POKE=1`` so a single env-var disables
+    every rotation path (the layer-1 wrapper *and* the layer-2 loop).
+
+    Updates the module-level attempt timestamp on every executed call (success
+    or failure — including non-HTTP exceptions like programmer / configuration
+    errors that surface through the ``finally``) so concurrent layer-1 callers
+    skip the POST for the rate-limit window. This bridges both the success →
+    save gap and the failure stampede where 10 callers each wait the full
+    timeout against a hung server.
+
+    Does not propagate ``httpx.HTTPError``: this is a best-effort freshness
+    call, not a health check.
+    """
+    if os.environ.get(NOTEBOOKLM_DISABLE_KEEPALIVE_POKE_ENV) == "1":
+        return
+    global _LAST_POKE_ATTEMPT_MONOTONIC
     try:
         # ``follow_redirects=True`` is defensive: empirically RotateCookies
         # answers 200 directly with the rotated Set-Cookie, but if Google ever
@@ -1307,6 +1472,8 @@ async def _poke_session(client: httpx.AsyncClient, storage_path: Path | None = N
         response.raise_for_status()
     except httpx.HTTPError as exc:
         logger.debug("Keepalive RotateCookies POST failed (non-fatal): %s", exc)
+    finally:
+        _LAST_POKE_ATTEMPT_MONOTONIC = time.monotonic()
 
 
 async def _fetch_tokens_with_jar(
