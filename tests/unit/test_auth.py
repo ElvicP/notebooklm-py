@@ -123,6 +123,25 @@ class TestExtractCookies:
         assert cookies["SID"] == "sid_value"
         assert cookies["OSID"] == "osid_base"
 
+    def test_prefers_notebooklm_subdomain_cookie_over_regional(self):
+        """Test NotebookLM subdomain wins duplicate names from regional domains."""
+        storage_state = {
+            "cookies": [
+                {"name": "SID", "value": "sid_value", "domain": ".google.com"},
+                {"name": "OSID", "value": "osid_regional", "domain": ".google.de"},
+                {
+                    "name": "OSID",
+                    "value": "osid_subdomain",
+                    "domain": ".notebooklm.google.com",
+                },
+            ]
+        }
+
+        cookies = extract_cookies_from_storage(storage_state)
+
+        assert cookies["SID"] == "sid_value"
+        assert cookies["OSID"] == "osid_subdomain"
+
     def test_raises_if_missing_sid(self):
         storage_state = {
             "cookies": [
@@ -729,7 +748,7 @@ class TestAllowedCookieDomains:
         from notebooklm.auth import ALLOWED_COOKIE_DOMAINS
 
         assert ".google.com" in ALLOWED_COOKIE_DOMAINS
-        assert ".notebooklm.google.com" in ALLOWED_COOKIE_DOMAINS
+        assert any(domain == ".notebooklm.google.com" for domain in ALLOWED_COOKIE_DOMAINS)
         assert "notebooklm.google.com" in ALLOWED_COOKIE_DOMAINS
 
 

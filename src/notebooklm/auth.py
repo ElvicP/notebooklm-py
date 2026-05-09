@@ -256,6 +256,17 @@ def _is_allowed_auth_domain(domain: str) -> bool:
     return domain in ALLOWED_COOKIE_DOMAINS or _is_google_domain(domain)
 
 
+def _auth_domain_priority(domain: str) -> int:
+    """Return duplicate-cookie priority for allowed auth domains."""
+    if domain == ".google.com":
+        return 3
+    if domain in {".notebooklm.google.com", "notebooklm.google.com"}:
+        return 2
+    if _is_google_domain(domain):
+        return 1
+    return 0
+
+
 def convert_rookiepy_cookies_to_storage_state(
     rookiepy_cookies: list[dict],
 ) -> dict[str, Any]:
@@ -321,7 +332,8 @@ def extract_cookies_from_storage(storage_state: dict[str, Any]) -> dict[str, str
         .google.com and .google.com.sg), we use this priority order:
 
         1. .google.com (base domain) - ALWAYS preferred when present
-        2. Regional domains - used as fallback when base domain cookie is missing
+        2. NotebookLM subdomain - preferred for NotebookLM-specific cookies
+        3. Regional domains - used as fallback when higher-priority cookies are missing
 
         This prevents non-deterministic behavior where dict iteration order would
         determine which cookie value wins. See PR #34 for the bug this fixes.
@@ -346,6 +358,7 @@ def extract_cookies_from_storage(storage_state: dict[str, Any]) -> dict[str, str
     """
     cookies = {}
     cookie_domains: dict[str, str] = {}  # Track which domain each cookie came from
+    cookie_priorities: dict[str, int] = {}
 
     for cookie in storage_state.get("cookies", []):
         domain = cookie.get("domain", "")
@@ -353,18 +366,20 @@ def extract_cookies_from_storage(storage_state: dict[str, Any]) -> dict[str, str
         if not _is_allowed_auth_domain(domain) or not name:
             continue
 
-        # Prioritize .google.com cookies over regional domains (e.g., .google.de)
-        # to prevent wrong cookie values when the same name exists in multiple domains
-        is_base_domain = domain == ".google.com"
-        if name not in cookies or is_base_domain:
-            if name in cookies and is_base_domain:
+        # Prioritize stable domain classes over storage_state ordering to prevent
+        # wrong cookie values when the same name exists in multiple domains.
+        priority = _auth_domain_priority(domain)
+        if name not in cookies or priority > cookie_priorities[name]:
+            if name in cookies:
                 logger.debug(
-                    "Cookie %s: using .google.com value (overriding %s)",
+                    "Cookie %s: using %s value (overriding %s)",
                     name,
+                    domain,
                     cookie_domains[name],
                 )
             cookies[name] = cookie.get("value", "")
             cookie_domains[name] = domain
+            cookie_priorities[name] = priority
         else:
             logger.debug(
                 "Cookie %s: ignoring duplicate from %s (keeping %s)",
