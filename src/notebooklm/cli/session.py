@@ -1157,3 +1157,44 @@ def register_session_commands(cli):
             console.print(
                 "\n[yellow]Cookies may be expired. Run 'notebooklm login' to refresh.[/yellow]"
             )
+
+    @auth_group.command("refresh")
+    @click.option(
+        "--quiet", "-q", is_flag=True, help="Suppress success output (only print on error)"
+    )
+    @click.pass_context
+    def auth_refresh(ctx, quiet):
+        """Refresh stored cookies by poking accounts.google.com.
+
+        One-shot keepalive: opens a session, GETs accounts.google.com to
+        elicit __Secure-1PSIDTS rotation, persists the rotated cookies to
+        storage_state.json, and exits. Designed to be scheduled by the OS
+        (launchd / systemd / cron) to keep an idle profile from staling out.
+
+        Cadence: comfortably below the SIDTS server window (~30 min observed).
+        15-20 minutes is a safe interval.
+
+        \b
+        Examples:
+          notebooklm auth refresh                 # one-shot, exit 0/1
+          notebooklm --profile work auth refresh  # against a named profile
+          watch -n 1200 notebooklm auth refresh   # quick in-terminal loop
+
+        See docs/troubleshooting.md ("Cookie freshness for long-running /
+        unattended use") for launchd / systemd / cron recipes.
+        """
+        from ..auth import fetch_tokens_with_domains
+
+        profile = ctx.obj.get("profile") if ctx.obj else None
+        has_env_var = bool(os.environ.get("NOTEBOOKLM_AUTH_JSON"))
+        storage_path = None if has_env_var else get_storage_path(profile=profile)
+
+        try:
+            run_async(fetch_tokens_with_domains(storage_path, profile))
+        except Exception as exc:
+            click.echo(f"Error: {exc}", err=True)
+            raise SystemExit(1) from exc
+
+        if not quiet:
+            target = "NOTEBOOKLM_AUTH_JSON" if has_env_var else f"refreshed: {storage_path}"
+            console.print(f"[green]ok[/green] {target}")

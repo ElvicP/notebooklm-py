@@ -52,7 +52,107 @@ Google rotates `__Secure-1PSIDTS` (the freshness partner of `__Secure-1PSID`) on
 
 3. **Re-login (manual).** If the recovery script also fails (e.g. browser isn't logged in either), run `notebooklm login` interactively.
 
-For most users layer 1 alone is enough. Add layer 2 for cron-driven or agent-driven workflows where there's no human at the terminal to run `notebooklm login`.
+4. **External scheduler (`notebooklm auth refresh` + cron / launchd / systemd).** Layers 1-2 only fire when a Python process is running. If you go idle longer than the SIDTS server window between calls, no in-process layer can rotate. The fix is to wake the OS scheduler periodically and have it run a one-shot refresh.
+
+   The command is:
+   ```bash
+   notebooklm auth refresh                 # one-shot, exit 0/1
+   notebooklm --profile work auth refresh  # against a named profile
+   ```
+
+   Internally it opens a client (which triggers the layer-1 poke against `accounts.google.com`) and persists rotated cookies to `storage_state.json`. Cadence should be comfortably below the SIDTS server window — 15-20 minutes is a safe choice (the observed window is ~30 min).
+
+   **macOS launchd** (`~/Library/LaunchAgents/com.user.notebooklm-keepalive.plist`):
+   ```xml
+   <?xml version="1.0" encoding="UTF-8"?>
+   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+   <plist version="1.0">
+   <dict>
+     <key>Label</key><string>com.user.notebooklm-keepalive</string>
+     <key>ProgramArguments</key>
+     <array>
+       <string>/abs/path/.venv/bin/notebooklm</string>
+       <string>--profile</string><string>work</string>
+       <string>auth</string><string>refresh</string>
+       <string>--quiet</string>
+     </array>
+     <key>StartInterval</key><integer>1200</integer>
+     <key>RunAtLoad</key><true/>
+     <key>StandardErrorPath</key><string>/tmp/notebooklm-keepalive.err</string>
+   </dict>
+   </plist>
+   ```
+   Load: `launchctl load ~/Library/LaunchAgents/com.user.notebooklm-keepalive.plist`. Note that `StartInterval` does not fire while the Mac is asleep; that's fine — the next call after wake recovers via layer 1.
+
+   **Linux systemd user timer** (`~/.config/systemd/user/notebooklm-keepalive.{service,timer}`):
+   ```ini
+   # notebooklm-keepalive.service
+   [Unit]
+   Description=NotebookLM cookie keepalive
+
+   [Service]
+   Type=oneshot
+   ExecStart=/abs/path/.venv/bin/notebooklm --profile work auth refresh --quiet
+   ```
+   ```ini
+   # notebooklm-keepalive.timer
+   [Unit]
+   Description=Run NotebookLM keepalive every 20 minutes
+
+   [Timer]
+   OnBootSec=2min
+   OnUnitActiveSec=20min
+   Persistent=true
+
+   [Install]
+   WantedBy=timers.target
+   ```
+   Enable: `systemctl --user enable --now notebooklm-keepalive.timer`. `Persistent=true` runs a missed firing after wake-from-suspend.
+
+   **POSIX cron** (works on Linux / macOS, simplest fallback):
+   ```cron
+   */20 * * * * /abs/path/.venv/bin/notebooklm --profile work auth refresh --quiet >>~/.notebooklm-keepalive.log 2>&1
+   ```
+
+   **Windows Task Scheduler** — create a task triggered "On a schedule, repeat every 20 minutes indefinitely", action "Start a program":
+   - Program: `C:\path\to\.venv\Scripts\notebooklm.exe`
+   - Arguments: `--profile work auth refresh --quiet`
+   - "Run whether user is logged on or not" + "Run with highest privileges" off (user-level is fine).
+
+   Or via PowerShell:
+   ```powershell
+   $action = New-ScheduledTaskAction -Execute "C:\path\to\.venv\Scripts\notebooklm.exe" `
+     -Argument "--profile work auth refresh --quiet"
+   $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+     -RepetitionInterval (New-TimeSpan -Minutes 20)
+   Register-ScheduledTask -TaskName "NotebookLM Keepalive" -Action $action -Trigger $trigger
+   ```
+
+   **Docker / k8s** — run as a sidecar with an entrypoint loop, or a CronJob:
+   ```yaml
+   apiVersion: batch/v1
+   kind: CronJob
+   metadata: {name: notebooklm-keepalive}
+   spec:
+     schedule: "*/20 * * * *"
+     jobTemplate:
+       spec:
+         template:
+           spec:
+             restartPolicy: OnFailure
+             containers:
+               - name: keepalive
+                 image: your/notebooklm-image
+                 command: ["notebooklm", "--profile", "work", "auth", "refresh", "--quiet"]
+                 volumeMounts:
+                   - {name: storage, mountPath: /root/.notebooklm}
+             volumes:
+               - {name: storage, persistentVolumeClaim: {claimName: notebooklm-storage}}
+   ```
+
+   What L4 cannot fix: server-side revocation (account locked, password changed, force sign-out) — that's still layer 2's job. Long device sleep where the OS scheduler doesn't fire — when the device wakes, the next call recovers via layer 1 if SIDTS is still alive, otherwise via layer 2.
+
+For most users layer 1 alone is enough. Add layer 2 for cron-driven or agent-driven workflows where there's no human at the terminal to run `notebooklm login`. Add layer 4 if you have an idle profile that needs to stay fresh between manual interactions.
 
 #### macOS: `--browser-cookies` prompts for your password
 
