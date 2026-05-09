@@ -35,6 +35,25 @@ The client **automatically refreshes** CSRF tokens when authentication errors ar
 
 This means most "CSRF token expired" errors resolve automatically.
 
+#### Cookie freshness for long-running / unattended use
+
+Google rotates `__Secure-1PSIDTS` (the freshness partner of `__Secure-1PSID`) on a short schedule and only emits the rotated value when the client touches an identity surface like `accounts.google.com`. RPC traffic against `notebooklm.google.com` alone never triggers rotation, so an unattended keepalive that "just calls list every 30 minutes" can die after ~10-30 minutes despite the cookies looking fine on disk. The library handles this in three layers, ordered from cheapest to heaviest:
+
+1. **Per-call rotation poke (default ON).** Every `fetch_tokens` call makes a best-effort GET to `https://accounts.google.com/CheckCookie`. The rotated `Set-Cookie` lands in the httpx jar and is persisted on session close. Failures are logged at DEBUG and never abort the call.
+   - Disable in restricted networks: `export NOTEBOOKLM_DISABLE_KEEPALIVE_POKE=1`
+
+2. **External recovery script (opt-in).** When auth has fully expired (idle past the rotation window, force-logout, password change), `fetch_tokens` can shell out to a user-provided refresh script, reload `storage_state.json`, and retry once.
+   - Wire it up:
+     ```bash
+     pip install 'notebooklm-py[cookies]'
+     export NOTEBOOKLM_REFRESH_CMD="python /path/to/notebooklm-py/examples/refresh_browser_cookies.py"
+     ```
+   - The script in `examples/refresh_browser_cookies.py` re-runs `notebooklm login --browser-cookies` against your local browser. The library injects `NOTEBOOKLM_REFRESH_PROFILE` and `NOTEBOOKLM_REFRESH_STORAGE_PATH` so the script targets the right file. Retry is gated to once per process — a broken script can't loop.
+
+3. **Re-login (manual).** If the recovery script also fails (e.g. browser isn't logged in either), run `notebooklm login` interactively.
+
+For most users layer 1 alone is enough. Add layer 2 for cron-driven or agent-driven workflows where there's no human at the terminal to run `notebooklm login`.
+
 #### "Unauthorized" or redirect to login page
 
 **Cause:** Session cookies expired (happens every few weeks).
