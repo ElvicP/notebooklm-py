@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -12,6 +13,8 @@ import pytest
 from pytest_httpx import HTTPXMock
 
 from notebooklm.auth import (
+    KEEPALIVE_POKE_URL,
+    NOTEBOOKLM_DISABLE_KEEPALIVE_POKE_ENV,
     AuthTokens,
     convert_rookiepy_cookies_to_storage_state,
     extract_cookies_from_storage,
@@ -717,6 +720,7 @@ class TestFetchTokens:
             request
             for request in httpx_mock.get_requests()
             if request.url.host == "accounts.google.com"
+            and not request.url.path.startswith("/CheckCookie")
         ]
         assert len(account_requests) == 2
 
@@ -1687,9 +1691,9 @@ class TestExtractCookiesRegionalDomains:
             results.add(cookies["SID"])
 
         # All permutations should produce the same result: .google.com wins
-        assert results == {
-            "sid_base"
-        }, f"Extraction should be deterministic, but got different results: {results}"
+        assert results == {"sid_base"}, (
+            f"Extraction should be deterministic, but got different results: {results}"
+        )
 
     def test_regional_only_uses_first_encountered(self):
         """Test behavior when only regional domains exist (no .google.com).
@@ -1887,3 +1891,109 @@ class TestConvertRookiepyCookies:
         ]
         result = convert_rookiepy_cookies_to_storage_state(raw)
         assert result == {"cookies": [], "origins": []}
+
+
+_POKE_URL_RE = re.compile(r"^https://accounts\.google\.com/CheckCookie.*$")
+_NOTEBOOKLM_HOMEPAGE_HTML = (
+    b'<html><script>window.WIZ_global_data={"SNlM0e":"csrf_ok","FdrFJe":"sess_ok"};</script></html>'
+)
+
+
+class TestKeepalivePoke:
+    """Tests for the proactive ``accounts.google.com/CheckCookie`` poke."""
+
+    @pytest.mark.asyncio
+    async def test_poke_made_by_default(self, httpx_mock: HTTPXMock):
+        """Token fetch hits CheckCookie before notebooklm.google.com."""
+        httpx_mock.add_response(
+            url="https://notebooklm.google.com/",
+            content=_NOTEBOOKLM_HOMEPAGE_HTML,
+        )
+
+        await fetch_tokens({"SID": "x"})
+
+        poke_requests = [r for r in httpx_mock.get_requests() if _POKE_URL_RE.match(str(r.url))]
+        assert len(poke_requests) == 1, (
+            f"expected exactly one CheckCookie request, got: {[str(r.url) for r in httpx_mock.get_requests()]}"
+        )
+        assert KEEPALIVE_POKE_URL.startswith(str(poke_requests[0].url).split("?")[0])
+
+    @pytest.mark.asyncio
+    async def test_poke_skipped_when_disabled(self, monkeypatch, httpx_mock: HTTPXMock):
+        """``NOTEBOOKLM_DISABLE_KEEPALIVE_POKE=1`` suppresses the poke."""
+        monkeypatch.setenv(NOTEBOOKLM_DISABLE_KEEPALIVE_POKE_ENV, "1")
+        httpx_mock.add_response(
+            url="https://notebooklm.google.com/",
+            content=_NOTEBOOKLM_HOMEPAGE_HTML,
+        )
+
+        await fetch_tokens({"SID": "x"})
+
+        poke_requests = [r for r in httpx_mock.get_requests() if _POKE_URL_RE.match(str(r.url))]
+        assert poke_requests == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_default_keepalive_mock
+    async def test_token_fetch_succeeds_when_poke_5xx(self, httpx_mock: HTTPXMock):
+        """A failing poke is best-effort and never aborts token fetch."""
+        httpx_mock.add_response(
+            url=_POKE_URL_RE,
+            status_code=503,
+            is_reusable=True,
+        )
+        httpx_mock.add_response(
+            url="https://notebooklm.google.com/",
+            content=_NOTEBOOKLM_HOMEPAGE_HTML,
+        )
+
+        csrf, session_id = await fetch_tokens({"SID": "x"})
+
+        assert csrf == "csrf_ok"
+        assert session_id == "sess_ok"
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_default_keepalive_mock
+    async def test_poke_rotated_sidts_lands_in_jar(self, tmp_path, httpx_mock: HTTPXMock):
+        """Set-Cookie from CheckCookie response is persisted to storage_state.json."""
+        storage_path = tmp_path / "storage_state.json"
+        storage_path.write_text(
+            json.dumps(
+                {
+                    "cookies": [
+                        {
+                            "name": "SID",
+                            "value": "old_sid",
+                            "domain": ".google.com",
+                            "path": "/",
+                        },
+                        {
+                            "name": "__Secure-1PSIDTS",
+                            "value": "stale_sidts",
+                            "domain": ".google.com",
+                            "path": "/",
+                        },
+                    ]
+                }
+            )
+        )
+        httpx_mock.add_response(
+            url=_POKE_URL_RE,
+            status_code=204,
+            headers={
+                "Set-Cookie": (
+                    "__Secure-1PSIDTS=ROTATED; Domain=.google.com; Path=/; Secure; HttpOnly"
+                )
+            },
+        )
+        httpx_mock.add_response(
+            url="https://notebooklm.google.com/",
+            content=_NOTEBOOKLM_HOMEPAGE_HTML,
+        )
+
+        await fetch_tokens_with_domains(path=storage_path)
+
+        rewritten = json.loads(storage_path.read_text())
+        sidts_values = [c["value"] for c in rewritten["cookies"] if c["name"] == "__Secure-1PSIDTS"]
+        assert sidts_values == ["ROTATED"], (
+            f"expected rotated SIDTS persisted to disk, got: {sidts_values}"
+        )

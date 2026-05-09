@@ -1137,11 +1137,55 @@ def _update_cookie_input(target: CookieInput, fresh: DomainCookieMap) -> None:
         target.update(flatten_cookie_map(fresh))  # type: ignore[arg-type]
 
 
+# --- Keepalive poke ----------------------------------------------------------
+# Google's __Secure-1PSIDTS / __Secure-3PSIDTS cookies are the rotating freshness
+# partners of __Secure-1PSID / __Secure-3PSID. Their server-side validity window
+# is short (minutes-to-hours scale) and Google only emits a rotated value
+# (Set-Cookie) when the client touches the identity surface — typically
+# accounts.google.com/CheckCookie or ListAccounts. Pure RPC traffic against
+# notebooklm.google.com never triggers rotation, so a long-lived storage_state
+# silently stales out and every subsequent call fails with the
+# "Authentication expired or invalid" redirect (see issue #312).
+#
+# Hitting CheckCookie once per token-fetch elicits the rotation; the resulting
+# Set-Cookie lands in the live httpx jar, which #276 then persists on close.
+KEEPALIVE_POKE_URL = (
+    "https://accounts.google.com/CheckCookie?continue=https%3A%2F%2Fnotebooklm.google.com%2F"
+)
+NOTEBOOKLM_DISABLE_KEEPALIVE_POKE_ENV = "NOTEBOOKLM_DISABLE_KEEPALIVE_POKE"
+_KEEPALIVE_POKE_TIMEOUT = 15.0
+
+
+async def _poke_session(client: httpx.AsyncClient) -> None:
+    """Best-effort GET to ``accounts.google.com/CheckCookie`` to elicit SIDTS rotation.
+
+    Failures are logged at DEBUG and swallowed: this is purely a freshness
+    optimisation. The caller's request to notebooklm.google.com is the
+    authoritative health check.
+
+    Set ``NOTEBOOKLM_DISABLE_KEEPALIVE_POKE=1`` to disable (e.g., environments
+    that block ``accounts.google.com``).
+    """
+    if os.environ.get(NOTEBOOKLM_DISABLE_KEEPALIVE_POKE_ENV) == "1":
+        return
+    try:
+        await client.get(
+            KEEPALIVE_POKE_URL,
+            follow_redirects=True,
+            timeout=_KEEPALIVE_POKE_TIMEOUT,
+        )
+    except httpx.HTTPError as exc:
+        logger.debug("Keepalive poke to accounts.google.com failed (non-fatal): %s", exc)
+
+
 async def _fetch_tokens_with_jar(cookie_jar: httpx.Cookies) -> tuple[str, str]:
     """Internal: fetch CSRF and session tokens using a pre-built cookie jar.
 
     This is the single implementation for all token-fetch paths. All public
     functions (fetch_tokens, fetch_tokens_with_domains) delegate to this.
+
+    Before fetching tokens, makes a best-effort GET to accounts.google.com to
+    elicit __Secure-1PSIDTS rotation; see ``_poke_session``.
 
     Args:
         cookie_jar: httpx.Cookies jar with auth cookies (domain-preserving or fallback).
@@ -1156,6 +1200,8 @@ async def _fetch_tokens_with_jar(cookie_jar: httpx.Cookies) -> tuple[str, str]:
     logger.debug("Fetching CSRF and session tokens from NotebookLM")
 
     async with httpx.AsyncClient(cookies=cookie_jar) as client:
+        await _poke_session(client)
+
         response = await client.get(
             "https://notebooklm.google.com/",
             follow_redirects=True,
