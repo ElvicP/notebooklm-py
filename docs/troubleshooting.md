@@ -42,16 +42,17 @@ Google rotates `__Secure-1PSIDTS` (the freshness partner of `__Secure-1PSID`) on
 1. **Per-call rotation poke (default ON).** Every `fetch_tokens` call makes a best-effort GET to `https://accounts.google.com/CheckCookie`. The rotated `Set-Cookie` lands in the httpx jar and is persisted on session close. Failures are logged at DEBUG and never abort the call.
    - Disable in restricted networks: `export NOTEBOOKLM_DISABLE_KEEPALIVE_POKE=1`
 
-2. **Periodic background poke (opt-in, Python only).** For long-lived `NotebookLMClient` instances (workers, agents, `async with` blocks held open for hours) layer 1 is not enough — there are no `fetch_tokens` calls between RPCs to drive rotation. Pass `keepalive=<seconds>` and the client spawns an asyncio background task that pokes the same `CheckCookie` endpoint at the configured interval and persists any rotated `Set-Cookie` to `storage_state.json` immediately (so a crash doesn't lose the rotation).
+2. **Periodic background poke (opt-in, Python only).** For long-lived `NotebookLMClient` instances (workers, agents, `async with` blocks held open for hours) layer 1 is not enough — there are no `fetch_tokens` calls between RPCs to drive rotation. Pass `keepalive=<seconds>` and the client spawns an asyncio background task that pokes the same `CheckCookie` endpoint at the configured interval and persists any rotated `Set-Cookie` to `storage_state.json` immediately (so a crash doesn't lose the rotation). Persistence happens off-loop (`asyncio.to_thread`), so the loop never blocks the event loop on disk I/O.
    ```python
    async with await NotebookLMClient.from_storage(keepalive=600) as client:
        # SIDTS is refreshed every ~10 minutes while this block is open.
        ...
    ```
    - Disabled by default; pass `keepalive=None` to turn it off explicitly.
-   - Values below `keepalive_min_interval` (default 60 s) are clamped up to that floor to avoid hammering Google's identity surface.
-   - Failures inside the loop are logged at DEBUG and never propagate; the next iteration tries again.
-   - Honors `NOTEBOOKLM_DISABLE_KEEPALIVE_POKE=1` (the poke itself is a no-op when set).
+   - Must be `None` or a positive finite number; `keepalive_min_interval` (default 60 s) clamps small values up to avoid hammering Google's identity surface. Invalid inputs (`0`, negative, `nan`, `inf`) raise `ValueError`.
+   - Persistence requires either `auth.storage_path` or the explicit `storage_path=` constructor arg to be set; without one of those, the loop pokes but does not write to disk.
+   - Poke failures are logged at DEBUG and never propagate. Persistence failures (the more dangerous failure mode — a rotation succeeded in memory but never landed on disk) are logged at WARNING with the storage path. Either way, the next iteration retries.
+   - Honors `NOTEBOOKLM_DISABLE_KEEPALIVE_POKE=1` (the poke itself becomes a no-op when set, but the task still wakes; pass `keepalive=None` to disable the loop entirely).
 
 3. **External recovery script (opt-in).** When auth has fully expired (idle past the rotation window, force-logout, password change), `fetch_tokens` can shell out to a user-provided refresh script, reload `storage_state.json`, and retry once.
    - Wire it up:

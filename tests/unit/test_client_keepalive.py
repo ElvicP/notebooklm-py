@@ -126,6 +126,20 @@ class TestKeepaliveFloor:
         assert client._core._keepalive_interval is None
 
 
+class TestKeepaliveValidation:
+    @pytest.mark.parametrize("bad", [0, 0.0, -1, -0.5, float("nan"), float("inf")])
+    def test_rejects_non_positive_or_non_finite_keepalive(self, mock_auth, bad):
+        """``keepalive`` must be ``None`` or a positive finite number."""
+        with pytest.raises(ValueError, match="keepalive"):
+            NotebookLMClient(mock_auth, keepalive=bad)
+
+    @pytest.mark.parametrize("bad", [0, 0.0, -1, -0.5, float("nan"), float("inf")])
+    def test_rejects_non_positive_or_non_finite_floor(self, mock_auth, bad):
+        """``keepalive_min_interval`` must be a positive finite number."""
+        with pytest.raises(ValueError, match="keepalive_min_interval"):
+            NotebookLMClient(mock_auth, keepalive=120.0, keepalive_min_interval=bad)
+
+
 class TestKeepalivePokes:
     @pytest.mark.asyncio
     @pytest.mark.no_default_keepalive_mock
@@ -185,6 +199,110 @@ class TestKeepalivePokes:
         assert (
             len(poke_requests) >= 2
         ), f"Loop should have retried after failure; got {len(poke_requests)} pokes"
+
+
+class TestKeepalivePersistenceFailure:
+    @pytest.mark.asyncio
+    @pytest.mark.no_default_keepalive_mock
+    async def test_persistence_failure_logs_warning_and_continues(
+        self, tmp_path, httpx_mock: HTTPXMock, monkeypatch, caplog
+    ):
+        """A failing ``save_cookies_to_storage`` is logged at WARNING; loop continues."""
+        auth, storage_path = _storage_auth(tmp_path)
+
+        httpx_mock.add_response(
+            url=CHECKCOOKIE_RE,
+            is_optional=True,
+            is_reusable=True,
+            status_code=204,
+        )
+
+        save_calls = []
+
+        def boom(cookies, path):
+            save_calls.append(path)
+            raise OSError("simulated disk full")
+
+        monkeypatch.setattr("notebooklm._core.save_cookies_to_storage", boom)
+
+        client = NotebookLMClient(
+            auth,
+            keepalive=0.05,
+            keepalive_min_interval=0.01,
+        )
+
+        with caplog.at_level("WARNING", logger="notebooklm._core"):
+            async with client:
+                # Wait for at least 2 save attempts
+                for _ in range(50):
+                    if len(save_calls) >= 2:
+                        break
+                    await asyncio.sleep(0.05)
+
+        assert len(save_calls) >= 2, "Loop should retry after a persistence failure"
+        warnings = [
+            r for r in caplog.records if r.levelname == "WARNING" and "persistence" in r.message
+        ]
+        assert warnings, "A persistence failure should surface as a WARNING log record"
+        assert str(storage_path) in warnings[0].message
+
+
+class TestKeepaliveExplicitStoragePath:
+    @pytest.mark.asyncio
+    @pytest.mark.no_default_keepalive_mock
+    async def test_explicit_storage_path_used_when_auth_lacks_one(
+        self, tmp_path, httpx_mock: HTTPXMock
+    ):
+        """``NotebookLMClient(storage_path=...)`` is honored even when ``auth.storage_path`` is ``None``."""
+        # storage_state.json on disk, but auth.storage_path stays None
+        storage_path = tmp_path / "storage_state.json"
+        storage_path.write_text(
+            json.dumps(
+                {
+                    "cookies": [
+                        {
+                            "name": "SID",
+                            "value": "manual_sid",
+                            "domain": ".google.com",
+                            "path": "/",
+                        },
+                    ]
+                }
+            )
+        )
+        auth = AuthTokens(
+            cookies={"SID": "manual_sid"},
+            csrf_token="t",
+            session_id="s",
+            # NOTE: storage_path is *not* set on auth
+        )
+
+        httpx_mock.add_response(
+            url=CHECKCOOKIE_RE,
+            is_optional=True,
+            is_reusable=True,
+            status_code=204,
+            headers={
+                "Set-Cookie": (
+                    "__Secure-1PSIDTS=rotated_via_explicit; Domain=.google.com; Path=/; Secure"
+                ),
+            },
+        )
+
+        client = NotebookLMClient(
+            auth,
+            storage_path=storage_path,
+            keepalive=0.05,
+            keepalive_min_interval=0.01,
+        )
+
+        async with client:
+            for _ in range(50):
+                if "rotated_via_explicit" in storage_path.read_text():
+                    break
+                await asyncio.sleep(0.05)
+            else:
+                pytest.fail("Rotated cookie was not persisted to the explicit storage path")
 
 
 class TestKeepalivePersistence:

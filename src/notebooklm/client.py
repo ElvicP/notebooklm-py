@@ -106,6 +106,7 @@ class NotebookLMClient:
             refresh_callback=self.refresh_auth,
             keepalive=keepalive,
             keepalive_min_interval=keepalive_min_interval,
+            keepalive_storage_path=storage_path,
         )
 
         # Initialize sub-client APIs
