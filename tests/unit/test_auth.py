@@ -1913,10 +1913,9 @@ class TestKeepalivePoke:
         await fetch_tokens({"SID": "x"})
 
         poke_requests = [r for r in httpx_mock.get_requests() if _POKE_URL_RE.match(str(r.url))]
-        assert len(poke_requests) == 1, (
-            f"expected exactly one CheckCookie request, got: {[str(r.url) for r in httpx_mock.get_requests()]}"
-        )
-        assert KEEPALIVE_POKE_URL.startswith(str(poke_requests[0].url).split("?")[0])
+        all_urls = [str(r.url) for r in httpx_mock.get_requests()]
+        assert len(poke_requests) == 1, f"expected exactly one CheckCookie request, got: {all_urls}"
+        assert str(poke_requests[0].url) == KEEPALIVE_POKE_URL
 
     @pytest.mark.asyncio
     async def test_poke_skipped_when_disabled(self, monkeypatch, httpx_mock: HTTPXMock):
