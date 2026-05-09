@@ -313,11 +313,12 @@ class ClientCore:
                 try:
                     # Bypass the layer-1 dedup guards: this loop is self-paced
                     # by ``keepalive_min_interval`` and never runs concurrently
-                    # with itself. Calling ``_rotate_cookies`` directly still
-                    # bumps the in-process timestamp so concurrent layer-1
-                    # callers (e.g. spawned ``fetch_tokens`` tasks) see the
-                    # fresh rotation and skip their own pokes.
-                    await _rotate_cookies(client)
+                    # with itself. Pass the storage path so the bare call
+                    # bumps the *per-profile* in-process timestamp, letting
+                    # concurrent layer-1 callers (e.g. spawned ``fetch_tokens``
+                    # tasks on the same profile) and other keepalive loops on
+                    # the same profile see the fresh rotation and skip.
+                    await _rotate_cookies(client, self._keepalive_storage_path)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001 - opportunistic best-effort

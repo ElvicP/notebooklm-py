@@ -1990,13 +1990,16 @@ class TestPokeConcurrencyThrottling:
         _stale_storage(storage_path, age_seconds=120)
 
         # Simulate an external process holding the flock by making the
-        # non-blocking acquire raise OSError. ``_file_lock_try_exclusive``
-        # treats this as "lock held elsewhere" and yields False.
+        # non-blocking acquire raise the real contention errno. Generic
+        # ``OSError`` would be treated as "lock infrastructure unavailable"
+        # and fail open instead — this test must mimic actual contention.
+        import errno as _errno
+
         if sys.platform == "win32":
             import msvcrt
 
             def fail_lock(*_args, **_kwargs):
-                raise OSError("simulated external lock holder")
+                raise OSError(_errno.EWOULDBLOCK, "simulated external lock holder")
 
             monkeypatch.setattr(msvcrt, "locking", fail_lock)
         else:
@@ -2006,7 +2009,7 @@ class TestPokeConcurrencyThrottling:
 
             def maybe_fail(fd, op):
                 if op & fcntl.LOCK_NB:
-                    raise OSError("simulated external lock holder")
+                    raise OSError(_errno.EWOULDBLOCK, "simulated external lock holder")
                 return original_flock(fd, op)
 
             monkeypatch.setattr(fcntl, "flock", maybe_fail)
@@ -2111,6 +2114,117 @@ class TestPokeConcurrencyThrottling:
         assert len(poke_requests) == 1, (
             f"failed poke must still bump the in-process attempt timestamp; "
             f"got {len(poke_requests)} POSTs (the second should have skipped)"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_default_keepalive_mock
+    async def test_per_profile_timestamp_does_not_cross_profiles(
+        self, tmp_path, httpx_mock: HTTPXMock
+    ):
+        """A poke against profile A must not suppress profile B for the window.
+
+        Multi-profile setups (``~/.notebooklm/profiles/<name>/storage_state.json``)
+        are first-class. With a single global timestamp, a CLI invocation under
+        profile ``work`` would silence rotation for profile ``personal`` for
+        the next minute.
+        """
+        profile_a = tmp_path / "a" / "storage_state.json"
+        profile_b = tmp_path / "b" / "storage_state.json"
+        for path in (profile_a, profile_b):
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps({"cookies": []}))
+            _stale_storage(path, age_seconds=120)
+
+        httpx_mock.add_response(url=_POKE_URL_RE, status_code=200, is_reusable=True)
+
+        async with httpx.AsyncClient() as client:
+            await auth_module._poke_session(client, profile_a)
+            await auth_module._poke_session(client, profile_b)
+
+        poke_requests = [r for r in httpx_mock.get_requests() if _POKE_URL_RE.match(str(r.url))]
+        assert (
+            len(poke_requests) == 2
+        ), f"each profile must rotate independently; got {len(poke_requests)} POSTs"
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_default_keepalive_mock
+    async def test_timestamp_stamped_before_post_completes(self, tmp_path, httpx_mock: HTTPXMock):
+        """A layer-1 caller arriving while a layer-2 POST is in flight must skip.
+
+        L2 keepalive calls ``_rotate_cookies`` directly (no async lock); if
+        the timestamp were only stamped in a ``finally`` after the await, an
+        L1 caller arriving mid-flight would see a stale timestamp and fire
+        its own POST. Stamping *before* the await closes that overlap.
+        """
+        storage_path = tmp_path / "storage_state.json"
+        storage_path.write_text(json.dumps({"cookies": []}))
+        _stale_storage(storage_path, age_seconds=120)
+
+        gate = asyncio.Event()
+        post_calls = 0
+
+        async def slow_post(*_args, **_kwargs):
+            nonlocal post_calls
+            post_calls += 1
+            await gate.wait()
+            return httpx.Response(
+                200,
+                request=httpx.Request("POST", auth_module.KEEPALIVE_ROTATE_URL),
+            )
+
+        async with httpx.AsyncClient() as client:
+            client.post = slow_post  # type: ignore[method-assign]
+            # L2-style: bare ``_rotate_cookies``, no per-profile async lock.
+            task_l2 = asyncio.create_task(auth_module._rotate_cookies(client, storage_path))
+            for _ in range(50):
+                if post_calls >= 1:
+                    break
+                await asyncio.sleep(0.005)
+            assert post_calls == 1, "L2 task should be parked inside slow_post"
+            # L1-style: ``_poke_session`` acquires the per-profile async lock
+            # (uncontended because L2 didn't take it) and reads the per-profile
+            # timestamp. Stamped early, this short-circuits without a 2nd POST.
+            await auth_module._poke_session(client, storage_path)
+            assert (
+                post_calls == 1
+            ), f"L1 fired during L2's in-flight POST; early-stamp broken (post_calls={post_calls})"
+            gate.set()
+            await task_l2
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_default_keepalive_mock
+    async def test_lock_unavailable_fails_open(self, tmp_path, monkeypatch, httpx_mock: HTTPXMock):
+        """Lock infrastructure failure must NOT permanently suppress rotation.
+
+        On read-only auth dirs, NFS without flock support, or permission
+        errors opening the sentinel, rotation should fall through to a
+        best-effort POST instead of being silenced for the lifetime of the
+        process.
+        """
+        import errno as _errno
+
+        storage_path = tmp_path / "storage_state.json"
+        storage_path.write_text(json.dumps({"cookies": []}))
+        _stale_storage(storage_path, age_seconds=120)
+
+        original_open = os.open
+        rotate_lock = auth_module._rotation_lock_path(storage_path)
+
+        def selective_open(path, *args, **kwargs):
+            if str(path) == str(rotate_lock):
+                raise OSError(_errno.EACCES, "simulated read-only auth dir")
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "open", selective_open)
+        httpx_mock.add_response(url=_POKE_URL_RE, status_code=200, is_reusable=True)
+
+        async with httpx.AsyncClient() as client:
+            await auth_module._poke_session(client, storage_path)
+
+        poke_requests = [r for r in httpx_mock.get_requests() if _POKE_URL_RE.match(str(r.url))]
+        assert len(poke_requests) == 1, (
+            f"infra failure must fail open and let rotation proceed; "
+            f"got {len(poke_requests)} POSTs"
         )
 
     @pytest.mark.asyncio

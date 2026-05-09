@@ -1,6 +1,5 @@
 """Shared test fixtures."""
 
-import asyncio
 import json
 import os
 import re
@@ -14,27 +13,26 @@ from notebooklm.rpc import RPCMethod
 def _reset_poke_state():
     """Reset module-level rotation guards between tests.
 
-    Two pieces of module-global state in ``notebooklm.auth`` persist across
-    tests and need a clean slate per test:
+    The ``notebooklm.auth`` rotation throttle keeps two pieces of module-global
+    state that persist across tests and would otherwise leak:
 
-    1. ``_LAST_POKE_ATTEMPT_MONOTONIC`` — without resetting, the first test
-       that triggers a poke sets the timestamp and subsequent tests in the
-       same file see "we just poked" and skip the POST they were trying to
-       assert on.
-    2. ``_POKE_ASYNC_LOCK`` — if a prior test crashed inside ``async with``
-       (or pytest-asyncio tore down its event loop mid-await), the module
-       lock can be left in a locked state. Rebinding it gives every test a
-       fresh asyncio.Lock bound to the current event loop. Safe to construct
-       outside a running loop on Python 3.10+ (the lock binds lazily at
-       acquisition time).
+    1. ``_LAST_POKE_ATTEMPT_MONOTONIC`` (``dict[Path | None, float]``) — keyed
+       per-profile. Without clearing, the first test to poke any profile sets
+       the timestamp and subsequent tests in that file see "we just poked"
+       and silently skip the POST they're asserting on.
+    2. ``_POKE_LOCKS`` (``dict[(loop_id, Path | None), asyncio.Lock]``) — each
+       per-loop/profile lock is bound to the event loop that created it.
+       pytest-asyncio creates a fresh loop per test, so prior locks are
+       attached to torn-down loops; clearing forces lazy recreation against
+       the live loop on first acquire.
     """
     from notebooklm import auth as _auth
 
-    _auth._LAST_POKE_ATTEMPT_MONOTONIC = 0.0
-    _auth._POKE_ASYNC_LOCK = asyncio.Lock()
+    _auth._LAST_POKE_ATTEMPT_MONOTONIC.clear()
+    _auth._POKE_LOCKS.clear()
     yield
-    _auth._LAST_POKE_ATTEMPT_MONOTONIC = 0.0
-    _auth._POKE_ASYNC_LOCK = asyncio.Lock()
+    _auth._LAST_POKE_ATTEMPT_MONOTONIC.clear()
+    _auth._POKE_LOCKS.clear()
 
 
 @pytest.fixture(autouse=True)
