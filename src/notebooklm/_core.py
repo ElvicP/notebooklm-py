@@ -282,13 +282,13 @@ class ClientCore:
                 # iteration). ``copy.deepcopy`` on the jar fails (the internal
                 # ``http.cookiejar.CookieJar`` carries a non-picklable
                 # ``RLock``), so re-build a fresh jar by iterating the live
-                # one. The iteration itself is atomic under the RLock, and
+                # one — which is exactly what ``httpx.Cookies(other_cookies)``
+                # does internally (`set_cookie` per cookie into a fresh
+                # ``CookieJar``). The iteration is atomic under the RLock, and
                 # ``http.cookiejar.Cookie`` objects are effectively immutable
                 # — a later ``set_cookie`` of the same name replaces the dict
                 # entry but does not mutate the previous object.
-                jar_snapshot = httpx.Cookies()
-                for cookie in client.cookies.jar:
-                    jar_snapshot.jar.set_cookie(cookie)
+                jar_snapshot = httpx.Cookies(client.cookies)
                 try:
                     # save_cookies_to_storage performs sync disk I/O; off-load to
                     # a worker thread so we don't stall the event loop on every
