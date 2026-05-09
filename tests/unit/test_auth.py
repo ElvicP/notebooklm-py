@@ -1691,9 +1691,9 @@ class TestExtractCookiesRegionalDomains:
             results.add(cookies["SID"])
 
         # All permutations should produce the same result: .google.com wins
-        assert results == {"sid_base"}, (
-            f"Extraction should be deterministic, but got different results: {results}"
-        )
+        assert results == {
+            "sid_base"
+        }, f"Extraction should be deterministic, but got different results: {results}"
 
     def test_regional_only_uses_first_encountered(self):
         """Test behavior when only regional domains exist (no .google.com).
@@ -1993,9 +1993,9 @@ class TestKeepalivePoke:
 
         rewritten = json.loads(storage_path.read_text())
         sidts_values = [c["value"] for c in rewritten["cookies"] if c["name"] == "__Secure-1PSIDTS"]
-        assert sidts_values == ["ROTATED"], (
-            f"expected rotated SIDTS persisted to disk, got: {sidts_values}"
-        )
+        assert sidts_values == [
+            "ROTATED"
+        ], f"expected rotated SIDTS persisted to disk, got: {sidts_values}"
 
     @pytest.mark.asyncio
     @pytest.mark.no_default_keepalive_mock
@@ -2038,9 +2038,9 @@ class TestKeepalivePoke:
 
         rewritten = json.loads(storage_path.read_text())
         sidts_values = [c["value"] for c in rewritten["cookies"] if c["name"] == "__Secure-1PSIDTS"]
-        assert sidts_values == ["ROTATED_ON_REDIRECT"], (
-            f"expected redirect-emitted SIDTS persisted, got: {sidts_values}"
-        )
+        assert sidts_values == [
+            "ROTATED_ON_REDIRECT"
+        ], f"expected redirect-emitted SIDTS persisted, got: {sidts_values}"
 
     @pytest.mark.asyncio
     @pytest.mark.no_default_keepalive_mock
