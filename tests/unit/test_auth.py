@@ -123,17 +123,16 @@ class TestExtractCookies:
         assert cookies["SID"] == "sid_value"
         assert cookies["OSID"] == "osid_base"
 
-    def test_prefers_notebooklm_subdomain_cookie_over_regional(self):
-        """Test NotebookLM subdomain wins duplicate names from regional domains."""
+    @pytest.mark.parametrize(
+        "notebooklm_domain", [".notebooklm.google.com", "notebooklm.google.com"]
+    )
+    def test_prefers_notebooklm_subdomain_cookie_over_regional(self, notebooklm_domain):
+        """Both NotebookLM subdomain forms win duplicate names from regional domains."""
         storage_state = {
             "cookies": [
                 {"name": "SID", "value": "sid_value", "domain": ".google.com"},
                 {"name": "OSID", "value": "osid_regional", "domain": ".google.de"},
-                {
-                    "name": "OSID",
-                    "value": "osid_subdomain",
-                    "domain": ".notebooklm.google.com",
-                },
+                {"name": "OSID", "value": "osid_subdomain", "domain": notebooklm_domain},
             ]
         }
 
@@ -141,6 +140,59 @@ class TestExtractCookies:
 
         assert cookies["SID"] == "sid_value"
         assert cookies["OSID"] == "osid_subdomain"
+
+    def test_prefers_dotted_notebooklm_over_no_dot_variant(self):
+        """Playwright canonical (.notebooklm.google.com) wins over the no-dot form."""
+        storage_state = {
+            "cookies": [
+                {"name": "SID", "value": "sid_value", "domain": ".google.com"},
+                {"name": "OSID", "value": "osid_no_dot", "domain": "notebooklm.google.com"},
+                {"name": "OSID", "value": "osid_dotted", "domain": ".notebooklm.google.com"},
+            ]
+        }
+
+        cookies = extract_cookies_from_storage(storage_state)
+
+        assert cookies["OSID"] == "osid_dotted"
+
+        # Reverse list order — dotted variant should still win deterministically.
+        storage_state["cookies"][1], storage_state["cookies"][2] = (
+            storage_state["cookies"][2],
+            storage_state["cookies"][1],
+        )
+        cookies = extract_cookies_from_storage(storage_state)
+        assert cookies["OSID"] == "osid_dotted"
+
+    def test_prefers_regional_over_googleusercontent(self):
+        """Regional Google cookies win over .googleusercontent.com (priority 0)."""
+        storage_state = {
+            "cookies": [
+                {"name": "SID", "value": "sid_value", "domain": ".google.com"},
+                {"name": "X", "value": "x_uc", "domain": ".googleusercontent.com"},
+                {"name": "X", "value": "x_regional", "domain": ".google.de"},
+            ]
+        }
+        cookies = extract_cookies_from_storage(storage_state)
+        assert cookies["X"] == "x_regional"
+
+        # Reverse order — regional should still win.
+        storage_state["cookies"][1], storage_state["cookies"][2] = (
+            storage_state["cookies"][2],
+            storage_state["cookies"][1],
+        )
+        cookies = extract_cookies_from_storage(storage_state)
+        assert cookies["X"] == "x_regional"
+
+    def test_first_google_com_duplicate_wins(self):
+        """Within the .google.com tier, the first occurrence wins; later duplicates are ignored."""
+        storage_state = {
+            "cookies": [
+                {"name": "SID", "value": "first", "domain": ".google.com"},
+                {"name": "SID", "value": "second", "domain": ".google.com"},
+            ]
+        }
+        cookies = extract_cookies_from_storage(storage_state)
+        assert cookies["SID"] == "first"
 
     def test_raises_if_missing_sid(self):
         storage_state = {
@@ -964,6 +1016,43 @@ class TestIsAllowedAuthDomain:
         assert _is_allowed_auth_domain("google.com.sg") is False
         assert _is_allowed_auth_domain("google.co.uk") is False
         assert _is_allowed_auth_domain("google.de") is False
+
+
+class TestAuthDomainPriority:
+    """Test `_auth_domain_priority` tier mapping for duplicate-cookie resolution."""
+
+    @pytest.mark.parametrize(
+        "domain,expected",
+        [
+            (".google.com", 4),
+            (".notebooklm.google.com", 3),
+            ("notebooklm.google.com", 2),
+            (".google.de", 1),
+            (".google.com.sg", 1),
+            (".google.co.uk", 1),
+            (".googleusercontent.com", 0),
+            ("evil.com", 0),
+            ("", 0),
+        ],
+    )
+    def test_priority_tiers(self, domain, expected):
+        from notebooklm.auth import _auth_domain_priority
+
+        assert _auth_domain_priority(domain) == expected
+
+    def test_priority_strict_ordering(self):
+        """Higher tiers strictly outrank lower tiers — no ties between named tiers."""
+        from notebooklm.auth import _auth_domain_priority
+
+        priorities = [
+            _auth_domain_priority(".google.com"),
+            _auth_domain_priority(".notebooklm.google.com"),
+            _auth_domain_priority("notebooklm.google.com"),
+            _auth_domain_priority(".google.de"),
+            _auth_domain_priority(".googleusercontent.com"),
+        ]
+        assert priorities == sorted(priorities, reverse=True)
+        assert len(set(priorities)) == len(priorities)
 
 
 class TestIsAllowedCookieDomainRegional:

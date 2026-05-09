@@ -257,13 +257,20 @@ def _is_allowed_auth_domain(domain: str) -> bool:
 
 
 def _auth_domain_priority(domain: str) -> int:
-    """Return duplicate-cookie priority for allowed auth domains."""
+    """Return duplicate-cookie priority for allowed auth domains.
+
+    Higher value wins. Tiers are distinct so the resolved cookie is fully
+    deterministic regardless of storage_state ordering.
+    """
     if domain == ".google.com":
+        return 4
+    if domain == ".notebooklm.google.com":
         return 3
-    if domain in {".notebooklm.google.com", "notebooklm.google.com"}:
+    if domain == "notebooklm.google.com":
         return 2
     if _is_google_domain(domain):
         return 1
+    # Allowlisted but unranked domains (e.g. .googleusercontent.com) fall through.
     return 0
 
 
@@ -332,11 +339,15 @@ def extract_cookies_from_storage(storage_state: dict[str, Any]) -> dict[str, str
         .google.com and .google.com.sg), we use this priority order:
 
         1. .google.com (base domain) - ALWAYS preferred when present
-        2. NotebookLM subdomain - preferred for NotebookLM-specific cookies
-        3. Regional domains - used as fallback when higher-priority cookies are missing
+        2. .notebooklm.google.com (Playwright canonical NotebookLM subdomain)
+        3. notebooklm.google.com (no-dot NotebookLM subdomain)
+        4. Regional domains (e.g. .google.de, .google.com.sg, .google.co.uk)
+        5. Other allowlisted domains (e.g. .googleusercontent.com)
 
-        This prevents non-deterministic behavior where dict iteration order would
-        determine which cookie value wins. See PR #34 for the bug this fixes.
+        Within a single priority tier, the first occurrence in the list wins;
+        later duplicates at the same tier are ignored. Tiers are distinct so the
+        outcome is deterministic regardless of storage_state ordering. See PR #34
+        for the bug this fixes.
 
     Args:
         storage_state: Parsed JSON from Playwright's storage state file.
