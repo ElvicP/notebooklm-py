@@ -429,6 +429,7 @@ class Notebook:
         """
         raw_title = data[0] if len(data) > 0 and isinstance(data[0], str) else ""
         title = raw_title.replace("thought\n", "").strip()
+        sources_count = len(data[1]) if len(data) > 1 and isinstance(data[1], list) else 0
         notebook_id = data[2] if len(data) > 2 and isinstance(data[2], str) else ""
 
         created_at = None
@@ -445,7 +446,13 @@ class Notebook:
         if len(data) > 5 and isinstance(data[5], list) and len(data[5]) > 1:
             is_owner = data[5][1] is False
 
-        return cls(id=notebook_id, title=title, created_at=created_at, is_owner=is_owner)
+        return cls(
+            id=notebook_id,
+            title=title,
+            created_at=created_at,
+            sources_count=sources_count,
+            is_owner=is_owner,
+        )
 
 
 @dataclass
