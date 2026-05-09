@@ -36,13 +36,33 @@ import sys
 
 
 def main() -> int:
+    missing = [
+        var
+        for var in ("NOTEBOOKLM_REFRESH_PROFILE", "NOTEBOOKLM_REFRESH_STORAGE_PATH")
+        if not os.environ.get(var)
+    ]
+    if missing:
+        print(
+            "refresh_browser_cookies.py: missing required environment variable(s): "
+            f"{', '.join(missing)}. This script is intended to be invoked by the "
+            "library via NOTEBOOKLM_REFRESH_CMD, not run directly. See the docstring "
+            "for setup instructions.",
+            file=sys.stderr,
+        )
+        return 2
+
     profile = os.environ["NOTEBOOKLM_REFRESH_PROFILE"]
     storage = os.environ["NOTEBOOKLM_REFRESH_STORAGE_PATH"]
     browser = os.environ.get("NOTEBOOKLM_REFRESH_BROWSER", "chrome")
 
+    # Use `python -m notebooklm.notebooklm_cli` instead of the `notebooklm` console
+    # script so the script works inside venvs where the console script isn't on PATH
+    # (e.g. cron jobs that don't source the venv's activate).
     return subprocess.call(
         [
-            "notebooklm",
+            sys.executable,
+            "-m",
+            "notebooklm.notebooklm_cli",
             "login",
             "--browser-cookies",
             browser,

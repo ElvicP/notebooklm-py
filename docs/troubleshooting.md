@@ -37,7 +37,7 @@ This means most "CSRF token expired" errors resolve automatically.
 
 #### Cookie freshness for long-running / unattended use
 
-Google rotates `__Secure-1PSIDTS` (the freshness partner of `__Secure-1PSID`) on a short schedule and only emits the rotated value when the client touches an identity surface like `accounts.google.com`. RPC traffic against `notebooklm.google.com` alone never triggers rotation, so an unattended keepalive that "just calls list every 30 minutes" can die after ~10-30 minutes despite the cookies looking fine on disk. The library handles this in three layers, ordered from cheapest to heaviest:
+Google rotates `__Secure-1PSIDTS` (the freshness partner of `__Secure-1PSID`) on a short schedule and emits the rotated value when the client touches an identity surface like `accounts.google.com`. RPC traffic against `notebooklm.google.com` alone does not appear to trigger rotation, so an unattended keepalive that "just calls list every 30 minutes" can die after ~10-30 minutes despite the cookies looking fine on disk. The library handles this in three layers, ordered from cheapest to heaviest:
 
 1. **Per-call rotation poke (default ON).** Every `fetch_tokens` call makes a best-effort GET to `https://accounts.google.com/CheckCookie`. The rotated `Set-Cookie` lands in the httpx jar and is persisted on session close. Failures are logged at DEBUG and never abort the call.
    - Disable in restricted networks: `export NOTEBOOKLM_DISABLE_KEEPALIVE_POKE=1`
@@ -56,11 +56,11 @@ For most users layer 1 alone is enough. Add layer 2 for cron-driven or agent-dri
 
 #### macOS: `--browser-cookies` prompts for your password
 
-On macOS, Chrome (and Edge / Brave / Opera) encrypts its cookies file with a key stored in the **macOS Keychain** under the entry `Chrome Safe Storage`. By default that entry's ACL only allows `Google Chrome.app` itself to read the key without prompting; any other process — Python, Terminal, cron, an editor — gets a "wants to use the *Chrome Safe Storage* key" dialog. This is fundamental to macOS Keychain security and applies to every cookie-extraction tool (`rookiepy`, `browser-cookie3`, `pycookiecheat`), not just `notebooklm-py`.
+On macOS, Chrome (and Edge / Brave / Opera) encrypts its cookies file with a key stored in the **macOS Keychain** under the entry `Chrome Safe Storage`. By default that entry's ACL only allows `Google Chrome.app` itself to read the key without prompting; any other process — Python, Terminal, cron, an editor — gets a "wants to use the *Chrome Safe Storage* key" dialog. This is how macOS Keychain protects local data and applies to every cookie-extraction tool (`rookiepy`, `browser-cookie3`, `pycookiecheat`), not just `notebooklm-py`.
 
 Workarounds, ordered by hassle:
 
-1. **Click "Always Allow" in the prompt.** Adds the calling Python interpreter to the Keychain entry's ACL so subsequent runs of *that exact binary* don't re-prompt. Caveat: rebuilding your venv (e.g. `uv venv` again) usually changes the interpreter path and you'll be re-prompted once for the new path.
+1. **Click "Always Allow" in the prompt.** Adds the calling Python interpreter to the Keychain entry's ACL so subsequent runs of *that exact binary* should stop prompting. Caveat: rebuilding your venv (e.g. `uv venv` again) usually changes the interpreter path and you'll be re-prompted once for the new path.
 
 2. **Use Touch ID instead of typing the password.** macOS Sonoma+ accepts Touch ID for Keychain dialogs — see *System Settings → Touch ID & Password*.
 

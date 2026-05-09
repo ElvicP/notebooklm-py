@@ -1996,3 +1996,63 @@ class TestKeepalivePoke:
         assert sidts_values == ["ROTATED"], (
             f"expected rotated SIDTS persisted to disk, got: {sidts_values}"
         )
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_default_keepalive_mock
+    async def test_poke_set_cookie_on_redirect_lands_in_jar(self, tmp_path, httpx_mock: HTTPXMock):
+        """Set-Cookie emitted on a CheckCookie 302 hop is captured (follow_redirects)."""
+        storage_path = tmp_path / "storage_state.json"
+        storage_path.write_text(
+            json.dumps(
+                {
+                    "cookies": [
+                        {"name": "SID", "value": "old_sid", "domain": ".google.com", "path": "/"}
+                    ]
+                }
+            )
+        )
+        # CheckCookie often 302s through an intermediate identity surface.
+        # The rotated cookie is set on the redirect response, not the terminal one.
+        httpx_mock.add_response(
+            url=_POKE_URL_RE,
+            status_code=302,
+            headers={
+                "Location": "https://accounts.google.com/ListAccounts",
+                "Set-Cookie": (
+                    "__Secure-1PSIDTS=ROTATED_ON_REDIRECT; "
+                    "Domain=.google.com; Path=/; Secure; HttpOnly"
+                ),
+            },
+        )
+        httpx_mock.add_response(
+            url="https://accounts.google.com/ListAccounts",
+            status_code=200,
+            content=b"",
+        )
+        httpx_mock.add_response(
+            url="https://notebooklm.google.com/",
+            content=_NOTEBOOKLM_HOMEPAGE_HTML,
+        )
+
+        await fetch_tokens_with_domains(path=storage_path)
+
+        rewritten = json.loads(storage_path.read_text())
+        sidts_values = [c["value"] for c in rewritten["cookies"] if c["name"] == "__Secure-1PSIDTS"]
+        assert sidts_values == ["ROTATED_ON_REDIRECT"], (
+            f"expected redirect-emitted SIDTS persisted, got: {sidts_values}"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_default_keepalive_mock
+    async def test_token_fetch_succeeds_when_poke_raises_httperror(self, httpx_mock: HTTPXMock):
+        """Network-level HTTPError on the poke is swallowed at DEBUG; token fetch proceeds."""
+        httpx_mock.add_exception(httpx.ConnectError("simulated DNS failure"), url=_POKE_URL_RE)
+        httpx_mock.add_response(
+            url="https://notebooklm.google.com/",
+            content=_NOTEBOOKLM_HOMEPAGE_HTML,
+        )
+
+        csrf, session_id = await fetch_tokens({"SID": "x"})
+
+        assert csrf == "csrf_ok"
+        assert session_id == "sess_ok"
