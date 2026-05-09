@@ -54,6 +54,36 @@ Google rotates `__Secure-1PSIDTS` (the freshness partner of `__Secure-1PSID`) on
 
 For most users layer 1 alone is enough. Add layer 2 for cron-driven or agent-driven workflows where there's no human at the terminal to run `notebooklm login`.
 
+#### macOS: `--browser-cookies` prompts for your password
+
+On macOS, Chrome (and Edge / Brave / Opera) encrypts its cookies file with a key stored in the **macOS Keychain** under the entry `Chrome Safe Storage`. By default that entry's ACL only allows `Google Chrome.app` itself to read the key without prompting; any other process — Python, Terminal, cron, an editor — gets a "wants to use the *Chrome Safe Storage* key" dialog. This is fundamental to macOS Keychain security and applies to every cookie-extraction tool (`rookiepy`, `browser-cookie3`, `pycookiecheat`), not just `notebooklm-py`.
+
+Workarounds, ordered by hassle:
+
+1. **Click "Always Allow" in the prompt.** Adds the calling Python interpreter to the Keychain entry's ACL so subsequent runs of *that exact binary* don't re-prompt. Caveat: rebuilding your venv (e.g. `uv venv` again) usually changes the interpreter path and you'll be re-prompted once for the new path.
+
+2. **Use Touch ID instead of typing the password.** macOS Sonoma+ accepts Touch ID for Keychain dialogs — see *System Settings → Touch ID & Password*.
+
+3. **Pre-unlock the login keychain in your shell** (best for cron jobs after one initial interactive run):
+   ```bash
+   security unlock-keychain ~/Library/Keychains/login.keychain-db
+   ```
+   Prompts once for your login password, then any process in the same login session can read entries you've already approved without re-prompting until the keychain auto-locks.
+
+4. **Use Firefox as the cookie source.** Firefox stores cookies in a plain SQLite DB (no Keychain), so `notebooklm login --browser-cookies firefox` runs with **no prompt at all** — provided you're logged into Google in Firefox.
+   ```bash
+   notebooklm login --browser-cookies firefox
+   ```
+   This is the simplest answer for unattended macOS use.
+
+5. **Truly headless servers.** `--browser-cookies` is not the right tool — there's no live browser to extract from. Either re-extract on a workstation and ship `storage_state.json` to the server, or accept that human interaction is needed when cookies finally expire.
+
+Quick diagnostic:
+```bash
+security find-generic-password -s 'Chrome Safe Storage' -a 'Chrome' -w >/dev/null && echo OK || echo "ACL or lock issue"
+```
+Prints `OK` without prompting → keychain is unlocked and your user has access; the prompt you saw is the per-binary ACL re-asking for a new caller (your Python). Click *Always Allow* once and that binary is permanently approved. If it prompts → run `security unlock-keychain` first.
+
 #### "Unauthorized" or redirect to login page
 
 **Cause:** Session cookies expired (happens every few weeks).
