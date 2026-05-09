@@ -1234,15 +1234,23 @@ _KEEPALIVE_POKE_TIMEOUT = 15.0
 # invocations) that would each fire their own rotation. Google's own declared
 # rotation cadence is 600 s, so 60 s is well under the useful interval.
 _KEEPALIVE_RATE_LIMIT_SECONDS = 60.0
+# Sub-second drift between ``time.time()`` and filesystem mtime can land a
+# freshly-written file fractionally in the future on some platforms (notably
+# Windows + older Python where the clock is coarser than NTFS mtime). Tolerate
+# that without re-opening the "future mtime wedges the guard" bug.
+_KEEPALIVE_PRECISION_TOLERANCE = 2.0
 
 
 def _is_recently_rotated(storage_path: Path | None) -> bool:
     """Return True if ``storage_path`` was modified within the rate-limit window.
 
-    A future mtime (clock skew, NTP step, restored file, NFS drift) is treated
-    as **not recent**: we'd rather fire one extra rotation than wedge the guard
-    until wall time catches up. A missing/unreadable file falls through to the
-    same not-recent default.
+    A meaningfully-future mtime (clock skew, NTP step, restored file, NFS drift)
+    is treated as **not recent**: we'd rather fire one extra rotation than wedge
+    the guard until wall time catches up. The lower bound is a small negative
+    tolerance to absorb sub-second drift between ``time.time()`` and filesystem
+    mtime resolution (notably Windows NTFS at lower clock granularity), which
+    can otherwise classify a freshly-written file as future-dated. A
+    missing/unreadable file falls through to the not-recent default.
     """
     if storage_path is None:
         return False
@@ -1251,7 +1259,7 @@ def _is_recently_rotated(storage_path: Path | None) -> bool:
     except OSError:
         return False
     age = time.time() - mtime
-    return 0 <= age <= _KEEPALIVE_RATE_LIMIT_SECONDS
+    return -_KEEPALIVE_PRECISION_TOLERANCE <= age <= _KEEPALIVE_RATE_LIMIT_SECONDS
 
 
 async def _poke_session(client: httpx.AsyncClient, storage_path: Path | None = None) -> None:
@@ -1286,13 +1294,17 @@ async def _poke_session(client: httpx.AsyncClient, storage_path: Path | None = N
         # answers 200 directly with the rotated Set-Cookie, but if Google ever
         # routes a 30x through an identity hop we still pick up cookies from
         # the terminal response.
-        await client.post(
+        response = await client.post(
             KEEPALIVE_ROTATE_URL,
             headers=_KEEPALIVE_ROTATE_HEADERS,
             content=_KEEPALIVE_ROTATE_BODY,
             follow_redirects=True,
             timeout=_KEEPALIVE_POKE_TIMEOUT,
         )
+        # httpx does not auto-raise on 4xx/5xx; without this, a 429 or 5xx from
+        # Google would log nothing and the caller would proceed assuming the
+        # rotation happened.
+        response.raise_for_status()
     except httpx.HTTPError as exc:
         logger.debug("Keepalive RotateCookies POST failed (non-fatal): %s", exc)
 
