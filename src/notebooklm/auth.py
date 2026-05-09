@@ -39,6 +39,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Iterator
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
@@ -858,7 +859,7 @@ _LOCK_CONTENTION_ERRNOS = {errno.EWOULDBLOCK, errno.EAGAIN, errno.EACCES}
 
 
 @contextlib.contextmanager
-def _file_lock(lock_path: Path, *, blocking: bool, log_prefix: str) -> Any:
+def _file_lock(lock_path: Path, *, blocking: bool, log_prefix: str) -> Iterator[str]:
     """Cross-process exclusive lock on ``lock_path``.
 
     Yields one of:
@@ -927,7 +928,7 @@ def _file_lock(lock_path: Path, *, blocking: bool, log_prefix: str) -> Any:
 
 
 @contextlib.contextmanager
-def _file_lock_exclusive(lock_path: Path) -> Any:
+def _file_lock_exclusive(lock_path: Path) -> Iterator[None]:
     """Blocking cross-process exclusive lock on ``lock_path``.
 
     Multiple Python processes that all save to the same ``storage_state.json``
@@ -1340,7 +1341,7 @@ def _rotation_lock_path(storage_path: Path | None) -> Path | None:
 
 
 @contextlib.contextmanager
-def _file_lock_try_exclusive(lock_path: Path) -> Any:
+def _file_lock_try_exclusive(lock_path: Path) -> Iterator[bool]:
     """Non-blocking exclusive flock. Yields ``True`` if caller should proceed.
 
     Mirrors :func:`_file_lock_exclusive` but with ``LOCK_NB`` semantics:
