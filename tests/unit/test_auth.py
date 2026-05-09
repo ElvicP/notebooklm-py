@@ -2193,6 +2193,33 @@ class TestPokeConcurrencyThrottling:
 
     @pytest.mark.asyncio
     @pytest.mark.no_default_keepalive_mock
+    async def test_concurrent_rotate_cookies_same_profile_share_single_post(
+        self, tmp_path, httpx_mock: HTTPXMock
+    ):
+        """Two layer-2-style direct ``_rotate_cookies`` calls on the same profile
+        must share a single POST — verifies the atomic check-and-claim, not
+        just the layer-1 async lock.
+        """
+        storage_path = tmp_path / "storage_state.json"
+
+        httpx_mock.add_response(url=_POKE_URL_RE, status_code=200, is_reusable=True)
+
+        async with httpx.AsyncClient() as client:
+            # Two L2-style direct callers. Neither holds the layer-1 async
+            # lock; the dedup must come from ``_try_claim_rotation``.
+            await asyncio.gather(
+                auth_module._rotate_cookies(client, storage_path),
+                auth_module._rotate_cookies(client, storage_path),
+            )
+
+        poke_requests = [r for r in httpx_mock.get_requests() if _POKE_URL_RE.match(str(r.url))]
+        assert len(poke_requests) == 1, (
+            f"two L2 callers on the same profile must coordinate via the atomic "
+            f"claim; got {len(poke_requests)} POSTs"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_default_keepalive_mock
     async def test_lock_unavailable_fails_open(self, tmp_path, monkeypatch, httpx_mock: HTTPXMock):
         """Lock infrastructure failure must NOT permanently suppress rotation.
 

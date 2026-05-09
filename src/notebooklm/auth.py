@@ -39,6 +39,7 @@ import sys
 import tempfile
 import threading
 import time
+import weakref
 from collections.abc import Iterator
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -1286,29 +1287,43 @@ _KEEPALIVE_PRECISION_TOLERANCE = 2.0
 # In-process state for rotation throttling, keyed per-profile and per-loop.
 #
 # - Per-profile (``storage_path``) so a rotation against profile A doesn't
-#   suppress profile B for the rate-limit window. A `None` key represents
+#   suppress profile B for the rate-limit window. A ``None`` key represents
 #   env-var auth.
-# - Per event loop (``id(asyncio.get_running_loop())``) because
-#   ``asyncio.Lock`` is loop-bound: a lock created in loop X cannot be safely
-#   awaited from loop Y. Multiple ``asyncio.run()`` invocations in the same
-#   process, or worker threads each running their own loop, would otherwise
-#   trip ``RuntimeError`` or leave waiters in inconsistent state.
+# - Per event loop because ``asyncio.Lock`` is loop-bound: a lock created in
+#   loop X cannot be safely awaited from loop Y. Multiple ``asyncio.run()``
+#   invocations in the same process, or worker threads each running their
+#   own loop, would otherwise trip ``RuntimeError`` or leave waiters in
+#   inconsistent state.
 #
-# The dict registry is shared across threads, so a sync ``threading.Lock``
-# protects insertion. Reads are racy but only matter when a lock entry is
-# missing on the first poke from a new (loop, profile) pair — at worst we
-# create two locks and the second wins; correctness is preserved because each
-# lock still serialises its own loop's callers and the per-profile timestamp
-# is the authoritative dedup signal.
-_POKE_REGISTRY_LOCK = threading.Lock()
-_POKE_LOCKS: dict[tuple[int, Path | None], asyncio.Lock] = {}
+# The outer registry is a ``WeakKeyDictionary`` keyed on the loop *object* (not
+# its ``id()``): when a loop is garbage-collected, its inner dict is reclaimed
+# automatically. This bounds the lock cache for hosts that repeatedly create
+# short-lived loops, and avoids the ``id()``-reuse hazard where a closed loop's
+# stale lock could be returned to a new loop that happens to allocate at the
+# same address.
+#
+# ``_POKE_STATE_LOCK`` (sync ``threading.Lock``) protects three module-level
+# operations that must be atomic across threads:
+#   1. ``_get_poke_lock``: get-or-create the per-(loop, profile) async lock.
+#   2. ``_try_claim_rotation``: atomic check-and-stamp of the per-profile
+#      timestamp. Without this, two direct ``_rotate_cookies`` callers (e.g.
+#      two layer-2 keepalive loops on the same profile, or a layer-1 +
+#      layer-2 pair on different event loops) can each read a stale 0.0
+#      and both fire the POST.
+#   3. Reads of ``_LAST_POKE_ATTEMPT_MONOTONIC`` from layer-1's pre-claim
+#      fast-path inside ``_poke_session``.
+# It is held briefly, never across an ``await``, so it cannot deadlock against
+# any asyncio primitive.
+_POKE_STATE_LOCK = threading.Lock()
+_POKE_LOCKS_BY_LOOP: "weakref.WeakKeyDictionary[Any, dict[Path | None, asyncio.Lock]]" = (
+    weakref.WeakKeyDictionary()
+)
 # Monotonic timestamp of the last in-process poke *attempt* (success or
-# failure), keyed by storage_path. Stamped *before* the network await so an
-# in-flight POST already suppresses concurrent callers — this closes the
-# layer-1/layer-2 overlap window where both could fire while one is hanging.
-# Failure-stampede protection comes for free: if the POST fails or times out,
-# the timestamp is still set, so 10 fanned-out callers don't each wait the
-# full 15 s timeout against a hung accounts.google.com.
+# failure), keyed by storage_path. Stamped under ``_POKE_STATE_LOCK`` inside
+# ``_try_claim_rotation`` so the check-and-set is atomic across event loops
+# and across direct ``_rotate_cookies`` callers. Failure-stampede protection
+# comes for free: even a POST that times out has already claimed the slot,
+# so 10 fanned-out callers don't each wait 15 s on a hung server.
 _LAST_POKE_ATTEMPT_MONOTONIC: dict[Path | None, float] = {}
 
 
@@ -1316,17 +1331,39 @@ def _get_poke_lock(storage_path: Path | None) -> asyncio.Lock:
     """Return the ``asyncio.Lock`` for ``(running event loop, storage_path)``.
 
     Lazily created on first call from each loop/profile pair so the lock binds
-    to the current loop. The registry-mutation step uses a sync
-    ``threading.Lock`` so cross-thread asyncio users don't tear the dict.
+    to the current loop. The dict mutation runs under the sync state lock so
+    concurrent threads with their own loops don't tear the registry.
     """
-    loop_id = id(asyncio.get_running_loop())
-    key = (loop_id, storage_path)
-    with _POKE_REGISTRY_LOCK:
-        lock = _POKE_LOCKS.get(key)
+    loop = asyncio.get_running_loop()
+    with _POKE_STATE_LOCK:
+        per_loop = _POKE_LOCKS_BY_LOOP.get(loop)
+        if per_loop is None:
+            per_loop = {}
+            _POKE_LOCKS_BY_LOOP[loop] = per_loop
+        lock = per_loop.get(storage_path)
         if lock is None:
             lock = asyncio.Lock()
-            _POKE_LOCKS[key] = lock
+            per_loop[storage_path] = lock
         return lock
+
+
+def _try_claim_rotation(storage_path: Path | None) -> bool:
+    """Atomic check-and-claim of the per-profile rotation slot.
+
+    Returns ``True`` if the caller may proceed with the POST, ``False`` if
+    another in-process call has claimed the slot within the rate-limit
+    window. The claim and the timestamp update happen under one sync lock,
+    so this is safe across event loops and across direct
+    ``_rotate_cookies`` callers (layer-2 keepalive loops, etc.) — neither
+    of which holds the per-loop async lock used by layer-1 ``_poke_session``.
+    """
+    with _POKE_STATE_LOCK:
+        last = _LAST_POKE_ATTEMPT_MONOTONIC.get(storage_path, 0.0)
+        now = time.monotonic()
+        if last > 0 and (now - last) < _KEEPALIVE_RATE_LIMIT_SECONDS:
+            return False
+        _LAST_POKE_ATTEMPT_MONOTONIC[storage_path] = now
+        return True
 
 
 def _rotation_lock_path(storage_path: Path | None) -> Path | None:
@@ -1433,34 +1470,18 @@ async def _poke_session(client: httpx.AsyncClient, storage_path: Path | None = N
         return
 
     async with _get_poke_lock(storage_path):
-        # Re-check after acquiring the in-process lock — another task may have
-        # rotated and persisted while we were waiting.
+        # Re-check after acquiring the per-(loop, profile) async lock — another
+        # task in this loop may have rotated and persisted while we were waiting.
         if _is_recently_rotated(storage_path):
             logger.debug(
                 "Keepalive RotateCookies skipped: storage refreshed while waiting for lock"
-            )
-            return
-        # In-process tasks contend on the async lock before storage_state.json
-        # has been written (the save happens in the caller, after this returns).
-        # The monotonic timestamp closes that gap. Per-profile keying so a
-        # rotation against profile A doesn't suppress profile B. We track
-        # *attempts* (stamped before the POST in ``_rotate_cookies``), so an
-        # in-flight or failed POST also blocks follow-ups within the window —
-        # preventing 10 fanned-out callers from sequentially waiting on a hung
-        # accounts.google.com.
-        last_attempt = _LAST_POKE_ATTEMPT_MONOTONIC.get(storage_path, 0.0)
-        in_process_age = time.monotonic() - last_attempt
-        if last_attempt > 0 and in_process_age <= _KEEPALIVE_RATE_LIMIT_SECONDS:
-            logger.debug(
-                "Keepalive RotateCookies skipped: in-process poke %.1fs ago",
-                in_process_age,
             )
             return
 
         rotate_lock_path = _rotation_lock_path(storage_path)
         if rotate_lock_path is None:
             # No on-disk path → cross-process flock has no anchor. The
-            # in-process lock + monotonic timestamp is the only protection.
+            # atomic claim inside ``_rotate_cookies`` is the only gate.
             await _rotate_cookies(client, storage_path)
             return
 
@@ -1479,6 +1500,10 @@ async def _poke_session(client: httpx.AsyncClient, storage_path: Path | None = N
                     "Keepalive RotateCookies skipped: storage refreshed before flock acquired"
                 )
                 return
+            # ``_rotate_cookies`` does its own atomic claim — if another
+            # in-process caller (e.g. a sibling layer-2 keepalive loop on a
+            # different event loop) just claimed this profile, the POST is
+            # skipped here too.
             await _rotate_cookies(client, storage_path)
 
 
@@ -1511,9 +1536,17 @@ async def _rotate_cookies(client: httpx.AsyncClient, storage_path: Path | None =
     """
     if os.environ.get(NOTEBOOKLM_DISABLE_KEEPALIVE_POKE_ENV) == "1":
         return
-    # Claim the rate-limit slot immediately so concurrent callers see "we just
-    # attempted this profile" before our network await suspends.
-    _LAST_POKE_ATTEMPT_MONOTONIC[storage_path] = time.monotonic()
+    # Atomic check-and-claim: another caller (a sibling layer-2 keepalive
+    # loop, a layer-1 ``_poke_session`` on a different event loop, etc.) may
+    # have already taken the slot for this profile within the rate-limit
+    # window. ``_try_claim_rotation`` is the *only* authoritative gate;
+    # everything above it in ``_poke_session`` is a fast-path optimisation.
+    if not _try_claim_rotation(storage_path):
+        logger.debug(
+            "Keepalive RotateCookies skipped: %s claimed by another in-process caller",
+            storage_path,
+        )
+        return
     try:
         # ``follow_redirects=True`` is defensive: empirically RotateCookies
         # answers 200 directly with the rotated Set-Cookie, but if Google ever
