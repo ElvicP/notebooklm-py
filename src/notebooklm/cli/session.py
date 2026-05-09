@@ -456,13 +456,7 @@ def register_session_commands(cli):
                     "(no browser profile is used).[/yellow]"
                 )
             profile = ctx.obj.get("profile") if ctx.obj else None
-            resolved_storage = (
-                Path(storage)
-                if storage
-                else get_storage_path(profile=profile)
-                if profile
-                else get_storage_path()
-            )
+            resolved_storage = Path(storage) if storage else get_storage_path(profile=profile)
             _login_with_browser_cookies(resolved_storage, browser_cookies, profile)
             return
 
@@ -981,7 +975,7 @@ def register_session_commands(cli):
         from ..auth import extract_cookies_from_storage, fetch_tokens_with_domains
 
         profile = ctx.obj.get("profile") if ctx.obj else None
-        storage_path = get_storage_path(profile=profile) if profile else get_storage_path()
+        storage_path = get_storage_path(profile=profile)
         has_env_var = bool(os.environ.get("NOTEBOOKLM_AUTH_JSON"))
         has_home_env = bool(os.environ.get("NOTEBOOKLM_HOME"))
 
