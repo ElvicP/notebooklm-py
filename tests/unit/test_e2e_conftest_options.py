@@ -92,3 +92,11 @@ class TestArgvProfile:
     def test_long_form_missing_value_returns_none(self):
         argv = ["pytest", "--profile"]
         assert _load_e2e_conftest()._argv_profile(argv) is None
+
+    def test_last_occurrence_wins(self):
+        argv = ["pytest", "--profile", "foo", "--profile", "bar"]
+        assert _load_e2e_conftest()._argv_profile(argv) == "bar"
+
+    def test_long_form_rejects_dash_prefixed_value(self):
+        argv = ["pytest", "--profile", "--verbose"]
+        assert _load_e2e_conftest()._argv_profile(argv) is None

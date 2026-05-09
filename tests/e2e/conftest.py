@@ -30,9 +30,12 @@ from notebooklm.paths import get_profile_dir
 # 1. At module import (via ``_argv_profile``) so the module-level
 #    ``requires_auth = pytest.mark.skipif(not has_auth(), ...)`` below resolves
 #    auth under the selected profile. ``pytest_configure`` runs *after*
-#    conftest import, which is too late for that marker.
+#    conftest import, which is too late for that marker. The early peek only
+#    sees ``sys.argv`` — flags injected via ``addopts`` in ``pytest.ini`` /
+#    ``pyproject.toml`` are not visible until ``pytest_configure``.
 # 2. In ``pytest_configure``, as a backstop for invocations that mutate
-#    sys.argv after conftest is imported (e.g. ``pytest.main(args=...)``).
+#    sys.argv after conftest is imported (e.g. ``pytest.main(args=...)``)
+#    and to pick up ``--profile`` from ``addopts``.
 #
 # ``pytest_unconfigure`` restores the prior env var so the mutation does not
 # leak across the rest of the pytest process (matters for IDE/in-process runs).
@@ -44,13 +47,22 @@ _PROFILE_PRIOR: tuple[bool, str | None] | None = None
 
 
 def _argv_profile(argv: list[str] | None = None) -> str | None:
-    """Extract ``--profile NAME`` or ``--profile=NAME`` from argv."""
+    """Extract ``--profile NAME`` or ``--profile=NAME`` from argv.
+
+    Iterates from the end so the *last* occurrence wins (matching argparse
+    semantics for ``action="store"``), and rejects values that look like
+    another flag (``--profile --verbose`` should not consume ``--verbose``
+    as the profile name).
+    """
     args = sys.argv if argv is None else argv
-    for i, arg in enumerate(args):
-        if arg == "--profile" and i + 1 < len(args):
-            return args[i + 1]
+    for i in range(len(args) - 1, -1, -1):
+        arg = args[i]
         if arg.startswith("--profile="):
             return arg.split("=", 1)[1]
+        if arg == "--profile" and i + 1 < len(args):
+            value = args[i + 1]
+            if not value.startswith("-"):
+                return value
     return None
 
 
@@ -469,7 +481,8 @@ async def generation_notebook_id(client):
 
     This fixture uses a hybrid approach:
     1. Check NOTEBOOKLM_GENERATION_NOTEBOOK_ID env var
-    2. If not set, check for stored ID in NOTEBOOKLM_HOME/generation_notebook_id
+    2. If not set, check for a stored ID in the active profile cache
+       (~/.notebooklm/profiles/<name>/generation_notebook_id)
     3. If not found, auto-create a notebook and store its ID
 
     All notebook IDs (env var or stored) are verified to exist before use.
@@ -673,7 +686,8 @@ async def multi_source_notebook_id(client):
 
     This fixture uses a hybrid approach similar to generation_notebook_id:
     1. Check NOTEBOOKLM_MULTI_SOURCE_NOTEBOOK_ID env var
-    2. If not set, check for stored ID
+    2. If not set, check for a stored ID in the active profile cache
+       (~/.notebooklm/profiles/<name>/multi_source_notebook_id)
     3. If not found, auto-create a notebook with 3 sources
 
     All IDs are verified to exist before use.
