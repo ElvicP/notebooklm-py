@@ -1259,15 +1259,21 @@ class TestAllowedCookieDomains:
         """Test ALLOWED_COOKIE_DOMAINS contains expected domains."""
         from notebooklm.auth import ALLOWED_COOKIE_DOMAINS
 
-        # Core NotebookLM/Google auth domains
-        assert ".google.com" in ALLOWED_COOKIE_DOMAINS
-        assert any(domain == ".notebooklm.google.com" for domain in ALLOWED_COOKIE_DOMAINS)
-        assert "notebooklm.google.com" in ALLOWED_COOKIE_DOMAINS
-        assert ".googleusercontent.com" in ALLOWED_COOKIE_DOMAINS
-        assert "accounts.google.com" in ALLOWED_COOKIE_DOMAINS
-
-        # Sibling Google product domains added in issue #360
-        for domain in (
+        # Single set-difference assertion. CodeQL's
+        # py/incomplete-url-substring-sanitization heuristic flags per-line
+        # ``"<literal>" in ALLOWED_COOKIE_DOMAINS`` patterns as if they were
+        # substring sanitization of a URL, even though this is set-membership
+        # against a constant. The set-diff form has no string-in-string
+        # appearance and reads at least as clearly.
+        expected = {
+            # Core NotebookLM/Google auth domains
+            ".google.com",
+            ".notebooklm.google.com",
+            "notebooklm.google.com",
+            ".googleusercontent.com",
+            "accounts.google.com",
+            ".accounts.google.com",
+            # Sibling Google product domains added in issue #360
             ".youtube.com",
             "youtube.com",
             "accounts.youtube.com",
@@ -1279,10 +1285,9 @@ class TestAllowedCookieDomains:
             "myaccount.google.com",
             ".myaccount.google.com",
             "mail.google.com",
-        ):
-            assert (
-                domain in ALLOWED_COOKIE_DOMAINS
-            ), f"Expected {domain!r} in ALLOWED_COOKIE_DOMAINS (issue #360)"
+        }
+        missing = expected - ALLOWED_COOKIE_DOMAINS
+        assert not missing, f"ALLOWED_COOKIE_DOMAINS is missing: {missing}"
 
 
 # =============================================================================
