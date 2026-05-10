@@ -13,7 +13,14 @@ from urllib.parse import urlencode
 
 import httpx
 
-from .auth import AuthTokens, _rotate_cookies, build_cookie_jar, save_cookies_to_storage
+from .auth import (
+    AuthTokens,
+    CookieSnapshot,
+    _rotate_cookies,
+    build_cookie_jar,
+    save_cookies_to_storage,
+    snapshot_cookie_jar,
+)
 from .rpc import (
     BATCHEXECUTE_URL,
     AuthError,
@@ -179,6 +186,12 @@ class ClientCore:
         # save kicked off before close() can finish *after* close()'s own save
         # and clobber it (an older snapshot overwriting the freshest state).
         self._save_lock = threading.Lock()
+        # Open-time cookie snapshot — the input to the dirty-flag/delta merge
+        # in save_cookies_to_storage. Captured in ``open()`` and forwarded
+        # through every ``save_cookies`` call so a stale in-memory jar can't
+        # clobber sibling-process writes (docs/auth-keepalive.md §3.4.1).
+        # Per-instance, never module-global.
+        self._loaded_cookie_snapshot: CookieSnapshot | None = None
 
     async def open(self) -> None:
         """Open the HTTP client connection.
@@ -210,6 +223,13 @@ class ClientCore:
                 timeout=timeout,
                 follow_redirects=True,
             )
+
+            # Capture the open-time snapshot AFTER the AsyncClient is built
+            # (httpx normalizes domains on ingest) but BEFORE any rotation
+            # could possibly fire. ``self._http_client.cookies.jar`` is the
+            # canonical source; the input ``cookies`` jar may have been
+            # copied or rewritten during construction.
+            self._loaded_cookie_snapshot = snapshot_cookie_jar(self._http_client.cookies)
 
             # Spawn the keepalive task once the client is ready
             if self._keepalive_interval is not None:
@@ -246,12 +266,18 @@ class ClientCore:
         if effective_path is None:
             return
 
-        snapshot = httpx.Cookies(jar)
+        jar_copy = httpx.Cookies(jar)
+        original_snapshot = self._loaded_cookie_snapshot
 
-        def _save(s=snapshot, p=effective_path, lock=self._save_lock) -> None:
+        def _save(
+            s=jar_copy,
+            p=effective_path,
+            lock=self._save_lock,
+            snap=original_snapshot,
+        ) -> None:
             """Worker-thread save: hold the in-process lock around the disk write."""
             with lock:
-                save_cookies_to_storage(s, p)
+                save_cookies_to_storage(s, p, original_snapshot=snap)
 
         await asyncio.to_thread(_save)
 

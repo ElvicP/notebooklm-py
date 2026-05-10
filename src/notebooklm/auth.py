@@ -44,7 +44,7 @@ from collections.abc import Iterator
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import Any, NamedTuple, TypeAlias
 
 import httpx
 
@@ -57,6 +57,26 @@ CookieKey: TypeAlias = tuple[str, str]
 DomainCookieMap: TypeAlias = dict[CookieKey, str]
 FlatCookieMap: TypeAlias = dict[str, str]
 CookieInput: TypeAlias = DomainCookieMap | FlatCookieMap
+
+
+class CookieSnapshotKey(NamedTuple):
+    """Path-aware cookie identity used by the snapshot/delta save machinery.
+
+    RFC 6265 treats ``path`` as part of cookie identity: two cookies with the
+    same ``(name, domain)`` but different paths are distinct entries. The
+    snapshot/delta path widens the legacy ``(name, domain)`` key (still used
+    elsewhere for back-compat — see ``CookieKey``) to ``(name, domain, path)``
+    so that path-scoped cookies (e.g. ``OSID`` on a per-product path) survive
+    a load → save round trip and so that a sibling-process write to a
+    different-path variant of the same name is not silently overwritten.
+    """
+
+    name: str
+    domain: str
+    path: str
+
+
+CookieSnapshot: TypeAlias = dict[CookieSnapshotKey, str]
 
 # Minimum required cookies (must have at least SID for basic auth)
 MINIMUM_REQUIRED_COOKIES = {"SID"}
@@ -277,10 +297,14 @@ class AuthTokens:
 
         # Build domain-preserving jar and use it for token fetch
         jar = build_cookie_jar(cookies=cookies)
+        # Snapshot before token fetch can rotate cookies; the snapshot/delta
+        # merge in save_cookies_to_storage will then write only what this
+        # process actually rotated, preserving sibling-process state.
+        snapshot = snapshot_cookie_jar(jar)
         csrf_token, session_id, _ = await _fetch_tokens_with_refresh(jar, path, profile)
 
         # Persist any refreshed cookies from the token fetch
-        save_cookies_to_storage(jar, path)
+        save_cookies_to_storage(jar, path, original_snapshot=snapshot)
         cookies = _cookie_map_from_jar(jar)
 
         return cls(
@@ -1008,7 +1032,66 @@ def _file_lock_exclusive(lock_path: Path) -> Iterator[None]:
         yield
 
 
-def save_cookies_to_storage(cookie_jar: httpx.Cookies, path: Path | None = None) -> None:
+def snapshot_cookie_jar(cookie_jar: httpx.Cookies) -> CookieSnapshot:
+    """Capture an open-time snapshot of an httpx cookie jar.
+
+    Snapshots are the input to the dirty-flag/delta merge in
+    :func:`save_cookies_to_storage`: at save time, only cookies whose
+    in-memory value differs from the snapshot — plus cookies absent from
+    the jar but present in the snapshot (deletions) — are propagated to
+    disk. Cookies the in-process code never touched are left to whatever
+    a sibling process may have written (closes the §3.4.1
+    stale-overwrite-fresh hazard).
+
+    The key shape is path-aware ``(name, domain, path)`` (also closes
+    §3.4.2). Cookies with no name or no domain are skipped — the storage
+    format requires both.
+
+    Args:
+        cookie_jar: The httpx.Cookies object to snapshot.
+
+    Returns:
+        Mapping of ``CookieSnapshotKey -> value`` capturing the jar's
+        current contents.
+    """
+    return {
+        CookieSnapshotKey(cookie.name, cookie.domain, cookie.path or "/"): cookie.value
+        for cookie in cookie_jar.jar
+        if cookie.name and cookie.domain and cookie.value is not None
+    }
+
+
+def _cookie_snapshot_key_variants(key: CookieSnapshotKey) -> set[CookieSnapshotKey]:
+    """Return equivalent host/domain snapshot keys for leading-dot domains.
+
+    Mirrors :func:`_cookie_key_variants` but preserves the path component so
+    storage entries on the same path match snapshot entries regardless of
+    whether ``http.cookiejar`` normalized the domain to a leading dot.
+    """
+    variants = {key}
+    if key.domain.startswith("."):
+        variants.add(CookieSnapshotKey(key.name, key.domain[1:], key.path))
+    else:
+        variants.add(CookieSnapshotKey(key.name, f".{key.domain}", key.path))
+    return variants
+
+
+def _stored_cookie_snapshot_key(stored_cookie: dict[str, Any]) -> CookieSnapshotKey | None:
+    """Build a path-aware snapshot key from a Playwright storage_state cookie."""
+    name = stored_cookie.get("name")
+    domain = stored_cookie.get("domain", "")
+    if not name or not domain:
+        return None
+    path = stored_cookie.get("path") or "/"
+    return CookieSnapshotKey(name, domain, path)
+
+
+def save_cookies_to_storage(
+    cookie_jar: httpx.Cookies,
+    path: Path | None = None,
+    *,
+    original_snapshot: CookieSnapshot | None = None,
+) -> None:
     """Save an updated httpx.Cookies jar back to Playwright storage_state.json.
 
     This ensures that when Google issues short-lived token refreshes (e.g.
@@ -1023,9 +1106,30 @@ def save_cookies_to_storage(cookie_jar: httpx.Cookies, path: Path | None = None)
     plus a cron-driven ``notebooklm auth refresh``) serialize cleanly rather
     than tearing or losing updates.
 
+    Two merge modes:
+
+    - **Legacy (``original_snapshot=None``)**: every in-memory cookie whose
+      value differs from disk wins. This is the historical behavior and is
+      kept for back-compat with callers that pre-date the snapshot API.
+      It is vulnerable to the stale-overwrite-fresh race documented in
+      ``docs/auth-keepalive.md`` §3.4.1: a process holding stale in-memory
+      state will silently clobber a sibling's freshly-rotated cookie.
+      TODO: opt every in-tree caller into snapshot semantics, then
+      remove this branch.
+    - **Snapshot/delta (``original_snapshot`` provided)**: only cookies
+      whose in-memory value differs from the snapshot are written, and
+      cookies present in the snapshot but no longer in the jar are
+      deleted from disk. Cookies the in-process code never touched are
+      left untouched on disk so a sibling-process write survives.
+      Path-aware ``(name, domain, path)`` keys are used here (also closes
+      §3.4.2).
+
     Args:
         cookie_jar: The httpx.Cookies object containing the latest cookies.
         path: Path to storage_state.json. If None, cookie sync is skipped.
+        original_snapshot: Open-time snapshot from
+            :func:`snapshot_cookie_jar`. When provided, only deltas and
+            deletions relative to the snapshot are persisted.
     """
     if (
         not path
@@ -1054,46 +1158,12 @@ def save_cookies_to_storage(cookie_jar: httpx.Cookies, path: Path | None = None)
         if not isinstance(storage_data, dict) or "cookies" not in storage_data:
             return
 
-        cookies_by_key = {
-            (cookie.name, cookie.domain): cookie
-            for cookie in cookie_jar.jar
-            if cookie.name and cookie.domain and _is_allowed_cookie_domain(cookie.domain)
-        }
-
-        updated_count = 0
-        stored_keys: set[CookieKey] = set()
-        for stored_cookie in storage_data["cookies"]:
-            name = stored_cookie.get("name")
-            domain = stored_cookie.get("domain", "")
-            if not name or not domain:
-                continue
-
-            key = (name, domain)
-            stored_keys.update(_cookie_key_variants(key))
-            refreshed_cookie = _find_cookie_for_storage(
-                cookies_by_key, key, stored_cookie.get("value")
+        if original_snapshot is None:
+            updated_count = _merge_cookies_legacy(cookie_jar, storage_data)
+        else:
+            updated_count = _merge_cookies_with_snapshot(
+                cookie_jar, storage_data, original_snapshot
             )
-            if refreshed_cookie is None:
-                continue
-
-            new_expires = refreshed_cookie.expires if refreshed_cookie.expires is not None else -1
-            changed = (
-                stored_cookie.get("value") != refreshed_cookie.value
-                or stored_cookie.get("expires") != new_expires
-            )
-            if changed:
-                stored_cookie["value"] = refreshed_cookie.value
-                stored_cookie["expires"] = new_expires
-                stored_cookie["path"] = refreshed_cookie.path or stored_cookie.get("path", "/")
-                stored_cookie["secure"] = refreshed_cookie.secure
-                stored_cookie["httpOnly"] = _cookie_is_http_only(refreshed_cookie)
-                updated_count += 1
-
-        for key, cookie in cookies_by_key.items():
-            if key in stored_keys:
-                continue
-            storage_data["cookies"].append(_cookie_to_storage_state(cookie))
-            updated_count += 1
 
         if updated_count > 0:
             temp_path: Path | None = None
@@ -1118,6 +1188,175 @@ def save_cookies_to_storage(cookie_jar: httpx.Cookies, path: Path | None = None)
                         temp_path.unlink(missing_ok=True)
                     except Exception as cleanup_err:
                         logger.debug("Failed to clean up temp file %s: %s", temp_path, cleanup_err)
+
+
+def _merge_cookies_legacy(cookie_jar: httpx.Cookies, storage_data: dict[str, Any]) -> int:
+    """Legacy merge: trust in-memory whenever it differs from disk.
+
+    Vulnerable to the stale-overwrite-fresh race (§3.4.1). Kept only for
+    callers that have not yet opted into snapshot semantics. New callers
+    must pass ``original_snapshot`` to :func:`save_cookies_to_storage`.
+
+    Returns:
+        Number of cookie entries added or modified in ``storage_data``.
+    """
+    cookies_by_key = {
+        (cookie.name, cookie.domain): cookie
+        for cookie in cookie_jar.jar
+        if cookie.name and cookie.domain and _is_allowed_cookie_domain(cookie.domain)
+    }
+
+    updated_count = 0
+    stored_keys: set[CookieKey] = set()
+    for stored_cookie in storage_data["cookies"]:
+        name = stored_cookie.get("name")
+        domain = stored_cookie.get("domain", "")
+        if not name or not domain:
+            continue
+
+        key = (name, domain)
+        stored_keys.update(_cookie_key_variants(key))
+        refreshed_cookie = _find_cookie_for_storage(cookies_by_key, key, stored_cookie.get("value"))
+        if refreshed_cookie is None:
+            continue
+
+        new_expires = refreshed_cookie.expires if refreshed_cookie.expires is not None else -1
+        changed = (
+            stored_cookie.get("value") != refreshed_cookie.value
+            or stored_cookie.get("expires") != new_expires
+        )
+        if changed:
+            stored_cookie["value"] = refreshed_cookie.value
+            stored_cookie["expires"] = new_expires
+            stored_cookie["path"] = refreshed_cookie.path or stored_cookie.get("path", "/")
+            stored_cookie["secure"] = refreshed_cookie.secure
+            stored_cookie["httpOnly"] = _cookie_is_http_only(refreshed_cookie)
+            updated_count += 1
+
+    for key, cookie in cookies_by_key.items():
+        if key in stored_keys:
+            continue
+        storage_data["cookies"].append(_cookie_to_storage_state(cookie))
+        updated_count += 1
+
+    return updated_count
+
+
+def _merge_cookies_with_snapshot(
+    cookie_jar: httpx.Cookies,
+    storage_data: dict[str, Any],
+    original_snapshot: CookieSnapshot,
+) -> int:
+    """Snapshot/delta merge: write only what this process actually changed.
+
+    Closes §3.4.1 (stale-overwrite-fresh) and §3.4.2 (path collapse):
+
+    - **Deltas**: cookies in the jar whose value differs from the snapshot
+      are written to disk. New cookies acquired during the session are
+      treated as deltas (snapshot lookup is ``None``, current value is a
+      string, so they always differ).
+    - **Deletions**: cookies present in the snapshot but no longer in the
+      jar are removed from disk. Captures e.g. ``Max-Age=0`` evictions.
+    - **Untouched**: cookies in the jar whose value matches the snapshot
+      are not written, so a sibling-process write to the same key
+      survives. Cookies on disk that are not in the snapshot are also
+      left alone (they belong to a sibling process or another path).
+
+    Args:
+        cookie_jar: Current in-memory cookie jar.
+        storage_data: Mutable storage_state.json dict (modified in place).
+        original_snapshot: Open-time snapshot of the same jar.
+
+    Returns:
+        Number of cookie entries added, modified, or removed.
+    """
+    current_snapshot = snapshot_cookie_jar(cookie_jar)
+
+    # Path-aware index of jar cookies for delta application. Restricting to
+    # _is_allowed_cookie_domain matches the legacy save's allowlist gate so
+    # this PR doesn't inadvertently widen the persisted-domain set.
+    cookies_by_snapshot_key = {
+        CookieSnapshotKey(cookie.name, cookie.domain, cookie.path or "/"): cookie
+        for cookie in cookie_jar.jar
+        if cookie.name and cookie.domain and _is_allowed_cookie_domain(cookie.domain)
+    }
+
+    deltas: dict[CookieSnapshotKey, Any] = {}
+    for snapshot_key, cookie in cookies_by_snapshot_key.items():
+        if original_snapshot.get(snapshot_key) != cookie.value:
+            deltas[snapshot_key] = cookie
+
+    deletions: set[CookieSnapshotKey] = {
+        snapshot_key
+        for snapshot_key in original_snapshot
+        if snapshot_key not in current_snapshot
+        # Only delete cookies the merge would otherwise be allowed to write.
+        # Snapshot may include sibling-product domains the allowlist filters
+        # out at write time; treating those as deletions would silently drop
+        # disk entries we never persisted to begin with.
+        and _is_allowed_cookie_domain(snapshot_key.domain)
+    }
+
+    updated_count = 0
+
+    # Apply deltas + deletions to the existing storage entries in place.
+    new_cookies: list[dict[str, Any]] = []
+    matched_delta_keys: set[CookieSnapshotKey] = set()
+    for stored_cookie in storage_data["cookies"]:
+        stored_key = _stored_cookie_snapshot_key(stored_cookie)
+        if stored_key is None:
+            new_cookies.append(stored_cookie)
+            continue
+
+        # Find the delta (or deletion) that maps to this stored entry.
+        # Match leading-dot domain variants so e.g. snapshot
+        # ``.accounts.google.com`` lines up with stored ``accounts.google.com``.
+        # A delta wins over a deletion: if the same stored entry matches
+        # both (which can happen when httpx normalized one variant), we
+        # prefer to update rather than drop, because dropping would lose
+        # the rotation we just applied.
+        matched_delta_cookie = None
+        matched_delta_key: CookieSnapshotKey | None = None
+        for variant in _cookie_snapshot_key_variants(stored_key):
+            if variant in deltas:
+                matched_delta_cookie = deltas[variant]
+                matched_delta_key = variant
+                break
+
+        if matched_delta_cookie is not None:
+            new_expires = (
+                matched_delta_cookie.expires if matched_delta_cookie.expires is not None else -1
+            )
+            stored_cookie["value"] = matched_delta_cookie.value
+            stored_cookie["expires"] = new_expires
+            stored_cookie["path"] = matched_delta_cookie.path or stored_cookie.get("path", "/")
+            stored_cookie["secure"] = matched_delta_cookie.secure
+            stored_cookie["httpOnly"] = _cookie_is_http_only(matched_delta_cookie)
+            assert matched_delta_key is not None  # for mypy
+            matched_delta_keys.add(matched_delta_key)
+            updated_count += 1
+            new_cookies.append(stored_cookie)
+            continue
+
+        is_deletion = any(
+            variant in deletions for variant in _cookie_snapshot_key_variants(stored_key)
+        )
+        if is_deletion:
+            updated_count += 1
+            continue  # drop the entry from disk
+
+        new_cookies.append(stored_cookie)
+
+    # Append delta cookies that didn't match any existing storage entry
+    # (genuinely new cookies acquired during the session).
+    for snapshot_key, cookie in deltas.items():
+        if snapshot_key in matched_delta_keys:
+            continue
+        new_cookies.append(_cookie_to_storage_state(cookie))
+        updated_count += 1
+
+    storage_data["cookies"] = new_cookies
+    return updated_count
 
 
 def _cookie_is_http_only(cookie: Any) -> bool:
@@ -1743,6 +1982,10 @@ async def fetch_tokens_with_domains(
     if path is None and (profile is not None or "NOTEBOOKLM_AUTH_JSON" not in os.environ):
         path = get_storage_path(profile=profile)
     jar = build_httpx_cookies_from_storage(path)
+    # Capture the open-time snapshot before any rotation could fire. The
+    # snapshot is the input to the dirty-flag/delta merge that closes the
+    # stale-overwrite-fresh race (docs/auth-keepalive.md §3.4.1).
+    snapshot = snapshot_cookie_jar(jar)
     csrf, session_id, _ = await _fetch_tokens_with_refresh(jar, path, profile)
-    save_cookies_to_storage(jar, path)
+    save_cookies_to_storage(jar, path, original_snapshot=snapshot)
     return csrf, session_id

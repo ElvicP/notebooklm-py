@@ -236,7 +236,7 @@ class TestKeepalivePersistenceFailure:
 
         save_calls = []
 
-        def boom(cookies, path):
+        def boom(cookies, path, **kwargs):
             save_calls.append(path)
             raise OSError("simulated disk full")
 
@@ -373,7 +373,7 @@ class TestKeepaliveExplicitStoragePath:
 
         save_calls: list[tuple[object, object]] = []
 
-        def spy(cookies, path):
+        def spy(cookies, path, **kwargs):
             save_calls.append((cookies, path))
 
         monkeypatch.setattr("notebooklm._core.save_cookies_to_storage", spy)
@@ -455,7 +455,7 @@ class TestSaveCookiesUnification:
 
         lock_held_during_save: list[bool] = []
 
-        def spy(jar, path):
+        def spy(jar, path, **kwargs):
             """Record whether ``_save_lock`` is held at the moment of the disk write."""
             lock_held_during_save.append(core._save_lock.locked())
 
@@ -508,7 +508,7 @@ class TestSaveCookiesUnification:
 
         save_calls: list[bool] = []
 
-        def spy(jar, path):
+        def spy(jar, path, **kwargs):
             """Record whether ``_save_lock`` is held when refresh_auth's save fires."""
             save_calls.append(client._core._save_lock.locked())
 
