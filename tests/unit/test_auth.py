@@ -1268,6 +1268,7 @@ class TestAllowedCookieDomains:
         expected = {
             # Core NotebookLM/Google auth domains
             ".google.com",
+            "google.com",
             ".notebooklm.google.com",
             "notebooklm.google.com",
             ".googleusercontent.com",
@@ -1285,6 +1286,7 @@ class TestAllowedCookieDomains:
             "myaccount.google.com",
             ".myaccount.google.com",
             "mail.google.com",
+            ".mail.google.com",
         }
         missing = expected - ALLOWED_COOKIE_DOMAINS
         assert not missing, f"ALLOWED_COOKIE_DOMAINS is missing: {missing}"
@@ -1833,6 +1835,7 @@ class TestSiblingGoogleProductExtraction:
         "myaccount.google.com",
         ".myaccount.google.com",
         "mail.google.com",
+        ".mail.google.com",
     ]
 
     @pytest.mark.parametrize("domain", SIBLING_DOMAINS)

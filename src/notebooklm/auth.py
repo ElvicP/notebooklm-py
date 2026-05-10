@@ -78,6 +78,7 @@ MINIMUM_REQUIRED_COOKIES = {"SID"}
 # extends what we ask the browser for at login time.
 ALLOWED_COOKIE_DOMAINS = {
     ".google.com",
+    "google.com",  # Host-only Domain=google.com cookies (rare but possible)
     # Playwright storage_state may preserve the leading dot for NotebookLM cookies.
     ".notebooklm.google.com",
     "notebooklm.google.com",
@@ -85,6 +86,9 @@ ALLOWED_COOKIE_DOMAINS = {
     "accounts.google.com",  # Required for token refresh redirects
     ".accounts.google.com",  # http.cookiejar may normalize Domain=accounts.google.com
     # Sibling Google products — auth/rotation flows may traverse these.
+    # Both dotted and non-dotted variants are listed so that http.cookiejar
+    # normalization (which can add a leading dot) doesn't drop a cookie at the
+    # next extraction; same defensive pattern as accounts.google.com above.
     ".youtube.com",
     "youtube.com",
     "accounts.youtube.com",
@@ -98,6 +102,7 @@ ALLOWED_COOKIE_DOMAINS = {
     # Optional — not load-bearing in any current flow, but kept for symmetry
     # with what a logged-in browser session actually holds.
     "mail.google.com",
+    ".mail.google.com",
 }
 
 # Regional Google ccTLDs where Google may set auth cookies
