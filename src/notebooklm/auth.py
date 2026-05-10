@@ -1275,10 +1275,19 @@ def _merge_cookies_with_snapshot(
     # Path-aware index of jar cookies for delta application. Restricting to
     # _is_allowed_cookie_domain matches the legacy save's allowlist gate so
     # this PR doesn't inadvertently widen the persisted-domain set.
+    # Filter ``cookie.value is not None`` to mirror ``snapshot_cookie_jar``: a
+    # value-less cookie is treated as a deletion (absent from this index, absent
+    # from ``current_snapshot``) rather than a delta that would write ``null``
+    # to disk.
     cookies_by_snapshot_key = {
         CookieSnapshotKey(cookie.name, cookie.domain, cookie.path or "/"): cookie
         for cookie in cookie_jar.jar
-        if cookie.name and cookie.domain and _is_allowed_cookie_domain(cookie.domain)
+        if (
+            cookie.name
+            and cookie.domain
+            and cookie.value is not None
+            and _is_allowed_cookie_domain(cookie.domain)
+        )
     }
 
     deltas: dict[CookieSnapshotKey, Any] = {}

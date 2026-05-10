@@ -2503,10 +2503,9 @@ class TestPokeConcurrencyThrottling:
             await auth_module._poke_session(client, storage_path)
 
         poke_requests = [r for r in httpx_mock.get_requests() if _POKE_URL_RE.match(str(r.url))]
-        assert len(poke_requests) == 1, (
-            f"infra failure must fail open and let rotation proceed; "
-            f"got {len(poke_requests)} POSTs"
-        )
+        assert (
+            len(poke_requests) == 1
+        ), f"infra failure must fail open and let rotation proceed; got {len(poke_requests)} POSTs"
 
     @pytest.mark.asyncio
     @pytest.mark.no_default_keepalive_mock

@@ -400,6 +400,18 @@ reading `auth.py` against the lifecycle of `NotebookLMClient` /
 
 #### 3.4.1 Stale in-memory clobbers fresh disk (the "few-hours" pattern)
 
+> **Resolved in #361.** ``ClientCore`` now captures an open-time
+> ``CookieSnapshotKey -> value`` snapshot of its jar; ``save_cookies_to_storage``
+> accepts an ``original_snapshot=...`` kwarg and, when provided, writes only
+> the deltas (cookies whose value differs from the snapshot) plus deletions
+> (cookies present in the snapshot but absent from the jar). Cookies the
+> in-process code never touched are left to whatever a sibling process may
+> have written, so the stale-overwrite-fresh race below cannot fire. Legacy
+> callers that don't pass ``original_snapshot`` still get the old
+> full-merge behavior (and remain vulnerable) — but every in-tree caller
+> has been opted in. See ``tests/unit/test_auth_cookie_save_race.py`` for
+> the canonical timeline test.
+
 The most likely culprit when rotation seems to silently fail.
 `save_cookies_to_storage` (`auth.py:1003–1036`) merges the in-memory
 jar onto disk using a **value-difference rule**: for each cookie on
@@ -461,6 +473,17 @@ Mitigations available today:
   `storage_state.json`.
 
 #### 3.4.2 The `(name, domain)` collapse — `path` ignored
+
+> **Resolved in #361 (side effect).** The snapshot/delta path now uses a
+> path-aware ``CookieSnapshotKey(name, domain, path)`` NamedTuple — two
+> storage entries with the same ``(name, domain)`` but different paths
+> are distinct keys and survive a load → save round trip. The other
+> ``(name, domain)``-keyed sites listed below (``_cookie_map_from_jar``,
+> ``extract_cookies_with_domains``, etc.) are intentionally left
+> untouched by #361 to keep the blast radius small; they are not on the
+> persistence-merge hot path that fires §3.4.1, but they remain a
+> trip-wire for future protocol changes and could be migrated in a
+> follow-up.
 
 Multiple paths in `auth.py` key cookies by `(name, domain)` and drop
 `path`:
@@ -654,9 +677,12 @@ Before assuming Google has changed anything:
    minutes after each active session if rotation is landing. Hours-old
    mtime means rotation isn't sticking.
 4. **Diff the cookie set across two invocations**. Cookies appearing
-   in one run and missing in the next now point primarily at path
-   collapse (§3.4.2); the §3.4.3 whitelist-asymmetry shape was closed
-   by [#360](https://github.com/teng-lin/notebooklm-py/issues/360).
+   in one run and missing in the next: the §3.4.2 path-collapse and
+   §3.4.3 whitelist-asymmetry shapes were closed by
+   [#361](https://github.com/teng-lin/notebooklm-py/pull/363) and
+   [#360](https://github.com/teng-lin/notebooklm-py/pull/362)
+   respectively. New cookie-set drift is more likely to point at
+   §3.4.7 round-trip attribute erosion.
 5. **Only after the above all check out**, investigate Google-side
    causes (risk-scoring, Workspace policy, DBSC).
 
