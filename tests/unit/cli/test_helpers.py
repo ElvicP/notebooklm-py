@@ -1575,3 +1575,66 @@ class TestImportWithRetry:
 
         # Only the original attempt — no retry after cancellation.
         assert client.research.import_sources.await_count == 1
+
+
+class TestGetAuthTokensAuthuser:
+    """Regression for #359: get_auth_tokens must read authuser from account.json
+    so RPC URLs route to the right Google account."""
+
+    def test_authuser_from_account_json_propagates_to_authtokens(self, tmp_path):
+        storage = tmp_path / "storage_state.json"
+        storage.write_text(
+            json.dumps(
+                {
+                    "cookies": [
+                        {"name": "SID", "value": "x", "domain": ".google.com"},
+                        {"name": "HSID", "value": "x", "domain": ".google.com"},
+                        {"name": "SSID", "value": "x", "domain": ".google.com"},
+                        {"name": "APISID", "value": "x", "domain": ".google.com"},
+                        {"name": "SAPISID", "value": "x", "domain": ".google.com"},
+                    ]
+                }
+            )
+        )
+        (tmp_path / "account.json").write_text(
+            json.dumps({"authuser": 2, "email": "bob@example.com"}), encoding="utf-8"
+        )
+
+        ctx = MagicMock()
+        ctx.obj = {"storage_path": storage, "profile": None}
+
+        with patch(
+            "notebooklm.cli.helpers.run_async",
+            return_value=("csrf_v2", "sess_v2"),
+        ):
+            tokens = get_auth_tokens(ctx)
+
+        assert tokens.authuser == 2
+        assert tokens.csrf_token == "csrf_v2"
+
+    def test_default_authuser_when_no_account_json(self, tmp_path):
+        storage = tmp_path / "storage_state.json"
+        storage.write_text(
+            json.dumps(
+                {
+                    "cookies": [
+                        {"name": "SID", "value": "x", "domain": ".google.com"},
+                        {"name": "HSID", "value": "x", "domain": ".google.com"},
+                        {"name": "SSID", "value": "x", "domain": ".google.com"},
+                        {"name": "APISID", "value": "x", "domain": ".google.com"},
+                        {"name": "SAPISID", "value": "x", "domain": ".google.com"},
+                    ]
+                }
+            )
+        )
+
+        ctx = MagicMock()
+        ctx.obj = {"storage_path": storage, "profile": None}
+
+        with patch(
+            "notebooklm.cli.helpers.run_async",
+            return_value=("csrf", "sess"),
+        ):
+            tokens = get_auth_tokens(ctx)
+
+        assert tokens.authuser == 0

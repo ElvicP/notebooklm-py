@@ -376,12 +376,21 @@ class ClientCore:
         Returns:
             Full URL with query parameters.
         """
-        params = {
+        params: dict[str, str] = {
             "rpcids": rpc_method.value,
             "source-path": source_path,
             "f.sid": self.auth.session_id,
             "rt": "c",
         }
+        # Multi-account: route batchexecute to the same Google account the
+        # auth tokens were minted for. Without this, a profile authenticated
+        # as authuser=1 would still hit account 0 here, and Google rejects
+        # the resulting CSRF/session combination with HTTP 400. Mirrors the
+        # ``?authuser=N`` we already append in ``_fetch_tokens_with_jar``;
+        # default ``authuser=0`` is omitted to keep URLs byte-identical to
+        # pre-multi-account behavior.
+        if self.auth.authuser:
+            params["authuser"] = str(self.auth.authuser)
         return f"{BATCHEXECUTE_URL}?{urlencode(params)}"
 
     async def rpc_call(

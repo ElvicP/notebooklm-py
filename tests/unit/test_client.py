@@ -708,3 +708,29 @@ class TestRpcCallAutoRetry:
         assert (
             refresh_count[0] == 1
         ), f"Refresh should be called exactly once, got {refresh_count[0]}"
+
+
+class TestBuildUrlAuthuser:
+    """Regression for #359: batchexecute URL must include ``authuser=N`` when
+    AuthTokens carries a non-zero authuser, otherwise non-default profiles 400."""
+
+    def test_default_authuser_omits_param(self):
+        auth = AuthTokens(
+            cookies={("SID", ".google.com"): "x"},
+            csrf_token="csrf",
+            session_id="sess",
+        )
+        core = ClientCore(auth=auth)
+        url = core._build_url(RPCMethod.LIST_NOTEBOOKS)
+        assert "authuser" not in url
+
+    def test_non_default_authuser_added(self):
+        auth = AuthTokens(
+            cookies={("SID", ".google.com"): "x"},
+            csrf_token="csrf",
+            session_id="sess",
+            authuser=2,
+        )
+        core = ClientCore(auth=auth)
+        url = core._build_url(RPCMethod.LIST_NOTEBOOKS)
+        assert "authuser=2" in url
