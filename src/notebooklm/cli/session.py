@@ -244,13 +244,19 @@ def _login_browser_cookies_single(
 
 def _login_all_accounts_from_browser(browser_cookies: str) -> None:
     """Extract every signed-in Google account into its own profile."""
+    from ..paths import list_profiles
+
     raw_cookies, accounts = _enumerate_browser_accounts(browser_cookies)
     if not accounts:
         console.print("[yellow]No accounts discovered.[/yellow]")
         return
 
     console.print(f"\n[bold]Found {len(accounts)} accounts.[/bold] Creating profiles:")
-    used: set[str] = set()
+    # Seed ``used`` with profiles that already exist on disk, so an account
+    # whose auto-derived name collides with a hand-named profile gets a
+    # ``-2`` suffix instead of silently overwriting that profile's
+    # ``storage_state.json`` / ``account.json``.
+    used: set[str] = set(list_profiles())
     for account in accounts:
         base_name = email_to_profile_name(account.email)
         target_profile = base_name
@@ -475,8 +481,10 @@ def _login_with_browser_cookies(
         raise SystemExit(1) from None
 
     # Record the authuser index so future calls target the right Google
-    # account. Only write account.json when we actually need to: a non-zero
-    # index, or an email for display.
+    # account. Even on a default-account login (authuser=0, no email), we
+    # must remove any *existing* account.json — otherwise a previous
+    # ``--authuser N`` extraction would silently keep routing the refreshed
+    # cookies to the old non-default account.
     if authuser or email:
         from ..auth import write_account_metadata
 
@@ -488,6 +496,12 @@ def _login_with_browser_cookies(
                 f"[yellow]Warning: cookies saved but account metadata write failed.[/yellow]\n"
                 f"Details: {e}"
             )
+    else:
+        stale_account_json = storage_path.with_name("account.json")
+        try:
+            stale_account_json.unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning("Failed to clear stale %s: %s", stale_account_json, e)
 
     saved_msg = f"\n[green]Authentication saved to:[/green] {storage_path}"
     if email:

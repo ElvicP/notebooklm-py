@@ -2274,3 +2274,45 @@ class TestLoginMultiAccount:
         )
         assert result.exit_code != 0
         assert "all-accounts" in result.output.lower()
+
+
+class TestStaleAccountJsonCleanup:
+    """Default-account login must clear any stale account.json from a previous --authuser run."""
+
+    def test_default_login_removes_stale_account_json(self, runner, tmp_path):
+        storage_file = tmp_path / "storage.json"
+        # Simulate a previous `--authuser 1` extraction.
+        (tmp_path / "account.json").write_text(
+            json.dumps({"authuser": 1, "email": "bob@gmail.com"}), encoding="utf-8"
+        )
+
+        mock_cookies = [
+            {
+                "domain": ".google.com",
+                "name": "SID",
+                "value": "abc",
+                "path": "/",
+                "secure": True,
+                "expires": 9999,
+                "http_only": False,
+            },
+        ]
+        mock_rookiepy = MagicMock()
+        mock_rookiepy.load = MagicMock(return_value=mock_cookies)
+
+        with (
+            patch.dict("sys.modules", {"rookiepy": mock_rookiepy}),
+            patch("notebooklm.cli.session.get_storage_path", return_value=storage_file),
+            patch("notebooklm.cli.session._sync_server_language_to_config"),
+            patch(
+                "notebooklm.cli.session.fetch_tokens_with_domains",
+                new_callable=AsyncMock,
+                return_value=("csrf", "sess"),
+            ),
+        ):
+            result = runner.invoke(cli, ["login", "--browser-cookies", "auto"])
+
+        assert result.exit_code == 0, result.output
+        # The previous-run account.json must be gone so subsequent token fetches
+        # don't keep routing to authuser=1.
+        assert not (tmp_path / "account.json").exists()

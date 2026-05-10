@@ -605,7 +605,9 @@ MAX_AUTHUSER_PROBE = 10
 
 # Local-parts of well-known non-user emails that NotebookLM may embed in page
 # chrome (footer links, support contacts) and must not be misread as the
-# active account.
+# active account. Combined with ``_NON_USER_EMAIL_DOMAINS`` so we only drop
+# the address when *both* match — otherwise legitimate Workspace users like
+# ``support@customer.com`` would be filtered out.
 _NON_USER_EMAIL_LOCALS = frozenset(
     {
         "abuse",
@@ -620,6 +622,7 @@ _NON_USER_EMAIL_LOCALS = frozenset(
         "support",
     }
 )
+_NON_USER_EMAIL_DOMAINS = frozenset({"google.com", "accounts.google.com", "gmail.com"})
 
 # Match a quoted email address, e.g. ``"alice@example.com"``. Mirrors how
 # emails appear in the page's WIZ_global_data JSON.
@@ -630,8 +633,8 @@ def extract_email_from_html(html: str) -> str | None:
     """Extract the active user's email from a NotebookLM page response.
 
     Returns the first plausible Google account email found in the HTML,
-    skipping known non-user addresses (e.g. ``support@google.com``,
-    ``noreply@…``).
+    skipping addresses that look like Google's own contact endpoints
+    (e.g. ``support@google.com``, ``noreply@accounts.google.com``).
 
     Args:
         html: Page HTML from ``notebooklm.google.com/?authuser=N``.
@@ -643,8 +646,8 @@ def extract_email_from_html(html: str) -> str | None:
     """
     for match in _EMAIL_RE.finditer(html):
         email = match.group(1)
-        local = email.split("@", 1)[0].lower()
-        if local in _NON_USER_EMAIL_LOCALS:
+        local, _, domain = email.partition("@")
+        if local.lower() in _NON_USER_EMAIL_LOCALS and domain.lower() in _NON_USER_EMAIL_DOMAINS:
             continue
         return email
     return None
@@ -712,7 +715,11 @@ async def enumerate_accounts(
             account (cookies expired or invalid).
         httpx.HTTPError: If the HTTP transport fails.
     """
-    async with httpx.AsyncClient(cookies=cookie_jar, follow_redirects=True, timeout=15.0) as client:
+    async with httpx.AsyncClient(
+        cookies=cookie_jar,
+        follow_redirects=True,
+        timeout=httpx.Timeout(10.0, read=60.0),
+    ) as client:
         default_email = await _probe_authuser(client, 0)
         if default_email is None:
             raise ValueError(
@@ -1890,7 +1897,10 @@ async def fetch_tokens(
         RuntimeError: If ``NOTEBOOKLM_REFRESH_CMD`` is set but fails
     """
     jar = build_cookie_jar(cookies=cookies, storage_path=storage_path)
-    csrf, session_id, refreshed = await _fetch_tokens_with_refresh(jar, storage_path, profile)
+    authuser = get_authuser_for_storage(storage_path)
+    csrf, session_id, refreshed = await _fetch_tokens_with_refresh(
+        jar, storage_path, profile, authuser=authuser
+    )
     if refreshed:
         fresh = _cookie_map_from_jar(jar)
         _update_cookie_input(cookies, fresh)
@@ -1922,6 +1932,7 @@ async def fetch_tokens_with_domains(
     if path is None and (profile is not None or "NOTEBOOKLM_AUTH_JSON" not in os.environ):
         path = get_storage_path(profile=profile)
     jar = build_httpx_cookies_from_storage(path)
-    csrf, session_id, _ = await _fetch_tokens_with_refresh(jar, path, profile)
+    authuser = get_authuser_for_storage(path)
+    csrf, session_id, _ = await _fetch_tokens_with_refresh(jar, path, profile, authuser=authuser)
     save_cookies_to_storage(jar, path)
     return csrf, session_id

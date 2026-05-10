@@ -66,7 +66,9 @@ def email_to_profile_name(email: str, *, fallback: str = "account") -> str:
     sanitized = re.sub(r"[^a-zA-Z0-9_-]+", "-", local)
     sanitized = re.sub(r"-{2,}", "-", sanitized).strip("-_")
     if not sanitized or not _PROFILE_NAME_RE.match(sanitized):
-        return fallback
+        # The function's contract is "always returns a valid profile name", so
+        # protect callers that pass a malformed fallback (e.g. "-tmp").
+        return fallback if _PROFILE_NAME_RE.match(fallback) else "account"
     return sanitized
 
 

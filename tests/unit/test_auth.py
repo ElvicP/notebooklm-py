@@ -2499,6 +2499,13 @@ class TestExtractEmailFromHtml:
         html = '"support@google.com" "noreply@google.com"'
         assert extract_email_from_html(html) is None
 
+    def test_blacklist_does_not_drop_workspace_local_parts(self):
+        # ``support@customer.com`` is a legitimate Workspace user. Local-part
+        # blacklist must be scoped to google-owned domains. Regression for
+        # PR #364 review feedback.
+        html = '"support@customer.com"'
+        assert extract_email_from_html(html) == "support@customer.com"
+
 
 class TestEnumerateAccounts:
     """Test multi-account discovery via authuser=N probing."""
@@ -2658,3 +2665,41 @@ class TestAccountMetadata:
         storage = tmp_path / "storage_state.json"
         (tmp_path / "account.json").write_text("not json", encoding="utf-8")
         assert read_account_metadata(storage) == {}
+
+
+class TestAuthuserPlumbing:
+    """fetch_tokens_with_domains must honor authuser persisted in account.json."""
+
+    @pytest.mark.asyncio
+    async def test_fetch_tokens_with_domains_uses_persisted_authuser(
+        self, tmp_path, httpx_mock: HTTPXMock
+    ):
+        from notebooklm.auth import fetch_tokens_with_domains, write_account_metadata
+
+        storage = tmp_path / "storage_state.json"
+        storage.write_text(
+            json.dumps(
+                {
+                    "cookies": [
+                        {"name": "SID", "value": "x", "domain": ".google.com"},
+                        {"name": "HSID", "value": "x", "domain": ".google.com"},
+                        {"name": "SSID", "value": "x", "domain": ".google.com"},
+                        {"name": "APISID", "value": "x", "domain": ".google.com"},
+                        {"name": "SAPISID", "value": "x", "domain": ".google.com"},
+                    ]
+                }
+            )
+        )
+        write_account_metadata(storage, authuser=2, email="bob@example.com")
+
+        # Token fetch must hit ?authuser=2, not the default URL.
+        httpx_mock.add_response(
+            url="https://notebooklm.google.com/?authuser=2",
+            content=b'"SNlM0e":"csrf_v2" "FdrFJe":"sess_v2"',
+        )
+
+        csrf, session_id = await fetch_tokens_with_domains(storage)
+        assert csrf == "csrf_v2"
+        assert session_id == "sess_v2"
+        # If pytest-httpx had to fall back to a default match, the assert above
+        # would fail; the explicit URL match is the contract.
