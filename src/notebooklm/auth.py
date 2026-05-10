@@ -173,6 +173,9 @@ class AuthTokens:
         cookie_jar: Domain-preserving httpx.Cookies jar. Preferred over flat cookies dict
             for HTTP operations as it retains original cookie domains (e.g.,
             .googleusercontent.com vs .google.com).
+        authuser: Google ``authuser`` index this profile authenticates as.
+            ``0`` (the default account) is used when no ``account.json``
+            sibling is present — matching pre-multi-account behavior.
     """
 
     cookies: DomainCookieMap
@@ -180,6 +183,7 @@ class AuthTokens:
     session_id: str
     storage_path: Path | None = None
     cookie_jar: httpx.Cookies | None = None
+    authuser: int = 0
 
     def __post_init__(self) -> None:
         """Normalize legacy flat cookie mappings into domain-keyed mappings."""
@@ -242,10 +246,13 @@ class AuthTokens:
 
         storage_state = _load_storage_state(path)
         cookies = extract_cookies_with_domains(storage_state)
+        authuser = get_authuser_for_storage(path)
 
         # Build domain-preserving jar and use it for token fetch
         jar = build_cookie_jar(cookies=cookies)
-        csrf_token, session_id, _ = await _fetch_tokens_with_refresh(jar, path, profile)
+        csrf_token, session_id, _ = await _fetch_tokens_with_refresh(
+            jar, path, profile, authuser=authuser
+        )
 
         # Persist any refreshed cookies from the token fetch
         save_cookies_to_storage(jar, path)
@@ -257,6 +264,7 @@ class AuthTokens:
             session_id=session_id,
             storage_path=path,
             cookie_jar=jar,
+            authuser=authuser,
         )
 
 
@@ -570,6 +578,224 @@ def extract_session_id_from_html(html: str, final_url: str = "") -> str:
             "This may indicate the page structure has changed."
         )
     return match.group(1)
+
+
+@dataclass(frozen=True)
+class Account:
+    """A Google account discovered via authuser=N probing.
+
+    Attributes:
+        authuser: The integer index used in ``?authuser=N`` URL parameters.
+            Index 0 is the default account; subsequent indices follow the
+            order Google reports for the browser session.
+        email: The account's email address as it appears in the NotebookLM
+            page's ``WIZ_global_data`` block.
+        is_default: True only for the account at ``authuser=0``.
+    """
+
+    authuser: int
+    email: str
+    is_default: bool
+
+
+# Hard cap on how many ``authuser`` indices to probe before giving up.
+# Google supports up to ~10 simultaneously signed-in accounts in a browser
+# session; ten covers every realistic case and bounds the worst-case probe.
+MAX_AUTHUSER_PROBE = 10
+
+# Local-parts of well-known non-user emails that NotebookLM may embed in page
+# chrome (footer links, support contacts) and must not be misread as the
+# active account.
+_NON_USER_EMAIL_LOCALS = frozenset(
+    {
+        "abuse",
+        "feedback",
+        "info",
+        "mail-noreply",
+        "googlemail-noreply",
+        "no-reply",
+        "noreply",
+        "press",
+        "privacy",
+        "support",
+    }
+)
+
+# Match a quoted email address, e.g. ``"alice@example.com"``. Mirrors how
+# emails appear in the page's WIZ_global_data JSON.
+_EMAIL_RE = re.compile(r'"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})"')
+
+
+def extract_email_from_html(html: str) -> str | None:
+    """Extract the active user's email from a NotebookLM page response.
+
+    Returns the first plausible Google account email found in the HTML,
+    skipping known non-user addresses (e.g. ``support@google.com``,
+    ``noreply@…``).
+
+    Args:
+        html: Page HTML from ``notebooklm.google.com/?authuser=N``.
+
+    Returns:
+        The account's email, or ``None`` if no plausible address was found
+        (typically because the response was a login redirect or the page
+        structure changed).
+    """
+    for match in _EMAIL_RE.finditer(html):
+        email = match.group(1)
+        local = email.split("@", 1)[0].lower()
+        if local in _NON_USER_EMAIL_LOCALS:
+            continue
+        return email
+    return None
+
+
+# Chromium-style User-Agent for ``enumerate_accounts``. Without a real-browser
+# UA, Google serves a stripped-down page that omits the WIZ_global_data block
+# (and therefore the active user's email), and ``extract_email_from_html``
+# returns None — looking like "no signed-in account". Empirically validated
+# against ``notebooklm.google.com/?authuser=N``.
+_BROWSER_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"
+)
+
+
+async def _probe_authuser(client: httpx.AsyncClient, n: int) -> str | None:
+    """Probe one ``authuser`` index and return the active email or ``None``.
+
+    Returns ``None`` for auth-redirect or unparseable responses; lets the
+    caller decide whether that means "past the last account" or a real error.
+    HTTP transport errors propagate.
+
+    Only checks the *final* URL for an auth redirect. The page body is not
+    scanned because a healthy NotebookLM page legitimately contains many
+    ``accounts.google.com`` links (account chooser, manage-account menu)
+    that would fool ``contains_google_auth_redirect``.
+    """
+    response = await client.get(
+        f"https://notebooklm.google.com/?authuser={n}",
+        headers={"User-Agent": _BROWSER_UA, "Accept": "text/html,*/*"},
+    )
+    if response.status_code != 200:
+        return None
+    if is_google_auth_redirect(str(response.url)):
+        return None
+    return extract_email_from_html(response.text)
+
+
+async def enumerate_accounts(
+    cookie_jar: httpx.Cookies, *, max_authuser: int = MAX_AUTHUSER_PROBE
+) -> list[Account]:
+    """Enumerate Google accounts visible to the given cookie jar.
+
+    Probes ``https://notebooklm.google.com/?authuser=N`` for ``N`` in
+    ``0..max_authuser`` and parses the active user's email from each response.
+
+    Stop condition: when the email at index ``N>0`` matches the email at
+    index 0, Google has silently fallen back to the default account, meaning
+    ``N`` is past the real count. Without this check the caller would record
+    duplicate phantom accounts; Google does not redirect to login in this
+    case.
+
+    Args:
+        cookie_jar: ``httpx.Cookies`` jar with auth cookies. Not mutated.
+        max_authuser: Hard cap on indices probed (default
+            :data:`MAX_AUTHUSER_PROBE`).
+
+    Returns:
+        Accounts ordered by ``authuser`` index. ``is_default`` is true for
+        index 0 only.
+
+    Raises:
+        ValueError: If ``authuser=0`` itself does not return a signed-in
+            account (cookies expired or invalid).
+        httpx.HTTPError: If the HTTP transport fails.
+    """
+    async with httpx.AsyncClient(cookies=cookie_jar, follow_redirects=True, timeout=15.0) as client:
+        default_email = await _probe_authuser(client, 0)
+        if default_email is None:
+            raise ValueError(
+                "Authentication expired or invalid; "
+                "authuser=0 did not return a signed-in account. "
+                "Run 'notebooklm login' to re-authenticate."
+            )
+        accounts = [Account(authuser=0, email=default_email, is_default=True)]
+        for n in range(1, max_authuser + 1):
+            email = await _probe_authuser(client, n)
+            if email is None or email == default_email:
+                break
+            accounts.append(Account(authuser=n, email=email, is_default=False))
+        return accounts
+
+
+def read_account_metadata(storage_path: Path | None) -> dict[str, Any]:
+    """Read ``account.json`` next to ``storage_state.json``.
+
+    ``account.json`` records the Google ``authuser`` index used when the
+    profile was authenticated. Profiles from before this feature shipped
+    (and profiles for users with a single Google account) have no
+    ``account.json`` and use ``authuser=0``.
+
+    Args:
+        storage_path: Path to ``storage_state.json``. The sibling file is
+            ``account.json`` in the same directory. ``None`` means the
+            profile is loaded from ``NOTEBOOKLM_AUTH_JSON``.
+
+    Returns:
+        Parsed metadata dict, or ``{}`` if the file is missing, unreadable,
+        or malformed. Callers should treat a missing ``authuser`` key as 0.
+    """
+    if storage_path is None:
+        return {}
+    account_path = storage_path.with_name("account.json")
+    if not account_path.exists():
+        return {}
+    try:
+        data = json.loads(account_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        logger.debug("account.json read failed at %s: %s", account_path, e)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def get_authuser_for_storage(storage_path: Path | None) -> int:
+    """Return the ``authuser`` index recorded for a profile, defaulting to 0.
+
+    Profiles without ``account.json`` (legacy single-account installs and
+    fresh logins that never set an authuser) are treated as ``authuser=0``,
+    preserving existing behavior.
+
+    Returns:
+        Non-negative ``authuser`` index. Malformed values fall back to 0.
+    """
+    raw = read_account_metadata(storage_path).get("authuser")
+    if isinstance(raw, int) and raw >= 0:
+        return raw
+    return 0
+
+
+def write_account_metadata(storage_path: Path, *, authuser: int, email: str | None = None) -> None:
+    """Persist ``account.json`` next to ``storage_state.json``.
+
+    Args:
+        storage_path: Path to ``storage_state.json``. The sibling
+            ``account.json`` is created or replaced.
+        authuser: ``authuser`` index used when extracting cookies for this
+            profile (0 for the default account).
+        email: Optional account email to record alongside the index, for
+            display in ``notebooklm status`` and similar commands.
+    """
+    account_path = storage_path.with_name("account.json")
+    payload: dict[str, Any] = {"authuser": authuser}
+    if email:
+        payload["email"] = email
+    account_path.parent.mkdir(parents=True, exist_ok=True)
+    account_path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    if sys.platform != "win32":
+        account_path.chmod(0o600)
 
 
 def _load_storage_state(path: Path | None = None) -> dict[str, Any]:
@@ -1194,10 +1420,12 @@ async def _fetch_tokens_with_refresh(
     cookie_jar: httpx.Cookies,
     storage_path: Path | None = None,
     profile: str | None = None,
+    *,
+    authuser: int = 0,
 ) -> tuple[str, str, bool]:
     """Fetch tokens, optionally running NOTEBOOKLM_REFRESH_CMD on auth expiry."""
     try:
-        csrf, session_id = await _fetch_tokens_with_jar(cookie_jar, storage_path)
+        csrf, session_id = await _fetch_tokens_with_jar(cookie_jar, storage_path, authuser=authuser)
         return csrf, session_id, False
     except ValueError as err:
         if not _should_try_refresh(err):
@@ -1218,7 +1446,9 @@ async def _fetch_tokens_with_refresh(
                     _REFRESH_GENERATIONS[refresh_key] = refresh_generation + 1
                 fresh_jar = build_httpx_cookies_from_storage(refresh_storage_path)
                 _replace_cookie_jar(cookie_jar, fresh_jar)
-            csrf, session_id = await _fetch_tokens_with_jar(cookie_jar, refresh_storage_path)
+            csrf, session_id = await _fetch_tokens_with_jar(
+                cookie_jar, refresh_storage_path, authuser=authuser
+            )
             return csrf, session_id, True
         finally:
             _REFRESH_ATTEMPTED_CONTEXT.reset(refresh_token)
@@ -1567,7 +1797,7 @@ async def _rotate_cookies(client: httpx.AsyncClient, storage_path: Path | None =
 
 
 async def _fetch_tokens_with_jar(
-    cookie_jar: httpx.Cookies, storage_path: Path | None = None
+    cookie_jar: httpx.Cookies, storage_path: Path | None = None, *, authuser: int = 0
 ) -> tuple[str, str]:
     """Internal: fetch CSRF and session tokens using a pre-built cookie jar.
 
@@ -1583,6 +1813,9 @@ async def _fetch_tokens_with_jar(
         cookie_jar: httpx.Cookies jar with auth cookies (domain-preserving or fallback).
         storage_path: Optional storage_state.json path, forwarded to
             ``_poke_session`` to gate the rotation poke.
+        authuser: Google ``authuser`` index to authenticate as. ``0`` (the
+            default account) keeps the URL identical to pre-multi-account
+            behavior; non-zero values append ``?authuser=N``.
 
     Returns:
         Tuple of (csrf_token, session_id)
@@ -1596,8 +1829,14 @@ async def _fetch_tokens_with_jar(
     async with httpx.AsyncClient(cookies=cookie_jar) as client:
         await _poke_session(client, storage_path)
 
+        # Append ?authuser=N only for non-default accounts: keeps the URL
+        # byte-identical for the common authuser=0 case so existing tests
+        # and downstream caches don't see a spurious change.
+        url = "https://notebooklm.google.com/"
+        if authuser:
+            url = f"{url}?authuser={authuser}"
         response = await client.get(
-            "https://notebooklm.google.com/",
+            url,
             follow_redirects=True,
             timeout=30.0,
         )

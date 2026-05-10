@@ -270,6 +270,25 @@ def get_storage_path(profile: str | None = None) -> Path:
     return _legacy_fallback(profile_path, "storage_state.json", resolved)
 
 
+def get_account_path(profile: str | None = None) -> Path:
+    """Get account.json path for a profile.
+
+    ``account.json`` records which Google ``authuser`` index the profile's
+    cookies were extracted for, when several accounts are signed in to one
+    browser profile. It is a sibling of ``storage_state.json``; absence
+    means the profile uses ``authuser=0`` (the default account).
+
+    Args:
+        profile: Profile name. If None, uses the active profile.
+
+    Returns:
+        Path to account.json (may not exist).
+    """
+    resolved = resolve_profile(profile)
+    profile_path = get_profile_dir(resolved) / "account.json"
+    return _legacy_fallback(profile_path, "account.json", resolved)
+
+
 def get_context_path(profile: str | None = None) -> Path:
     """Get context.json path for a profile.
 

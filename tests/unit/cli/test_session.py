@@ -2082,3 +2082,195 @@ class TestAuthRefreshCommand:
         called_args = mock_fetch.call_args
         assert called_args.args[0] == work_storage
         assert called_args.args[1] == "work"
+
+
+# =============================================================================
+# AUTH INSPECT + MULTI-ACCOUNT LOGIN TESTS (issue #359)
+# =============================================================================
+
+
+def _multiaccount_rookiepy_mock(emails):
+    """Build a rookiepy mock that returns the same SID-bearing cookies for any
+    domain query. Cookies cover all signed-in accounts in Google's wire model.
+    """
+    cookies = [
+        {
+            "domain": ".google.com",
+            "name": name,
+            "value": f"{name}-value",
+            "path": "/",
+            "secure": True,
+            "expires": 9999,
+            "http_only": False,
+        }
+        for name in ("SID", "HSID", "SSID", "APISID", "SAPISID")
+    ]
+    mock = MagicMock()
+    mock.chrome = MagicMock(return_value=cookies)
+    mock.load = MagicMock(return_value=cookies)
+    return mock
+
+
+class TestAuthInspect:
+    def test_inspect_lists_accounts(self, runner):
+        mock_rk = _multiaccount_rookiepy_mock(
+            ["alice@example.com", "bob@gmail.com", "carol@ws.com"]
+        )
+
+        async def _enum(*args, **kwargs):
+            from notebooklm.auth import Account
+
+            return [
+                Account(authuser=0, email="alice@example.com", is_default=True),
+                Account(authuser=1, email="bob@gmail.com", is_default=False),
+                Account(authuser=2, email="carol@ws.com", is_default=False),
+            ]
+
+        with (
+            patch.dict("sys.modules", {"rookiepy": mock_rk}),
+            patch(
+                "notebooklm.cli.session.run_async",
+                side_effect=lambda c: c.send(None) if False else __import__("asyncio").run(c),
+            ),
+            patch("notebooklm.auth.enumerate_accounts", new=_enum),
+        ):
+            result = runner.invoke(cli, ["auth", "inspect", "--browser", "chrome"])
+        assert result.exit_code == 0, result.output
+        assert "alice@example.com" in result.output
+        assert "bob@gmail.com" in result.output
+        assert "carol@ws.com" in result.output
+
+    def test_inspect_json_output(self, runner):
+        mock_rk = _multiaccount_rookiepy_mock(["alice@example.com"])
+
+        async def _enum(*args, **kwargs):
+            from notebooklm.auth import Account
+
+            return [Account(authuser=0, email="alice@example.com", is_default=True)]
+
+        with (
+            patch.dict("sys.modules", {"rookiepy": mock_rk}),
+            patch("notebooklm.auth.enumerate_accounts", new=_enum),
+        ):
+            result = runner.invoke(cli, ["auth", "inspect", "--browser", "chrome", "--json"])
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["accounts"][0]["email"] == "alice@example.com"
+        assert data["accounts"][0]["authuser"] == 0
+        assert data["accounts"][0]["is_default"] is True
+
+
+class TestLoginMultiAccount:
+    """--authuser / --profile-name / --all-accounts on `notebooklm login --browser-cookies`."""
+
+    def test_authuser_writes_account_json(self, runner, tmp_path):
+        mock_rk = _multiaccount_rookiepy_mock(["alice@example.com", "bob@gmail.com"])
+
+        async def _enum(*args, **kwargs):
+            from notebooklm.auth import Account
+
+            return [
+                Account(authuser=0, email="alice@example.com", is_default=True),
+                Account(authuser=1, email="bob@gmail.com", is_default=False),
+            ]
+
+        # Layout: tmp_path/profiles/bob/storage_state.json (and account.json sibling)
+        target_dir = tmp_path / "profiles" / "bob"
+
+        def fake_get_storage_path(profile=None):
+            return target_dir / "storage_state.json"
+
+        with (
+            patch.dict("sys.modules", {"rookiepy": mock_rk}),
+            patch("notebooklm.cli.session.get_storage_path", side_effect=fake_get_storage_path),
+            patch("notebooklm.cli.session._sync_server_language_to_config"),
+            patch("notebooklm.auth.enumerate_accounts", new=_enum),
+            patch(
+                "notebooklm.cli.session.fetch_tokens_with_domains",
+                new_callable=AsyncMock,
+                return_value=("csrf", "sess"),
+            ),
+        ):
+            result = runner.invoke(cli, ["login", "--browser-cookies", "chrome", "--authuser", "1"])
+
+        assert result.exit_code == 0, result.output
+        account_json = target_dir / "account.json"
+        assert account_json.exists()
+        meta = json.loads(account_json.read_text())
+        assert meta == {"authuser": 1, "email": "bob@gmail.com"}
+
+    def test_authuser_out_of_range_aborts(self, runner, tmp_path):
+        mock_rk = _multiaccount_rookiepy_mock(["alice@example.com"])
+
+        async def _enum(*args, **kwargs):
+            from notebooklm.auth import Account
+
+            return [Account(authuser=0, email="alice@example.com", is_default=True)]
+
+        with (
+            patch.dict("sys.modules", {"rookiepy": mock_rk}),
+            patch(
+                "notebooklm.cli.session.get_storage_path",
+                return_value=tmp_path / "storage.json",
+            ),
+            patch("notebooklm.auth.enumerate_accounts", new=_enum),
+        ):
+            result = runner.invoke(cli, ["login", "--browser-cookies", "chrome", "--authuser", "5"])
+        assert result.exit_code != 0
+        assert "not found" in result.output.lower()
+
+    def test_all_accounts_writes_one_profile_per_account(self, runner, tmp_path):
+        mock_rk = _multiaccount_rookiepy_mock(["alice@example.com"])
+
+        async def _enum(*args, **kwargs):
+            from notebooklm.auth import Account
+
+            return [
+                Account(authuser=0, email="alice@example.com", is_default=True),
+                Account(authuser=1, email="bob@gmail.com", is_default=False),
+            ]
+
+        target_root = tmp_path / "profiles"
+
+        def fake_get_storage_path(profile=None):
+            return target_root / (profile or "default") / "storage_state.json"
+
+        with (
+            patch.dict("sys.modules", {"rookiepy": mock_rk}),
+            patch("notebooklm.cli.session.get_storage_path", side_effect=fake_get_storage_path),
+            patch("notebooklm.auth.enumerate_accounts", new=_enum),
+            patch(
+                "notebooklm.cli.session.fetch_tokens_with_domains",
+                new_callable=AsyncMock,
+                return_value=("csrf", "sess"),
+            ),
+        ):
+            result = runner.invoke(cli, ["login", "--browser-cookies", "chrome", "--all-accounts"])
+
+        assert result.exit_code == 0, result.output
+        alice_meta = json.loads((target_root / "alice" / "account.json").read_text())
+        bob_meta = json.loads((target_root / "bob" / "account.json").read_text())
+        assert alice_meta == {"authuser": 0, "email": "alice@example.com"}
+        assert bob_meta == {"authuser": 1, "email": "bob@gmail.com"}
+
+    def test_authuser_without_browser_cookies_rejected(self, runner):
+        # --authuser only makes sense with --browser-cookies; the CLI should
+        # tell the user instead of silently ignoring it.
+        result = runner.invoke(cli, ["login", "--authuser", "1"])
+        assert result.exit_code != 0
+        assert "browser-cookies" in result.output
+
+    def test_all_accounts_combined_with_authuser_rejected(self, runner):
+        result = runner.invoke(
+            cli,
+            [
+                "login",
+                "--browser-cookies",
+                "chrome",
+                "--all-accounts",
+                "--authuser",
+                "1",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "all-accounts" in result.output.lower()

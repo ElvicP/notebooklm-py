@@ -53,6 +53,7 @@ from .helpers import (
     set_current_notebook,
 )
 from .language import set_language
+from .profile import _validate_profile_name, email_to_profile_name
 
 logger = logging.getLogger(__name__)
 
@@ -141,14 +142,236 @@ def _handle_rookiepy_error(e: Exception, browser_name: str) -> None:
         console.print(f"[red]Failed to read cookies from {browser_name}:[/red] {e}")
 
 
-def _login_with_browser_cookies(
-    storage_path: Path, browser_name: str, profile: str | None = None
-) -> None:
-    """Extract Google cookies from an installed browser via rookiepy.
+def _enumerate_browser_accounts(
+    browser_name: str, *, verbose: bool = True
+) -> tuple[list[Any], list[Any]]:
+    """Read cookies from ``browser_name`` and discover signed-in accounts.
 
     Args:
-        storage_path: Where to write storage_state.json.
-        browser_name: "auto" to use rookiepy.load(), or a specific browser name.
+        browser_name: rookiepy browser alias.
+        verbose: Forwarded to :func:`_read_browser_cookies` to suppress the
+            human-readable progress line in JSON-output paths.
+
+    Returns:
+        ``(raw_cookies, accounts)`` — the original rookiepy cookies and the
+        list of :class:`notebooklm.auth.Account` records discovered via
+        per-index ``?authuser=N`` probing.
+
+    Raises:
+        SystemExit: On rookiepy failure, missing required cookies, or
+            authuser=0 not returning a signed-in account.
+    """
+    from ..auth import (
+        build_cookie_jar,
+        enumerate_accounts,
+        extract_cookies_with_domains,
+    )
+
+    raw_cookies = _read_browser_cookies(browser_name, verbose=verbose)
+    storage_state = convert_rookiepy_cookies_to_storage_state(raw_cookies)
+    try:
+        extract_cookies_from_storage(storage_state)
+    except ValueError as e:
+        console.print(
+            "[red]No valid Google authentication cookies found.[/red]\n"
+            f"{e}\n\n"
+            "Make sure you are logged into Google in your browser."
+        )
+        raise SystemExit(1) from None
+
+    cookie_map = extract_cookies_with_domains(storage_state)
+    jar = build_cookie_jar(cookies=cookie_map)
+    try:
+        accounts = run_async(enumerate_accounts(jar))
+    except ValueError as e:
+        console.print(f"[red]Account discovery failed:[/red] {e}")
+        raise SystemExit(1) from None
+    except httpx.RequestError as e:
+        console.print(
+            f"[red]Account discovery failed (network error):[/red] {e}\n"
+            "Check your internet connection and try again."
+        )
+        raise SystemExit(1) from None
+    return raw_cookies, accounts
+
+
+def _login_browser_cookies_single(
+    browser_cookies: str,
+    *,
+    storage: str | None,
+    authuser: int | None,
+    profile_name: str | None,
+    active_profile: str | None,
+) -> None:
+    """Extract one account from ``--browser-cookies`` into a profile.
+
+    Resolves the target storage path:
+
+    - ``--storage`` wins outright.
+    - ``--profile-name`` selects a sibling profile under the home dir.
+    - ``--authuser`` defaults the new profile to the email's local-part
+      when the user did not pass ``--profile-name``.
+    - Otherwise we write to the active profile (existing behavior).
+    """
+    explicit_storage = Path(storage) if storage else None
+
+    if authuser is None and profile_name is None and explicit_storage is None:
+        # Path 1: existing behavior — extract default account into active profile.
+        resolved_storage = get_storage_path(profile=active_profile)
+        _login_with_browser_cookies(resolved_storage, browser_cookies, active_profile)
+        return
+
+    # Path 2: targeted extraction. We need the email to derive a profile name
+    # (when --profile-name is omitted) and to pick the right authuser if the
+    # caller passed --profile-name without --authuser.
+    raw_cookies, accounts = _enumerate_browser_accounts(browser_cookies)
+    selected = _select_account(accounts, authuser=authuser)
+
+    target_profile = profile_name or email_to_profile_name(selected.email)
+    if profile_name is not None:
+        _validate_profile_name(target_profile)
+
+    target_storage = explicit_storage or get_storage_path(profile=target_profile)
+
+    _write_extracted_cookies(
+        raw_cookies,
+        storage_path=target_storage,
+        profile=target_profile if not explicit_storage else active_profile,
+        authuser=selected.authuser,
+        email=selected.email,
+    )
+
+
+def _login_all_accounts_from_browser(browser_cookies: str) -> None:
+    """Extract every signed-in Google account into its own profile."""
+    raw_cookies, accounts = _enumerate_browser_accounts(browser_cookies)
+    if not accounts:
+        console.print("[yellow]No accounts discovered.[/yellow]")
+        return
+
+    console.print(f"\n[bold]Found {len(accounts)} accounts.[/bold] Creating profiles:")
+    used: set[str] = set()
+    for account in accounts:
+        base_name = email_to_profile_name(account.email)
+        target_profile = base_name
+        suffix = 2
+        while target_profile in used:
+            target_profile = f"{base_name}-{suffix}"
+            suffix += 1
+        used.add(target_profile)
+
+        target_storage = get_storage_path(profile=target_profile)
+        _write_extracted_cookies(
+            raw_cookies,
+            storage_path=target_storage,
+            profile=target_profile,
+            authuser=account.authuser,
+            email=account.email,
+        )
+
+
+def _select_account(accounts: list[Any], *, authuser: int | None) -> Any:
+    """Pick the requested account from a discovery result.
+
+    ``None`` selects the default account (authuser=0). An out-of-range
+    ``authuser`` aborts with a list of available indices.
+    """
+    if authuser is None:
+        return next(a for a in accounts if a.is_default)
+    for account in accounts:
+        if account.authuser == authuser:
+            return account
+    available = ", ".join(f"{a.authuser}={a.email}" for a in accounts)
+    console.print(
+        f"[red]authuser={authuser} not found among signed-in accounts.[/red]\n"
+        f"Available: {available}"
+    )
+    raise SystemExit(1)
+
+
+def _write_extracted_cookies(
+    raw_cookies: list[dict[str, Any]],
+    *,
+    storage_path: Path,
+    profile: str | None,
+    authuser: int,
+    email: str,
+) -> None:
+    """Write a previously-loaded rookiepy cookie set to ``storage_path``.
+
+    Bypasses :func:`_read_browser_cookies` because the caller already has the
+    cookies in hand (e.g. ``--all-accounts`` reads once and writes N profiles).
+    """
+    storage_state = convert_rookiepy_cookies_to_storage_state(raw_cookies)
+    try:
+        extract_cookies_from_storage(storage_state)
+    except ValueError as e:
+        console.print(
+            "[red]No valid Google authentication cookies found.[/red]\n"
+            f"{e}\n\n"
+            "Make sure you are logged into Google in your browser."
+        )
+        raise SystemExit(1) from None
+
+    try:
+        storage_path.parent.mkdir(parents=True, exist_ok=True)
+        storage_path.write_text(
+            json.dumps(storage_state, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        if sys.platform != "win32":
+            storage_path.parent.chmod(0o700)
+            storage_path.chmod(0o600)
+    except OSError as e:
+        logger.error("Failed to save authentication to %s: %s", storage_path, e)
+        console.print(f"[red]Failed to save authentication to {storage_path}.[/red]\nDetails: {e}")
+        raise SystemExit(1) from None
+
+    from ..auth import write_account_metadata
+
+    try:
+        write_account_metadata(storage_path, authuser=authuser, email=email)
+    except OSError as e:
+        logger.error("Failed to save account metadata for %s: %s", storage_path, e)
+        console.print(
+            f"[yellow]Warning: cookies saved but account metadata write failed.[/yellow]\n"
+            f"Details: {e}"
+        )
+
+    console.print(
+        f"  [green]✓[/green] {profile or storage_path}  " f"→  {email}  (authuser={authuser})"
+    )
+
+    # Verify cookies for the active account.
+    try:
+        run_async(fetch_tokens_with_domains(storage_path, profile))
+    except ValueError as e:
+        logger.warning("Extracted cookies for %s failed verification: %s", email, e)
+        console.print(f"    [yellow]Warning: cookies for {email} failed verification.[/yellow]")
+    except httpx.RequestError as e:
+        logger.warning("Could not verify cookies for %s: %s", email, e)
+        console.print(
+            f"    [yellow]Warning: could not verify cookies for {email} (network).[/yellow]"
+        )
+
+
+def _read_browser_cookies(browser_name: str, *, verbose: bool = True) -> list[dict[str, Any]]:
+    """Load Google cookies from an installed browser via rookiepy.
+
+    Wraps rookiepy import + dispatch + error handling so multiple commands
+    (``login --browser-cookies``, ``auth inspect``) share one code path.
+
+    Args:
+        browser_name: ``"auto"`` to use ``rookiepy.load()``, or a specific
+            browser alias from :data:`_ROOKIEPY_BROWSER_ALIASES`.
+        verbose: When False, suppress the "Reading cookies from …" progress
+            line. Used by ``auth inspect --json`` to keep stdout pure JSON.
+
+    Returns:
+        Raw cookie dicts as returned by rookiepy.
+
+    Raises:
+        SystemExit: With a user-friendly message printed to console on any
+            rookiepy import / dispatch / read failure.
     """
     try:
         import rookiepy
@@ -164,44 +387,66 @@ def _login_with_browser_cookies(
 
     # Build domains list including base and regional Google domains for rookiepy
     domains = list(ALLOWED_COOKIE_DOMAINS)
-    # Add regional Google auth domains (e.g., .google.co.uk, .google.com.sg)
     for cctld in GOOGLE_REGIONAL_CCTLDS:
         domain = f".google.{cctld}"
         if domain not in domains:
             domains.append(domain)
 
     if browser_name == "auto":
-        console.print("[yellow]Reading cookies from installed browser (auto-detect)...[/yellow]")
+        if verbose:
+            console.print(
+                "[yellow]Reading cookies from installed browser (auto-detect)...[/yellow]"
+            )
         try:
-            raw_cookies = rookiepy.load(domains=domains)
+            return rookiepy.load(domains=domains)
         except (OSError, RuntimeError) as e:
-            # OSError: file access issues (locked DB, permission denied)
-            # RuntimeError: decryption/keychain errors
             _handle_rookiepy_error(e, "auto-detect")
             raise SystemExit(1) from None
-    else:
-        canonical = _ROOKIEPY_BROWSER_ALIASES.get(browser_name.lower())
-        if canonical is None:
-            console.print(
-                f"[red]Unknown browser: '{browser_name}'[/red]\n"
-                f"Supported: {', '.join(sorted(_ROOKIEPY_BROWSER_ALIASES))}"
-            )
-            raise SystemExit(1)
+
+    canonical = _ROOKIEPY_BROWSER_ALIASES.get(browser_name.lower())
+    if canonical is None:
+        console.print(
+            f"[red]Unknown browser: '{browser_name}'[/red]\n"
+            f"Supported: {', '.join(sorted(_ROOKIEPY_BROWSER_ALIASES))}"
+        )
+        raise SystemExit(1)
+    if verbose:
         console.print(f"[yellow]Reading cookies from {browser_name}...[/yellow]")
-        browser_fn = getattr(rookiepy, canonical, None)
-        if browser_fn is None or not callable(browser_fn):
-            console.print(
-                f"[red]rookiepy does not support '{canonical}' on this platform.[/red]\n"
-                "Check that rookiepy is properly installed: pip install rookiepy"
-            )
-            raise SystemExit(1)
-        try:
-            raw_cookies = browser_fn(domains=domains)
-        except (OSError, RuntimeError) as e:
-            # OSError: file access issues (locked DB, permission denied)
-            # RuntimeError: decryption/keychain errors
-            _handle_rookiepy_error(e, browser_name)
-            raise SystemExit(1) from None
+    browser_fn = getattr(rookiepy, canonical, None)
+    if browser_fn is None or not callable(browser_fn):
+        console.print(
+            f"[red]rookiepy does not support '{canonical}' on this platform.[/red]\n"
+            "Check that rookiepy is properly installed: pip install rookiepy"
+        )
+        raise SystemExit(1)
+    try:
+        return browser_fn(domains=domains)
+    except (OSError, RuntimeError) as e:
+        _handle_rookiepy_error(e, browser_name)
+        raise SystemExit(1) from None
+
+
+def _login_with_browser_cookies(
+    storage_path: Path,
+    browser_name: str,
+    profile: str | None = None,
+    *,
+    authuser: int = 0,
+    email: str | None = None,
+) -> None:
+    """Extract Google cookies from an installed browser via rookiepy.
+
+    Args:
+        storage_path: Where to write storage_state.json.
+        browser_name: "auto" to use rookiepy.load(), or a specific browser name.
+        profile: Profile name (forwarded to verification step).
+        authuser: Google ``authuser`` index this profile authenticates as.
+            ``0`` is the default account; non-zero records ``account.json``
+            so subsequent calls hit ``?authuser=N``.
+        email: Optional account email to record in ``account.json`` for
+            display in ``status`` / ``inspect``.
+    """
+    raw_cookies = _read_browser_cookies(browser_name)
 
     storage_state = convert_rookiepy_cookies_to_storage_state(raw_cookies)
     try:
@@ -229,7 +474,25 @@ def _login_with_browser_cookies(
         console.print(f"[red]Failed to save authentication to {storage_path}.[/red]\nDetails: {e}")
         raise SystemExit(1) from None
 
-    console.print(f"\n[green]Authentication saved to:[/green] {storage_path}")
+    # Record the authuser index so future calls target the right Google
+    # account. Only write account.json when we actually need to: a non-zero
+    # index, or an email for display.
+    if authuser or email:
+        from ..auth import write_account_metadata
+
+        try:
+            write_account_metadata(storage_path, authuser=authuser, email=email)
+        except OSError as e:
+            logger.error("Failed to save account metadata for %s: %s", storage_path, e)
+            console.print(
+                f"[yellow]Warning: cookies saved but account metadata write failed.[/yellow]\n"
+                f"Details: {e}"
+            )
+
+    saved_msg = f"\n[green]Authentication saved to:[/green] {storage_path}"
+    if email:
+        saved_msg += f"\n[green]Account:[/green] {email} (authuser={authuser})"
+    console.print(saved_msg)
 
     # Verify that cookies work.
     try:
@@ -419,13 +682,44 @@ def register_session_commands(cli):
         ),
     )
     @click.option(
+        "--authuser",
+        type=click.IntRange(min=0),
+        default=None,
+        help=(
+            "Pick a non-default Google account when several are signed in to the "
+            "browser. 0 is the default. Use 'notebooklm auth inspect --browser <name>' "
+            "to list available accounts. Only valid with --browser-cookies."
+        ),
+    )
+    @click.option(
+        "--all-accounts",
+        "all_accounts",
+        is_flag=True,
+        default=False,
+        help=(
+            "Extract every Google account signed in to the browser into its own "
+            "profile (auto-named from each account's email). Only valid with "
+            "--browser-cookies."
+        ),
+    )
+    @click.option(
+        "--profile-name",
+        "profile_name",
+        default=None,
+        help=(
+            "Name to give the new profile when extracting a non-default account. "
+            "Defaults to the account email's local-part. Only valid with "
+            "--browser-cookies."
+        ),
+    )
+    @click.option(
         "--fresh",
         is_flag=True,
         default=False,
         help="Start with a clean browser session (deletes cached browser profile). Use to switch Google accounts.",
     )
     @click.pass_context
-    def login(ctx, storage, browser, browser_cookies, fresh):
+    def login(ctx, storage, browser, browser_cookies, authuser, all_accounts, profile_name, fresh):
         """Log in to NotebookLM via browser.
 
         Opens a browser window for Google login. After logging in,
@@ -448,6 +742,27 @@ def register_session_commands(cli):
             )
             raise SystemExit(1)
 
+        if browser_cookies is None and (
+            authuser is not None or all_accounts or profile_name is not None
+        ):
+            console.print(
+                "[red]Error: --authuser, --all-accounts, and --profile-name "
+                "require --browser-cookies.[/red]"
+            )
+            raise SystemExit(1)
+        if all_accounts and (authuser is not None or profile_name is not None):
+            console.print(
+                "[red]Error: --all-accounts cannot be combined with "
+                "--authuser or --profile-name.[/red]"
+            )
+            raise SystemExit(1)
+        if all_accounts and storage:
+            console.print(
+                "[red]Error: --all-accounts writes one profile per account "
+                "and cannot be combined with --storage.[/red]"
+            )
+            raise SystemExit(1)
+
         # rookiepy fast-path: skip Playwright entirely
         if browser_cookies is not None:
             if fresh:
@@ -455,9 +770,17 @@ def register_session_commands(cli):
                     "[yellow]Warning: --fresh has no effect with --browser-cookies "
                     "(no browser profile is used).[/yellow]"
                 )
-            profile = ctx.obj.get("profile") if ctx.obj else None
-            resolved_storage = Path(storage) if storage else get_storage_path(profile=profile)
-            _login_with_browser_cookies(resolved_storage, browser_cookies, profile)
+            if all_accounts:
+                _login_all_accounts_from_browser(browser_cookies)
+                return
+            active_profile = ctx.obj.get("profile") if ctx.obj else None
+            _login_browser_cookies_single(
+                browser_cookies,
+                storage=storage,
+                authuser=authuser,
+                profile_name=profile_name,
+                active_profile=active_profile,
+            )
             return
 
         profile = ctx.obj.get("profile") if ctx.obj else None
@@ -947,6 +1270,65 @@ def register_session_commands(cli):
             console.print("[green]Logged out.[/green] Run 'notebooklm login' to sign in again.")
         else:
             console.print("[yellow]No active session found.[/yellow] Already logged out.")
+
+    @auth_group.command("inspect")
+    @click.option(
+        "--browser",
+        "browser_name",
+        default="auto",
+        help=(
+            "Browser to read cookies from (chrome, firefox, brave, edge, "
+            "safari, arc, ...). 'auto' picks the first one rookiepy can read. "
+            "Requires: pip install 'notebooklm-py[cookies]'"
+        ),
+    )
+    @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
+    def auth_inspect(browser_name, json_output):
+        """List Google accounts visible to a browser's cookie store.
+
+        Read-only — never writes to disk. Use this before
+        ``notebooklm login --browser-cookies <browser>`` to see which
+        ``--authuser`` index maps to which email.
+
+        \b
+        Examples:
+          notebooklm auth inspect --browser chrome
+          notebooklm auth inspect --browser firefox --json
+        """
+        _, accounts = _enumerate_browser_accounts(browser_name, verbose=not json_output)
+        if json_output:
+            json_output_response(
+                {
+                    "browser": browser_name,
+                    "accounts": [
+                        {"authuser": a.authuser, "email": a.email, "is_default": a.is_default}
+                        for a in accounts
+                    ],
+                }
+            )
+            return
+        console.print(f"\n[bold]Browser:[/bold] {browser_name}")
+        console.print(f"[bold]Found {len(accounts)} signed-in Google account(s):[/bold]\n")
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("authuser", justify="right")
+        table.add_column("email")
+        table.add_column("default", justify="center")
+        for a in accounts:
+            table.add_row(
+                str(a.authuser),
+                a.email,
+                "[green]✓[/green]" if a.is_default else "",
+            )
+        console.print(table)
+        console.print(
+            "\n[dim]Note: --browser-cookies <browser> reads cookies from the "
+            "browser's default user-data profile only. Accounts in other "
+            "browser profiles will not appear here.[/dim]\n"
+            "Pick one with: [cyan]notebooklm login --browser-cookies "
+            f"{browser_name} --authuser N[/cyan]\n"
+            "Or extract them all: [cyan]notebooklm login --browser-cookies "
+            f"{browser_name} --all-accounts[/cyan]"
+        )
 
     @auth_group.command("check")
     @click.option(
