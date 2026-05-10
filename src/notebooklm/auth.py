@@ -720,6 +720,14 @@ async def enumerate_accounts(
         follow_redirects=True,
         timeout=httpx.Timeout(10.0, read=60.0),
     ) as client:
+        # The browser's on-disk cookie DB rotates ``__Secure-1PSIDTS`` every
+        # few minutes, but only when Chrome itself is actively running. A
+        # ``--browser-cookies`` extraction against an idle Chrome lands here
+        # with a stale SIDTS — the SID is fine, but ``notebooklm.google.com``
+        # responds with a redirect to ``accounts.google.com`` and we'd
+        # incorrectly conclude the user is signed out. Poke once to fetch
+        # fresh SIDTS via Set-Cookie before the probes start.
+        await _poke_session(client, None)
         default_email = await _probe_authuser(client, 0)
         if default_email is None:
             raise ValueError(

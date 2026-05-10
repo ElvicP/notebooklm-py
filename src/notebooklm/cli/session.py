@@ -183,8 +183,20 @@ def _enumerate_browser_accounts(
     jar = build_cookie_jar(cookies=cookie_map)
     try:
         accounts = run_async(enumerate_accounts(jar))
-    except ValueError as e:
-        console.print(f"[red]Account discovery failed:[/red] {e}")
+    except ValueError:
+        # Cookies are present but Google rejected them (passive sign-in
+        # redirected to the account chooser, or RotateCookies returned 401).
+        # The on-disk cookie store the browser persists is too stale for
+        # Google to refresh server-side. User has to refresh it themselves.
+        console.print(
+            f"[red]Account discovery failed: {browser_name}'s saved cookies are "
+            f"too stale for Google to re-authenticate.[/red]\n\n"
+            "Refresh them by opening the browser and visiting a Google site "
+            "(e.g. https://notebooklm.google.com), then re-run this command.\n\n"
+            "If the browser is signed out, sign back in there first.\n"
+            "If you'd rather skip the browser entirely, use "
+            "[cyan]notebooklm login[/cyan] (Playwright flow)."
+        )
         raise SystemExit(1) from None
     except httpx.RequestError as e:
         console.print(
