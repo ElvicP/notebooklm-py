@@ -305,7 +305,13 @@ def _extract_source_created_at(metadata: Any) -> datetime | None:
         return None
 
     try:
-        return datetime.fromtimestamp(timestamp_list[0])
+        seconds = timestamp_list[0]
+        # The Google RPC pairs seconds with a nanosecond component at index 1;
+        # fold it in so Source.created_at preserves sub-second precision.
+        nanos = timestamp_list[1] if len(timestamp_list) > 1 else 0
+        if not isinstance(nanos, int):
+            nanos = 0
+        return datetime.fromtimestamp(seconds + nanos / 1_000_000_000)
     except (TypeError, ValueError):
         return None
 
@@ -323,20 +329,19 @@ def _extract_audio_artifact_url(data: list[Any]) -> str | None:
     if not isinstance(media_list, list):
         return None
 
+    fallback_url = None
     for item in media_list:
-        if (
-            isinstance(item, list)
-            and len(item) > 2
-            and item[2] == "audio/mp4"
-            and _is_valid_artifact_url(item[0])
-        ):
-            return item[0]
+        if not isinstance(item, list) or not item:
+            continue
+        url = item[0]
+        if not _is_valid_artifact_url(url):
+            continue
+        if fallback_url is None:
+            fallback_url = url
+        if len(item) > 2 and item[2] == "audio/mp4":
+            return url
 
-    for item in media_list:
-        if isinstance(item, list) and item and _is_valid_artifact_url(item[0]):
-            return item[0]
-
-    return None
+    return fallback_url
 
 
 def _extract_video_artifact_url(data: list[Any]) -> str | None:
@@ -391,13 +396,13 @@ def _extract_slide_deck_artifact_url(data: list[Any]) -> str | None:
 
 def _extract_artifact_url(data: list[Any], artifact_type: int | None) -> str | None:
     """Extract a public download URL from known artifact response shapes."""
-    if artifact_type == ArtifactTypeCode.AUDIO.value:
+    if artifact_type == ArtifactTypeCode.AUDIO:
         return _extract_audio_artifact_url(data)
-    if artifact_type == ArtifactTypeCode.VIDEO.value:
+    if artifact_type == ArtifactTypeCode.VIDEO:
         return _extract_video_artifact_url(data)
-    if artifact_type == ArtifactTypeCode.INFOGRAPHIC.value:
+    if artifact_type == ArtifactTypeCode.INFOGRAPHIC:
         return _extract_infographic_artifact_url(data)
-    if artifact_type == ArtifactTypeCode.SLIDE_DECK.value:
+    if artifact_type == ArtifactTypeCode.SLIDE_DECK:
         return _extract_slide_deck_artifact_url(data)
     return None
 

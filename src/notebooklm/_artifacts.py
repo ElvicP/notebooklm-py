@@ -1107,7 +1107,7 @@ class ArtifactsAPI:
 
         # Route through the shared extractor so readiness checks, Artifact.url,
         # GenerationStatus.url, and downloads all agree on the same URL.
-        url = _extract_artifact_url(audio_art, ArtifactTypeCode.AUDIO.value)
+        url = _extract_artifact_url(audio_art, ArtifactTypeCode.AUDIO)
         if not url:
             raise ArtifactParseError(
                 "audio",
@@ -1154,7 +1154,7 @@ class ArtifactsAPI:
 
         # Route through the shared extractor so readiness checks, Artifact.url,
         # GenerationStatus.url, and downloads all agree on the same URL.
-        url = _extract_artifact_url(video_art, ArtifactTypeCode.VIDEO.value)
+        url = _extract_artifact_url(video_art, ArtifactTypeCode.VIDEO)
         if not url:
             raise ArtifactParseError(
                 "video_artifact",
@@ -1202,7 +1202,7 @@ class ArtifactsAPI:
         # Route through the shared extractor so readiness checks and downloads
         # agree on which URL to select.
         try:
-            url = _extract_artifact_url(info_art, ArtifactTypeCode.INFOGRAPHIC.value)
+            url = _extract_artifact_url(info_art, ArtifactTypeCode.INFOGRAPHIC)
             if not url:
                 raise ArtifactParseError("infographic", details="Could not find metadata")
             return await self._download_url(url, output_path)

@@ -158,6 +158,23 @@ class TestSource:
         assert source.created_at is not None
         assert source.created_at.timestamp() == ts
 
+    def test_from_api_response_preserves_timestamp_nanoseconds(self):
+        """The nanoseconds component of [seconds, nanoseconds] is folded into
+        the parsed datetime so sub-second ordering is preserved."""
+        ts = 1704067200
+        nanos = 500_000_000  # 0.5 seconds
+        data = [
+            [
+                ["src_ns"],
+                "Precise Source",
+                [None, None, [ts, nanos], None, 5, None, None, ["https://example.com"]],
+            ]
+        ]
+        source = Source.from_api_response(data)
+
+        assert source.created_at is not None
+        assert source.created_at.timestamp() == ts + nanos / 1_000_000_000
+
     def test_from_api_response_deeply_nested(self):
         """Test parsing deeply nested format."""
         data = [
