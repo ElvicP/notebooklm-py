@@ -57,7 +57,13 @@ Contains the authentication data extracted from your browser session:
 }
 ```
 
-**Required cookies:** `SID`, `HSID`, `SSID`, `APISID`, `SAPISID`, `__Secure-1PSID`, `__Secure-3PSID`
+**Cookie requirements** (empirically validated via single- and pair-wise ablation, see `auth-keepalive.md` §3.5):
+
+- **Strictly required:** `SID`. The library refuses to even attempt a request without it (`MINIMUM_REQUIRED_COOKIES` at `auth.py:63`).
+- **Strongly recommended:** `__Secure-1PSIDTS`. Removable on its own (Google can re-mint it via `RotateCookies`), but as soon as `__Secure-1PSIDTS` *and* any one other cookie are both missing, Google rejects the call with `Authentication expired or invalid`.
+- **Secondary binding (one of these two must hold):** either `OSID` is present, or both `APISID` and `SAPISID` are present. Removing the only secondary binding plus any AP*SID disables both paths and Google redirects to login.
+
+In practice: extract the full cookie set via `notebooklm login` and don't try to subset it. Partial extractions (a known failure mode of browser-cookies tooling under Chrome 127+ App-Bound Encryption) are the leading suspect for "auth expires immediately" reports — see [#371](https://github.com/teng-lin/notebooklm-py/issues/371).
 
 **Override location:**
 ```bash
