@@ -1173,9 +1173,7 @@ class TestAuthCheckCommand:
         assert output["checks"]["sid_cookie"] is True
         assert "SID" in output["details"]["cookies_found"]
 
-    def test_auth_check_missing_1psidts_surfaces_tier1_error(
-        self, runner, mock_storage_path
-    ):
+    def test_auth_check_missing_1psidts_surfaces_tier1_error(self, runner, mock_storage_path):
         """SID present but ``__Secure-1PSIDTS`` absent must surface the Tier 1 error.
 
         Pinned by the #371 two-tier pre-flight: ``MINIMUM_REQUIRED_COOKIES``
