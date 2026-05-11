@@ -972,10 +972,12 @@ class SourcesAPI:
         )
 
         # Pass the cookie jar (not a flat Cookie header) so httpx scopes cookies
-        # by domain. The /upload/_/ endpoint is served by Scotty, which rejects
-        # requests carrying cookies issued for sibling Google hosts (e.g.
-        # accounts.google.com, myaccount.google.com) with HTTP 500 and
-        # x-goog-upload-status: final. See issue #373.
+        # by Domain attribute, matching browser behavior. The /upload/_/ endpoint
+        # is served by Scotty, which validates host-sensitive cookies (notably
+        # OSID) against the request host: an OSID issued for myaccount.google.com
+        # leaked to notebooklm.google.com is rejected with HTTP 500 and
+        # x-goog-upload-status: final. A real browser would never send the
+        # foreign-host OSID; Domain-scoping the jar enforces the same. See #373.
         async with httpx.AsyncClient(timeout=60.0, cookies=self._core.auth.cookie_jar) as client:
             response = await client.post(url, headers=headers, content=body)
             response.raise_for_status()
@@ -1015,7 +1017,8 @@ class SourcesAPI:
                     yield chunk
 
         # See _start_resumable_upload: pass the cookie jar so httpx scopes
-        # cookies per Domain attribute. Scotty rejects cross-host cookies.
+        # cookies per Domain attribute. Scotty validates OSID against host
+        # and rejects foreign-host cookies. (#373)
         async with httpx.AsyncClient(timeout=300.0, cookies=self._core.auth.cookie_jar) as client:
             response = await client.post(upload_url, headers=headers, content=file_stream())
             response.raise_for_status()
