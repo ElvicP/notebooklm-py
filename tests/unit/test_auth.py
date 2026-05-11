@@ -1574,8 +1574,9 @@ class TestLoaderFlatCookieParity:
         storage_file = tmp_path / "storage_state.json"
         storage_state = {
             "cookies": [
-                # Minimum required cookies on .google.com so both loaders accept.
+                # Tier 1 required cookies on .google.com so both loaders accept.
                 {"name": "SID", "value": "sid", "domain": ".google.com"},
+                {"name": "__Secure-1PSIDTS", "value": "psidts", "domain": ".google.com"},
                 {"name": "HSID", "value": "hsid", "domain": ".google.com"},
                 {"name": "SSID", "value": "ssid", "domain": ".google.com"},
                 # OSID only exists on non-base hosts; myaccount comes first so a
@@ -1618,8 +1619,12 @@ class TestLoaderFlatCookieParity:
                     "domain": ".google.com.sg",
                 },
                 {"name": "SID", "value": "from-base", "domain": ".google.com"},
+                {"name": "__Secure-1PSIDTS", "value": "psidts", "domain": ".google.com"},
                 {"name": "HSID", "value": "hsid", "domain": ".google.com"},
                 {"name": "SSID", "value": "ssid", "domain": ".google.com"},
+                # Tier 2 binding — silences the secondary-binding warning that
+                # would otherwise log on every load (issue #372).
+                {"name": "OSID", "value": "osid", "domain": "notebooklm.google.com"},
             ]
         }
         storage_file.write_text(json.dumps(storage_state))
