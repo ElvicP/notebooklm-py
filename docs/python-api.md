@@ -1,7 +1,7 @@
 # Python API Reference
 
 **Status:** Active
-**Last Updated:** 2026-03-12
+**Last Updated:** 2026-05-11
 
 Complete reference for the `notebooklm` Python library.
 
