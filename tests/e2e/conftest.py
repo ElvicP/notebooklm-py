@@ -22,11 +22,17 @@ from notebooklm.auth import AuthTokens, load_auth_from_storage
 from notebooklm.exceptions import ChatError
 from notebooklm.paths import get_profile_dir
 
-# Substrings in ChatError messages that mark a server-side rate-limit / quota
-# rejection rather than a client bug. Google throttles chat on the CI account
-# in ways that 60s reruns don't clear; surface those as skips so nightly
-# doesn't go red for account-side rejections.
-_RATE_LIMIT_PHRASES = ("rate limit", "rate limited", "rejected by the api")
+# Substrings in ChatError / skip messages that mark a server-side rate-limit
+# or quota rejection rather than a client bug. Covers both the explicit
+# UserDisplayableError message and the HTTP-status-wrapped 429 path in
+# _chat.py:156, plus the generation skip phrase in assert_generation_started.
+_RATE_LIMIT_PHRASES = (
+    "rate limit",
+    "rate limited",
+    "rejected by the api",
+    "429",
+    "too many requests",
+)
 
 
 def _install_chat_rate_limit_skip(client: NotebookLMClient) -> None:
@@ -231,7 +237,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     if not nodeids:
         return
 
-    terminalreporter.write_sep("=", f"chat rate-limit skips ({len(nodeids)})", yellow=True)
+    terminalreporter.write_sep("=", f"rate-limit skips ({len(nodeids)})", yellow=True)
     for nodeid in nodeids:
         terminalreporter.write_line(f"  {nodeid}")
 
@@ -239,7 +245,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     if summary_path:
         try:
             with open(summary_path, "a", encoding="utf-8") as f:
-                f.write(f"\n### Chat rate-limit skips: {len(nodeids)}\n\n")
+                f.write(f"\n### Rate-limit skips: {len(nodeids)}\n\n")
                 for nodeid in nodeids:
                     f.write(f"- `{nodeid}`\n")
         except OSError:
@@ -247,7 +253,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
 
     if os.environ.get("GITHUB_ACTIONS"):
         joined = ", ".join(nodeids)
-        print(f"::warning::{len(nodeids)} chat test(s) skipped due to rate-limit: {joined}")
+        print(f"::warning::{len(nodeids)} test(s) skipped due to rate-limit: {joined}")
 
 
 def pytest_collection_modifyitems(config, items):

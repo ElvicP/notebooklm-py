@@ -129,15 +129,17 @@ class TestRateLimitSkipSummary:
                 self._skipped("t::a", "Chat request was rate limited"),
                 self._skipped("t::b", "no auth configured"),
                 self._skipped("t::c", "rejected by the API"),
+                self._skipped("t::d", "Chat request failed with HTTP 429: ..."),
+                self._skipped("t::e", "Too Many Requests"),
             ]
         )
         conftest.pytest_terminal_summary(tr, 0, None)
 
         summary = (tmp_path / "summary.md").read_text()
-        assert "Chat rate-limit skips: 2" in summary
-        assert "t::a" in summary and "t::c" in summary
+        assert "Rate-limit skips: 4" in summary
+        assert all(nid in summary for nid in ("t::a", "t::c", "t::d", "t::e"))
         assert "t::b" not in summary
-        assert "::warning::2 chat test(s)" in capsys.readouterr().out
+        assert "::warning::4 test(s) skipped" in capsys.readouterr().out
 
     def test_no_skips_emits_nothing(self, monkeypatch, tmp_path, capsys):
         monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary.md"))
