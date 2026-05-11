@@ -620,17 +620,20 @@ def extract_cookies_from_storage(storage_state: dict[str, Any]) -> dict[str, str
         if "SID" in cookie_domains:
             logger.debug("SID cookie from domain: %s", cookie_domains["SID"])
 
-    # Provide diagnostic context with the error to help users understand what
-    # the extraction actually produced when validation fails.
-    all_domains = {c.get("domain", "") for c in storage_state.get("cookies", [])}
-    google_domains = sorted(d for d in all_domains if "google" in d.lower())
-    found_names = list(cookies.keys())[:5]
-    extras = []
-    if found_names:
-        extras.append(f"Found cookies: {found_names}{'...' if len(cookies) > 5 else ''}")
-    if google_domains:
-        extras.append(f"Google domains in storage: {google_domains}")
-    _validate_required_cookies(set(cookies.keys()), extra_diagnostics=extras)
+    # Build diagnostic extras only on the failure path. The successful path is
+    # by far the common case; iterating the cookie list to compute found-names
+    # and Google domains every call would be wasted work.
+    cookie_names = set(cookies.keys())
+    extras: list[str] = []
+    if not MINIMUM_REQUIRED_COOKIES.issubset(cookie_names):
+        all_domains = {c.get("domain", "") for c in storage_state.get("cookies", [])}
+        google_domains = sorted(d for d in all_domains if "google" in d.lower())
+        found_names = list(cookies.keys())[:5]
+        if found_names:
+            extras.append(f"Found cookies: {found_names}{'...' if len(cookies) > 5 else ''}")
+        if google_domains:
+            extras.append(f"Google domains in storage: {google_domains}")
+    _validate_required_cookies(cookie_names, extra_diagnostics=extras)
 
     return cookies
 
