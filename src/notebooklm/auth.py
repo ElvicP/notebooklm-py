@@ -77,7 +77,7 @@ _EXTRACTION_HINT = (
     "Run 'notebooklm login' to re-authenticate."
 )
 
-# Tier 2 fires per cookie-load; a single CLI run can hit it 2–3 times across
+# Tier 2 fires per cookie-load; a single CLI run can hit it 2-3 times across
 # the four loader entry points. One warning per process is enough signal.
 _SECONDARY_BINDING_WARNED = False
 

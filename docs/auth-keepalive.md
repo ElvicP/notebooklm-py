@@ -674,9 +674,11 @@ Before assuming Google has changed anything:
 ### 3.5 Empirical cookie requirements (single- and pair-wise ablation)
 
 Tracked separately from §3.4: which cookies does Google *actually* require?
-The library's `MINIMUM_REQUIRED_COOKIES = {"SID"}` check at `auth.py:63` is the
-client-side pre-flight, but it's far more permissive than what Google enforces
-on the wire. This section documents the empirical accept-rule.
+This section documents the empirical accept-rule that backs the library's
+two-tier `_validate_required_cookies()` pre-flight (see `auth.py` —
+`MINIMUM_REQUIRED_COOKIES` and `_has_valid_secondary_binding()` for the
+authoritative values; the historical permissive `{"SID"}` check was
+replaced in [#371](https://github.com/teng-lin/notebooklm-py/issues/371)).
 
 **Methodology.** Take a known-good `storage_state.json`, drop one or two
 cookies at a time, run `notebooklm --storage <variant> list`, record whether
@@ -733,27 +735,29 @@ Confirmation test (pair 28/105): dropping `APISID + SAPISID` together while
 
 The model fits all 105 + 16 = 121 data points without exception.
 
-**Why this matters for `MINIMUM_REQUIRED_COOKIES`.** The library currently
-trusts any storage with `SID` present, which permits Google-rejected cookie
-sets to reach the wire. The result is the user-facing "auth expires
-immediately after `notebooklm login`" pattern that's been reported in
+**Why this matters for `MINIMUM_REQUIRED_COOKIES`.** Before #371 the library
+trusted any storage with `SID` present, which permitted Google-rejected cookie
+sets to reach the wire. The result was the user-facing "auth expires
+immediately after `notebooklm login`" pattern reported in
 [#133](https://github.com/teng-lin/notebooklm-py/issues/133),
 [#332](https://github.com/teng-lin/notebooklm-py/issues/332), and others.
 
-A tighter pre-flight that catches all 16 ablation failures:
+The pre-flight now catches all 16 ablation failures via a two-tier check in
+`_validate_required_cookies()`:
 
 ```python
-MINIMUM_REQUIRED_COOKIES = {"SID", "__Secure-1PSIDTS"}
+MINIMUM_REQUIRED_COOKIES = {"SID", "__Secure-1PSIDTS"}  # Tier 1: raise
 
-def has_valid_secondary_binding(cookie_names: set[str]) -> bool:
+def _has_valid_secondary_binding(cookie_names: set[str]) -> bool:  # Tier 2: warn
     if "OSID" in cookie_names:
         return True
-    if {"APISID", "SAPISID"} <= cookie_names:
-        return True
-    return False
+    return {"APISID", "SAPISID"} <= cookie_names
 ```
 
-Tracked in [#371](https://github.com/teng-lin/notebooklm-py/issues/371).
+Hybrid rollout: Tier 1 raises (unambiguous evidence); Tier 2 logs a warning
+once per process so partial extractions surface without breaking edge-case
+flows (e.g. Workspace SSO) that we haven't ablated. See
+[#371](https://github.com/teng-lin/notebooklm-py/issues/371).
 
 **Caveats.**
 

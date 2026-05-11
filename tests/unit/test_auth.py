@@ -62,6 +62,7 @@ class TestAuthTokens:
         )
         header = tokens.cookie_header
         assert "SID=abc" in header
+        assert "__Secure-1PSIDTS=test_1psidts" in header
         assert "HSID=def" in header
 
     def test_cookie_header_format(self):
