@@ -208,6 +208,48 @@ def pytest_unconfigure(config):
         os.environ.pop("NOTEBOOKLM_PROFILE", None)
 
 
+def _skip_reason(report) -> str:
+    longrepr = report.longrepr
+    if isinstance(longrepr, tuple) and len(longrepr) >= 3:
+        return str(longrepr[2])
+    return str(longrepr) if longrepr else ""
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """Surface chat rate-limit skips so they're visible despite green CI.
+
+    Without this, the L1 skip-fixture (_install_chat_rate_limit_skip) makes
+    Google-side throttling invisible — the job stays green but coverage
+    silently degrades. Emit a pytest summary section plus, on GitHub Actions,
+    a warning annotation and step-summary entry.
+    """
+    nodeids = [
+        report.nodeid
+        for report in terminalreporter.stats.get("skipped", [])
+        if any(phrase in _skip_reason(report).lower() for phrase in _RATE_LIMIT_PHRASES)
+    ]
+    if not nodeids:
+        return
+
+    terminalreporter.write_sep("=", f"chat rate-limit skips ({len(nodeids)})", yellow=True)
+    for nodeid in nodeids:
+        terminalreporter.write_line(f"  {nodeid}")
+
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        try:
+            with open(summary_path, "a", encoding="utf-8") as f:
+                f.write(f"\n### Chat rate-limit skips: {len(nodeids)}\n\n")
+                for nodeid in nodeids:
+                    f.write(f"- `{nodeid}`\n")
+        except OSError:
+            pass
+
+    if os.environ.get("GITHUB_ACTIONS"):
+        joined = ", ".join(nodeids)
+        print(f"::warning::{len(nodeids)} chat test(s) skipped due to rate-limit: {joined}")
+
+
 def pytest_collection_modifyitems(config, items):
     """Skip variant tests by default unless --include-variants is passed."""
     if config.getoption("--include-variants"):
