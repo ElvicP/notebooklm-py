@@ -19,7 +19,39 @@ except ImportError:
 
 from notebooklm import NotebookLMClient
 from notebooklm.auth import AuthTokens, load_auth_from_storage
+from notebooklm.exceptions import ChatError
 from notebooklm.paths import get_profile_dir
+
+# Markers in ChatError messages that indicate a server-side rate-limit /
+# quota rejection (not a client bug). See _install_chat_rate_limit_skip.
+_RATE_LIMIT_PHRASES = ("rate limit", "rate limited", "rejected by the api")
+
+
+def _install_chat_rate_limit_skip(client: NotebookLMClient) -> None:
+    """Wrap ``client.chat.ask`` to translate rate-limit ChatErrors into skips.
+
+    Why: Google occasionally throttles chat on the CI account in ways that
+    longer reruns don't clear (window > 60s, sometimes > 10min). Those are
+    not regressions in this code — they're account-side rejections — so we
+    surface them as ``pytest.skip`` instead of failures.
+
+    Only the exact rate-limit / "rejected by the API" message family is
+    suppressed; other ``ChatError`` causes (HTTP errors, auth failures,
+    parse errors) still raise normally so real defects stay visible.
+    """
+    original_ask = client.chat.ask
+
+    async def _ask_with_skip(*args, **kwargs):
+        try:
+            return await original_ask(*args, **kwargs)
+        except ChatError as e:
+            msg = str(e).lower()
+            if any(phrase in msg for phrase in _RATE_LIMIT_PHRASES):
+                pytest.skip(str(e))
+            raise
+
+    client.chat.ask = _ask_with_skip
+
 
 # =============================================================================
 # --profile flag plumbing
@@ -238,6 +270,7 @@ def auth_tokens() -> AuthTokens:
 @pytest.fixture
 async def client(auth_tokens) -> AsyncGenerator[NotebookLMClient, None]:
     async with NotebookLMClient(auth_tokens, storage_path=auth_tokens.storage_path) as c:
+        _install_chat_rate_limit_skip(c)
         yield c
 
 

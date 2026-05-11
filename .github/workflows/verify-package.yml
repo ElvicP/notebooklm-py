@@ -105,7 +105,12 @@ jobs:
         echo "E2E tests were not run because this workflow is executing on a fork." >> $GITHUB_STEP_SUMMARY
 
     - name: Run E2E tests
+      id: e2e
       if: github.repository == 'teng-lin/notebooklm-py'
+      # Don't fail the job here — the cool-down retry step below gets a shot
+      # at any failures. If both this step and the retry fail, the retry's
+      # exit code is what marks the job red.
+      continue-on-error: true
       shell: bash
       env:
         NOTEBOOKLM_AUTH_JSON: ${{ secrets.NOTEBOOKLM_AUTH_JSON }}
@@ -120,4 +125,27 @@ jobs:
           echo "::error::NOTEBOOKLM_READ_ONLY_NOTEBOOK_ID secret is not configured"
           exit 1
         fi
-        pytest tests/e2e -m "not variants" --reruns 2 -v
+        # --reruns 1 catches sub-minute network blips; longer chat-throttle
+        # recovery is handled by the cool-down retry step below.
+        pytest tests/e2e -m "not variants" --reruns 1 -v
+
+    - name: Retry failed E2E tests after 10-min cool-down
+      # Re-runs only the tests that failed above. The skip-on-chat-rate-limit
+      # fixture (tests/e2e/conftest.py) is still active, so anything still
+      # throttled after the cool-down becomes a skip rather than red CI.
+      if: steps.e2e.outcome == 'failure'
+      shell: bash
+      env:
+        NOTEBOOKLM_AUTH_JSON: ${{ secrets.NOTEBOOKLM_AUTH_JSON }}
+        NOTEBOOKLM_READ_ONLY_NOTEBOOK_ID: ${{ secrets.NOTEBOOKLM_READ_ONLY_NOTEBOOK_ID }}
+      run: |
+        source verify-venv/bin/activate
+        # Guard against re-running the full suite if pytest crashed before
+        # writing the lastfailed cache.
+        if [ ! -f .pytest_cache/v/cache/lastfailed ]; then
+          echo "No lastfailed cache from previous step; skipping cool-down retry."
+          exit 0
+        fi
+        echo "Initial E2E run failed. Sleeping 600s before retrying failed tests."
+        sleep 600
+        pytest --last-failed -v
