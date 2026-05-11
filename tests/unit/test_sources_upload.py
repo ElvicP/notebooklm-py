@@ -13,9 +13,13 @@ def mock_core():
     core = MagicMock()
     core.rpc_call = AsyncMock()
     core.auth = MagicMock()
-    # Upload paths pass auth.cookie_jar to httpx so cookies are scoped by
-    # Domain attribute. A sentinel suffices for unit-test assertions.
-    core.auth.cookie_jar = MagicMock(name="cookie_jar")
+    # Upload paths pass the live http client's cookie jar to httpx so cookies
+    # are scoped by Domain attribute (#373). The mock makes auth.cookie_jar and
+    # get_http_client().cookies the same sentinel so existing assertions still
+    # work against either reference.
+    cookie_jar = MagicMock(name="cookie_jar")
+    core.auth.cookie_jar = cookie_jar
+    core.get_http_client.return_value.cookies = cookie_jar
     return core
 
 
