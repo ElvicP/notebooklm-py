@@ -108,9 +108,8 @@ jobs:
 
     - name: Run E2E tests
       id: e2e
-      # Don't fail the job here — the cool-down retry step below gets a shot
-      # at any failures. If both this step and the retry fail, the retry's
-      # exit code is what marks the job red.
+      # Don't fail the job here — the retry step below gets a 10-min cool-down
+      # shot at any failures, and its exit code is what marks the job red.
       continue-on-error: true
       env:
         NOTEBOOKLM_AUTH_JSON: ${{ secrets.NOTEBOOKLM_AUTH_JSON }}
@@ -134,10 +133,8 @@ jobs:
         fi
 
     - name: Retry failed E2E tests after 10-min cool-down
-      # Re-runs only the tests that failed in the previous step. The
-      # skip-on-chat-rate-limit fixture (tests/e2e/conftest.py) is still active,
-      # so any test that's *still* throttled after the cool-down becomes a skip
-      # rather than a red CI — Google-side rejections shouldn't fail nightly.
+      # Tests still throttled after the cool-down become skips via the
+      # _install_chat_rate_limit_skip fixture in tests/e2e/conftest.py.
       if: steps.e2e.outcome == 'failure'
       env:
         NOTEBOOKLM_AUTH_JSON: ${{ secrets.NOTEBOOKLM_AUTH_JSON }}
@@ -145,11 +142,13 @@ jobs:
         NOTEBOOKLM_GENERATION_NOTEBOOK_ID: ${{ secrets.NOTEBOOKLM_GENERATION_NOTEBOOK_ID }}
       shell: bash
       run: |
-        # Guard against re-running the full suite if pytest crashed before
-        # writing the lastfailed cache (would otherwise burn ~30 min).
+        # Missing lastfailed after a failed e2e step means pytest crashed
+        # before writing the cache (import error, OOM, etc.) — that's a real
+        # failure, not a recoverable rate-limit, so fail the job rather than
+        # silently going green.
         if [ ! -f .pytest_cache/v/cache/lastfailed ]; then
-          echo "No lastfailed cache from previous step; skipping cool-down retry."
-          exit 0
+          echo "::error::No lastfailed cache from previous step; pytest likely crashed before running tests."
+          exit 1
         fi
         echo "Initial E2E run failed. Sleeping 600s before retrying failed tests."
         sleep 600

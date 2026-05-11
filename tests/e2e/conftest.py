@@ -22,22 +22,18 @@ from notebooklm.auth import AuthTokens, load_auth_from_storage
 from notebooklm.exceptions import ChatError
 from notebooklm.paths import get_profile_dir
 
-# Markers in ChatError messages that indicate a server-side rate-limit /
-# quota rejection (not a client bug). See _install_chat_rate_limit_skip.
+# Substrings in ChatError messages that mark a server-side rate-limit / quota
+# rejection rather than a client bug. Google throttles chat on the CI account
+# in ways that 60s reruns don't clear; surface those as skips so nightly
+# doesn't go red for account-side rejections.
 _RATE_LIMIT_PHRASES = ("rate limit", "rate limited", "rejected by the api")
 
 
 def _install_chat_rate_limit_skip(client: NotebookLMClient) -> None:
-    """Wrap ``client.chat.ask`` to translate rate-limit ChatErrors into skips.
+    """Wrap ``client.chat.ask`` so rate-limit ``ChatError``s become skips.
 
-    Why: Google occasionally throttles chat on the CI account in ways that
-    longer reruns don't clear (window > 60s, sometimes > 10min). Those are
-    not regressions in this code — they're account-side rejections — so we
-    surface them as ``pytest.skip`` instead of failures.
-
-    Only the exact rate-limit / "rejected by the API" message family is
-    suppressed; other ``ChatError`` causes (HTTP errors, auth failures,
-    parse errors) still raise normally so real defects stay visible.
+    Non-rate-limit ``ChatError``s (HTTP, auth, parse) still raise so real
+    defects stay visible.
     """
     original_ask = client.chat.ask
 
@@ -45,8 +41,7 @@ def _install_chat_rate_limit_skip(client: NotebookLMClient) -> None:
         try:
             return await original_ask(*args, **kwargs)
         except ChatError as e:
-            msg = str(e).lower()
-            if any(phrase in msg for phrase in _RATE_LIMIT_PHRASES):
+            if any(phrase in str(e).lower() for phrase in _RATE_LIMIT_PHRASES):
                 pytest.skip(str(e))
             raise
 
