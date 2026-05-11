@@ -397,10 +397,11 @@ def flatten_cookie_map(cookies: CookieInput | None) -> FlatCookieMap:
     Duplicate-name resolution mirrors :func:`extract_cookies_from_storage`:
     domains are ranked by :func:`_auth_domain_priority` (``.google.com`` >
     ``.notebooklm.google.com`` > ``notebooklm.google.com`` > regional > other).
-    Without this, names like ``OSID`` / ``OTZ`` — which only live on non-base
-    hosts (``myaccount.google.com`` and ``notebooklm.google.com``) — would
-    resolve by dict-iteration order, diverging from the CLI's storage loader.
-    See issue #375.
+    Named tiers are strictly distinct, so the cross-tier case from #375 (e.g.
+    ``OSID`` on ``myaccount.google.com`` (tier 0) vs ``notebooklm.google.com``
+    (tier 2)) resolves the same way regardless of input order. Within a single
+    tier, first occurrence in iteration order wins — matching
+    :func:`extract_cookies_from_storage`'s within-tier semantics.
     """
     flat: FlatCookieMap = {}
     priorities: dict[str, int] = {}
