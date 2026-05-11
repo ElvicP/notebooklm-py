@@ -526,7 +526,7 @@ notebooklm --profile work auth refresh --quiet
 - `NOTEBOOKLM_REFRESH_CMD` for in-process auth-expiry recovery (covers the case where `auth refresh` itself fails because cookies have already expired beyond rotation)
 - `keepalive=<seconds>` on `NotebookLMClient` for in-process long-lived workers (no OS scheduler needed)
 
-See `docs/troubleshooting.md` for full per-OS scheduler recipes (launchd plist, systemd user timer, cron, Task Scheduler, k8s CronJob).
+See [Troubleshooting](troubleshooting.md) for full per-OS scheduler recipes (launchd plist, systemd user timer, cron, Task Scheduler, k8s CronJob).
 
 ### Source: `add-research`
 

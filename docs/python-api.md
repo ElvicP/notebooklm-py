@@ -386,7 +386,7 @@ print(f"Keywords: {guide['keywords']}")
 | `download_audio(notebook_id, output_path, artifact_id=None)` | `str, str, str` | `str` | Download audio to file (MP4/MP3) |
 | `download_video(notebook_id, output_path, artifact_id=None)` | `str, str, str` | `str` | Download video to file (MP4) |
 | `download_infographic(notebook_id, output_path, artifact_id=None)` | `str, str, str` | `str` | Download infographic to file (PNG) |
-| `download_slide_deck(notebook_id, output_path, artifact_id=None)` | `str, str, str` | `str` | Download slide deck as PDF |
+| `download_slide_deck(notebook_id, output_path, artifact_id=None, output_format="pdf")` | `str, str, str, str` | `str` | Download slide deck as PDF or PPTX (`output_format`: `"pdf"` or `"pptx"`) |
 | `download_report(notebook_id, output_path, artifact_id=None)` | `str, str, str` | `str` | Download report as Markdown (.md) |
 | `download_mind_map(notebook_id, output_path, artifact_id=None)` | `str, str, str` | `str` | Download mind map as JSON (.json) |
 | `download_data_table(notebook_id, output_path, artifact_id=None)` | `str, str, str` | `str` | Download data table as CSV (.csv) |
@@ -836,7 +836,7 @@ class Source:
     title: Optional[str]
     url: Optional[str]
     created_at: Optional[datetime]
-    status: int                          # 1=processing, 2=ready, 3=error (defaults to READY)
+    status: int                          # 1=processing, 2=ready, 3=error, 5=preparing (defaults to READY)
 
     @property
     def kind(self) -> SourceType:
@@ -941,6 +941,18 @@ class GenerationStatus:
     @property
     def is_complete(self) -> bool:
         """Check if generation is complete."""
+
+    @property
+    def is_failed(self) -> bool:
+        """Check if generation failed."""
+
+    @property
+    def is_pending(self) -> bool:
+        """Check if generation is pending."""
+
+    @property
+    def is_rate_limited(self) -> bool:
+        """Check if generation failed due to rate limiting."""
 ```
 
 **`url` semantics:** `poll_status` populates `url` for media artifact types (audio, video, infographic, slide-deck PDF) as soon as the server reports the asset as ready. Slide decks expose the PDF URL here; for the editable PowerPoint, use `client.artifacts.download_slide_deck(..., output_format="pptx")` instead.
