@@ -955,7 +955,6 @@ class SourcesAPI:
         headers = {
             "Accept": "*/*",
             "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-            "Cookie": self._core.auth.cookie_header,
             "Origin": "https://notebooklm.google.com",
             "Referer": "https://notebooklm.google.com/",
             "x-goog-authuser": "0",
@@ -972,7 +971,12 @@ class SourcesAPI:
             }
         )
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        # Pass the cookie jar (not a flat Cookie header) so httpx scopes cookies
+        # by domain. The /upload/_/ endpoint is served by Scotty, which rejects
+        # requests carrying cookies issued for sibling Google hosts (e.g.
+        # accounts.google.com, myaccount.google.com) with HTTP 500 and
+        # x-goog-upload-status: final. See issue #373.
+        async with httpx.AsyncClient(timeout=60.0, cookies=self._core.auth.cookie_jar) as client:
             response = await client.post(url, headers=headers, content=body)
             response.raise_for_status()
 
@@ -997,7 +1001,6 @@ class SourcesAPI:
         headers = {
             "Accept": "*/*",
             "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
-            "Cookie": self._core.auth.cookie_header,
             "Origin": "https://notebooklm.google.com",
             "Referer": "https://notebooklm.google.com/",
             "x-goog-authuser": "0",
@@ -1011,6 +1014,8 @@ class SourcesAPI:
                 while chunk := f.read(65536):  # 64KB chunks
                     yield chunk
 
-        async with httpx.AsyncClient(timeout=300.0) as client:
+        # See _start_resumable_upload: pass the cookie jar so httpx scopes
+        # cookies per Domain attribute. Scotty rejects cross-host cookies.
+        async with httpx.AsyncClient(timeout=300.0, cookies=self._core.auth.cookie_jar) as client:
             response = await client.post(upload_url, headers=headers, content=file_stream())
             response.raise_for_status()

@@ -13,7 +13,9 @@ def mock_core():
     core = MagicMock()
     core.rpc_call = AsyncMock()
     core.auth = MagicMock()
-    core.auth.cookie_header = "SID=test_sid; HSID=test_hsid"
+    # Upload paths pass auth.cookie_jar to httpx so cookies are scoped by
+    # Domain attribute. A sentinel suffices for unit-test assertions.
+    core.auth.cookie_jar = MagicMock(name="cookie_jar")
     return core
 
 
@@ -202,7 +204,10 @@ class TestStartResumableUpload:
             assert headers["x-goog-upload-command"] == "start"
             assert headers["x-goog-upload-header-content-length"] == "2048"
             assert headers["x-goog-upload-protocol"] == "resumable"
-            assert "Cookie" in headers
+            # Cookie header is no longer set manually; httpx scopes cookies
+            # by Domain attribute via the cookie_jar kwarg (#373).
+            assert "Cookie" not in headers
+            assert mock_client_cls.call_args.kwargs["cookies"] is mock_core.auth.cookie_jar
 
     @pytest.mark.asyncio
     async def test_start_resumable_upload_includes_json_body(self, sources_api, mock_core):
@@ -320,7 +325,10 @@ class TestUploadFileStreaming:
 
             assert headers["x-goog-upload-command"] == "upload, finalize"
             assert headers["x-goog-upload-offset"] == "0"
-            assert "Cookie" in headers
+            # Cookie header is no longer set manually; httpx scopes cookies
+            # by Domain attribute via the cookie_jar kwarg (#373).
+            assert "Cookie" not in headers
+            assert mock_client_cls.call_args.kwargs["cookies"] is mock_core.auth.cookie_jar
 
     @pytest.mark.asyncio
     async def test_upload_file_streaming_uses_generator(self, sources_api, mock_core, tmp_path):
