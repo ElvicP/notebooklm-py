@@ -1135,6 +1135,30 @@ class TestResolveLanguageDirect:
             generate_module.resolve_language(None)
         assert "xx_INVALID" in str(exc_info.value)
 
+    def test_resolve_language_rejects_invalid_config_value(self):
+        """An unsupported language stored in the config file gets validated."""
+        import importlib
+
+        import click
+
+        generate_module = importlib.import_module("notebooklm.cli.generate")
+        with (
+            patch.object(generate_module, "get_language", return_value="xx_INVALID"),
+            pytest.raises(click.BadParameter) as exc_info,
+        ):
+            generate_module.resolve_language(None)
+        assert "xx_INVALID" in str(exc_info.value)
+        assert "notebooklm language list" in str(exc_info.value)
+
+    def test_resolve_language_accepts_valid_config_value(self):
+        """A supported language stored in the config file is returned as-is."""
+        import importlib
+
+        generate_module = importlib.import_module("notebooklm.cli.generate")
+        with patch.object(generate_module, "get_language", return_value="ja"):
+            result = generate_module.resolve_language(None)
+        assert result == "ja"
+
 
 # =============================================================================
 # _OUTPUT_GENERATION_STATUS DIRECT TESTS

@@ -161,6 +161,12 @@ def resolve_language(language: str | None) -> str:
         return env_lang
     config_lang = get_language()
     if config_lang is not None:
+        if config_lang not in SUPPORTED_LANGUAGES:
+            raise click.BadParameter(
+                f"Unknown language code in config: {config_lang}\n"
+                "Run 'notebooklm language list' to see supported codes.",
+                param_hint="config",
+            )
         return config_lang
     return DEFAULT_LANGUAGE
 
