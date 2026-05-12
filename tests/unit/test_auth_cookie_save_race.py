@@ -28,8 +28,10 @@ import pytest
 
 from notebooklm.auth import (
     AuthTokens,
+    CookieSaveResult,
     CookieSnapshotKey,
     CookieSnapshotValue,
+    build_httpx_cookies_from_storage,
     save_cookies_to_storage,
     snapshot_cookie_jar,
 )
@@ -56,8 +58,8 @@ def _write_storage(storage_path: Path, cookies: list[dict]) -> None:
 def _stored_cookie(name: str, value: str, **overrides) -> dict:
     """Build a Playwright storage_state cookie dict with sensible defaults.
 
-    Defaults match the most common shape used by these tests (a Secure,
-    HttpOnly, root-path cookie on ``.google.com``). Pass any field as a
+    Defaults match the manual ``httpx.Cookies().set(...)`` jars used by these
+    tests (a non-Secure, HttpOnly, root-path cookie on ``.google.com``). Pass any field as a
     keyword override (e.g. ``domain="accounts.google.com"``, ``path="/u/0/"``,
     ``http_only=False``, ``expires=1_000_000``).
     """
@@ -68,7 +70,7 @@ def _stored_cookie(name: str, value: str, **overrides) -> dict:
         "path": overrides.get("path", "/"),
         "expires": overrides.get("expires", -1),
         "httpOnly": overrides.get("http_only", True),
-        "secure": overrides.get("secure", True),
+        "secure": overrides.get("secure", False),
         "sameSite": overrides.get("same_site", "None"),
     }
 
@@ -213,9 +215,9 @@ class TestCookieDeletionPropagation:
         _write_storage(
             storage,
             [
-                _stored_cookie("A", "a", http_only=False),
-                _stored_cookie("B", "b", http_only=False),
-                _stored_cookie("C", "c", http_only=False),
+                _stored_cookie("A", "a"),
+                _stored_cookie("B", "b"),
+                _stored_cookie("C", "c"),
             ],
         )
 
@@ -245,6 +247,25 @@ class TestPathAwareKeyRegression:
     """§3.4.2: two storage entries with the same ``(name, domain)`` but
     different paths are distinct cookies. A snapshot/save round trip
     must not collapse them."""
+
+    def test_storage_loader_preserves_same_name_domain_path_variants(self, tmp_path):
+        """The path-aware save path only works if load keeps all path variants."""
+        storage = tmp_path / "storage_state.json"
+        _write_storage(
+            storage,
+            [
+                _stored_cookie("SID", "sid"),
+                _stored_cookie("__Secure-1PSIDTS", "psidts"),
+                _stored_cookie("OSID", "root", domain="accounts.google.com"),
+                _stored_cookie("OSID", "scoped", domain="accounts.google.com", path="/u/0/"),
+            ],
+        )
+
+        jar = build_httpx_cookies_from_storage(storage)
+        snapshot = snapshot_cookie_jar(jar)
+
+        assert snapshot[CookieSnapshotKey("OSID", "accounts.google.com", "/")].value == "root"
+        assert snapshot[CookieSnapshotKey("OSID", "accounts.google.com", "/u/0/")].value == "scoped"
 
     def test_two_paths_survive_round_trip(self, tmp_path):
         storage = tmp_path / "storage_state.json"
@@ -439,6 +460,9 @@ class TestAttributeOnlyRefresh:
         # redirect without rotating the value.
         jar = httpx.Cookies()
         jar.set("SID", "abc", domain=".google.com", path="/")
+        for cookie in jar.jar:
+            if cookie.name == "SID":
+                cookie.expires = 1_000_000
         snapshot_pre = snapshot_cookie_jar(jar)
 
         # Simulate the in-memory expiry refresh by reconstructing the jar
@@ -455,6 +479,33 @@ class TestAttributeOnlyRefresh:
             "disk — the legacy path persisted this and the snapshot path "
             "regressed it"
         )
+
+    def test_attribute_only_sibling_refresh_is_cas_protected(self, tmp_path):
+        """A same-value sibling expiry refresh must not be overwritten."""
+        storage = tmp_path / "storage_state.json"
+        _write_storage(storage, [_stored_cookie("SID", "abc", expires=1_000_000)])
+
+        jar = httpx.Cookies()
+        jar.set("SID", "abc", domain=".google.com", path="/")
+        for cookie in jar.jar:
+            if cookie.name == "SID":
+                cookie.expires = 1_000_000
+        snapshot = snapshot_cookie_jar(jar)
+
+        # Sibling process extends the same value further than our local jar.
+        cookies = _read_cookies(storage)
+        cookies[0]["expires"] = 3_000_000
+        _write_storage(storage, cookies)
+
+        for cookie in jar.jar:
+            if cookie.name == "SID":
+                cookie.expires = 2_000_000
+
+        result = save_cookies_to_storage(jar, storage, original_snapshot=snapshot)
+
+        on_disk = next(c for c in _read_cookies(storage) if c["name"] == "SID")
+        assert result is False
+        assert on_disk["expires"] == 3_000_000
 
 
 class TestSnapshotRefreshedAfterSave:
@@ -556,6 +607,31 @@ class TestDeletionCASGuard:
             "the disk value has rotated since our snapshot (CAS guard)"
         )
 
+    def test_deletion_skipped_when_disk_attributes_differ(self, tmp_path):
+        """Same-value sibling attribute refresh must also block deletion."""
+        storage = tmp_path / "storage_state.json"
+        _write_storage(storage, [_stored_cookie("__Secure-1PSIDTS", "OLD", expires=1_000_000)])
+
+        jar = httpx.Cookies()
+        jar.set("__Secure-1PSIDTS", "OLD", domain=".google.com", path="/")
+        for cookie in jar.jar:
+            if cookie.name == "__Secure-1PSIDTS":
+                cookie.expires = 1_000_000
+        snapshot = snapshot_cookie_jar(jar)
+
+        cookies = _read_cookies(storage)
+        cookies[0]["expires"] = 2_000_000
+        _write_storage(storage, cookies)
+
+        jar.delete("__Secure-1PSIDTS", domain=".google.com", path="/")
+
+        result = save_cookies_to_storage(jar, storage, original_snapshot=snapshot)
+
+        assert result is False
+        assert _cookie_value(storage, "__Secure-1PSIDTS", ".google.com") == "OLD"
+        on_disk = next(c for c in _read_cookies(storage) if c["name"] == "__Secure-1PSIDTS")
+        assert on_disk["expires"] == 2_000_000
+
     def test_deletion_applied_when_disk_value_matches(self, tmp_path):
         """The CAS-guarded deletion still fires when no sibling write has
         intervened: snapshot value == disk value, so the drop is safe."""
@@ -602,7 +678,7 @@ class TestSaveReturnsBoolSuccess:
 
     def test_returns_true_on_successful_write(self, tmp_path):
         storage = tmp_path / "storage_state.json"
-        _write_storage(storage, [_stored_cookie("SID", "old", http_only=False)])
+        _write_storage(storage, [_stored_cookie("SID", "old")])
         jar = httpx.Cookies()
         jar.set("SID", "old", domain=".google.com", path="/")
         snapshot = snapshot_cookie_jar(jar)
@@ -740,6 +816,20 @@ class TestValueUpdateCASGuard:
 
         assert _cookie_value(storage, "__Secure-1PSIDTS", ".google.com") == "NEW"
 
+    def test_newly_acquired_cookie_does_not_overwrite_sibling_same_key(self, tmp_path):
+        """Expected-absent CAS: if disk has the row, a sibling acquired it first."""
+        storage = tmp_path / "storage_state.json"
+        _write_storage(storage, [_stored_cookie("__Secure-1PSIDTS", "SIBLING")])
+
+        jar = httpx.Cookies()
+        empty = snapshot_cookie_jar(jar)
+        jar.set("__Secure-1PSIDTS", "OURS", domain=".google.com", path="/")
+
+        result = save_cookies_to_storage(jar, storage, original_snapshot=empty)
+
+        assert result is False
+        assert _cookie_value(storage, "__Secure-1PSIDTS", ".google.com") == "SIBLING"
+
 
 class TestRefreshCmdResnapshot:
     """When ``NOTEBOOKLM_REFRESH_CMD`` runs and wholesale-replaces the
@@ -782,9 +872,9 @@ class TestRefreshCmdResnapshot:
         captured_snapshots: list = []
         real_save = auth_mod.save_cookies_to_storage
 
-        def capture_save(jar, path, *, original_snapshot=None):
+        def capture_save(jar, path, *, original_snapshot=None, **kwargs):
             captured_snapshots.append(original_snapshot)
-            return real_save(jar, path, original_snapshot=original_snapshot)
+            return real_save(jar, path, original_snapshot=original_snapshot, **kwargs)
 
         monkeypatch.setattr(auth_mod, "save_cookies_to_storage", capture_save)
 
@@ -826,9 +916,9 @@ class TestRefreshCmdResnapshot:
         captured_snapshots: list = []
         real_save = auth_mod.save_cookies_to_storage
 
-        def capture_save(jar, path, *, original_snapshot=None):
+        def capture_save(jar, path, *, original_snapshot=None, **kwargs):
             captured_snapshots.append(original_snapshot)
-            return real_save(jar, path, original_snapshot=original_snapshot)
+            return real_save(jar, path, original_snapshot=original_snapshot, **kwargs)
 
         monkeypatch.setattr(auth_mod, "save_cookies_to_storage", capture_save)
 
@@ -856,7 +946,7 @@ class TestNoneValuedCookieIsTreatedAsDeletion:
 
     def test_none_value_cookie_does_not_write_null_to_disk(self, tmp_path):
         storage = tmp_path / "storage_state.json"
-        _write_storage(storage, [_stored_cookie("SID", "real", http_only=False)])
+        _write_storage(storage, [_stored_cookie("SID", "real")])
 
         jar = httpx.Cookies()
         jar.set("SID", "real", domain=".google.com", path="/")
@@ -880,7 +970,7 @@ class TestNoneValuedCookieIsTreatedAsDeletion:
         candidate. Because disk still matches our snapshot value, the
         deletion CAS guard permits the drop."""
         storage = tmp_path / "storage_state.json"
-        _write_storage(storage, [_stored_cookie("SID", "real", http_only=False)])
+        _write_storage(storage, [_stored_cookie("SID", "real")])
 
         jar = httpx.Cookies()
         jar.set("SID", "real", domain=".google.com", path="/")
@@ -1024,6 +1114,49 @@ class TestBaselineNotAdvancedOnSaveFailure:
             "underlying save returned False (silent disk-write failure)"
         )
 
+    @pytest.mark.asyncio
+    async def test_auth_tokens_from_storage_carries_failed_save_baseline(
+        self, tmp_path, monkeypatch
+    ):
+        """Pre-client fetch rotations must be retried if their save fails."""
+        from notebooklm import auth as auth_mod
+        from notebooklm._core import ClientCore
+
+        storage = tmp_path / "storage_state.json"
+        _write_storage(
+            storage,
+            [
+                _stored_cookie("SID", "sid"),
+                _stored_cookie("__Secure-1PSIDTS", "old"),
+            ],
+        )
+
+        async def fake_fetch_with_refresh(cookie_jar, storage_path, profile):
+            _set_cookie_value(cookie_jar, "__Secure-1PSIDTS", "mutated")
+            return ("csrf", "session", False, None)
+
+        def failed_save(jar, path, *, original_snapshot=None, return_result=False):
+            result = CookieSaveResult(False)
+            return result if return_result else result.ok
+
+        monkeypatch.setattr(auth_mod, "_fetch_tokens_with_refresh", fake_fetch_with_refresh)
+        monkeypatch.setattr(auth_mod, "save_cookies_to_storage", failed_save)
+
+        auth = await auth_mod.AuthTokens.from_storage(path=storage)
+        core = ClientCore(auth)
+        await core.open()
+        try:
+            key = CookieSnapshotKey("__Secure-1PSIDTS", ".google.com", "/")
+            assert auth.cookie_snapshot is not None
+            assert auth.cookie_snapshot[key].value == "old"
+            assert core._loaded_cookie_snapshot is not None
+            assert core._loaded_cookie_snapshot[key].value == "old", (
+                "ClientCore must inherit the pre-fetch baseline so the mutated "
+                "cookie remains a delta after the failed pre-client save"
+            )
+        finally:
+            await core.close()
+
 
 class TestSchemaRejectReturnsFalse:
     """Storage file with a JSON dict that lacks a ``cookies`` key returns
@@ -1144,6 +1277,58 @@ class TestCASRejectReturnsFalse:
             "intended; must return False"
         )
 
+    @pytest.mark.asyncio
+    async def test_partial_cas_advances_successful_keys_for_next_save(self, tmp_path):
+        """A mixed save should not replay successful deltas on later saves."""
+        from notebooklm._core import ClientCore
+
+        storage = tmp_path / "storage_state.json"
+        _write_storage(
+            storage,
+            [
+                _stored_cookie("SID", "sid0"),
+                _stored_cookie("__Secure-1PSIDTS", "psidts0"),
+            ],
+        )
+        auth = AuthTokens(
+            cookies={
+                ("SID", ".google.com"): "sid0",
+                ("__Secure-1PSIDTS", ".google.com"): "psidts0",
+            },
+            csrf_token="t",
+            session_id="s",
+            storage_path=storage,
+        )
+        core = ClientCore(auth)
+        await core.open()
+
+        def jar_with(sid_value: str) -> httpx.Cookies:
+            jar = httpx.Cookies()
+            jar.set("SID", sid_value, domain=".google.com", path="/")
+            jar.set("__Secure-1PSIDTS", "ours", domain=".google.com", path="/")
+            return jar
+
+        try:
+            cookies = _read_cookies(storage)
+            for cookie in cookies:
+                if cookie["name"] == "__Secure-1PSIDTS":
+                    cookie["value"] = "sibling"
+            _write_storage(storage, cookies)
+
+            await core.save_cookies(jar_with("sid1"))
+            assert _cookie_value(storage, "SID", ".google.com") == "sid1"
+            assert _cookie_value(storage, "__Secure-1PSIDTS", ".google.com") == "sibling"
+
+            await core.save_cookies(jar_with("sid2"))
+            assert _cookie_value(storage, "SID", ".google.com") == "sid2", (
+                "The successful SID delta from the partial save must advance "
+                "baseline; otherwise the next SID rotation CAS-rejects against "
+                "the stale open-time baseline"
+            )
+            assert _cookie_value(storage, "__Secure-1PSIDTS", ".google.com") == "sibling"
+        finally:
+            await core.close()
+
 
 class TestCASVariantAware:
     """The CAS lookup must use leading-dot variants of the matched delta
@@ -1238,16 +1423,32 @@ class TestSaveCookiesSeesLatestBaselineUnderContention:
         core = ClientCore(auth)
         await core.open()
 
-        captured_snapshots: list = []
+        captured_calls: list[tuple[str, dict | None]] = []
         real_save = auth_mod.save_cookies_to_storage
 
-        def capture_save(jar, path, *, original_snapshot=None):
-            captured_snapshots.append(
-                dict(original_snapshot) if original_snapshot is not None else None
+        def capture_save(jar, path, *, original_snapshot=None, **kwargs):
+            psidts_value = next(
+                cookie.value for cookie in jar.jar if cookie.name == "__Secure-1PSIDTS"
             )
-            return real_save(jar, path, original_snapshot=original_snapshot)
+            captured_calls.append(
+                (
+                    psidts_value,
+                    dict(original_snapshot) if original_snapshot is not None else None,
+                )
+            )
+            return real_save(jar, path, original_snapshot=original_snapshot, **kwargs)
 
         monkeypatch.setattr("notebooklm._core.save_cookies_to_storage", capture_save)
+
+        submitted: list[tuple] = []
+
+        async def fake_to_thread(func, /, *args, **kwargs):
+            submitted.append((func, args, kwargs))
+            while len(submitted) < 2:
+                await asyncio.sleep(0)
+            return func(*args, **kwargs)
+
+        monkeypatch.setattr("notebooklm._core.asyncio.to_thread", fake_to_thread)
 
         # Two jars representing distinct post-rotation states. First save
         # rotates *PSIDTS to v1; second to v2. Built with fresh jar.set()
@@ -1275,13 +1476,18 @@ class TestSaveCookiesSeesLatestBaselineUnderContention:
             await core.close()
 
         psidts_key = CookieSnapshotKey("__Secure-1PSIDTS", ".google.com", "/")
-        captured_psidts_values = [b[psidts_key].value for b in captured_snapshots if b is not None]
-        # With the fix: the second worker to acquire _save_lock observes
-        # the first's baseline advance and reads v1, not v0.
-        assert "v1" in captured_psidts_values, (
+        captured_pairs = [
+            (jar_value, baseline[psidts_key].value)
+            for jar_value, baseline in captured_calls
+            if baseline is not None
+        ]
+        first_jar, first_baseline = captured_pairs[0]
+        _second_jar, second_baseline = captured_pairs[1]
+        assert first_baseline == "v0" and second_baseline == first_jar, (
             "When two saves serialize through _save_lock, the second worker "
             "must observe the baseline advanced by the first. Observed "
-            f"baselines for *PSIDTS: {captured_psidts_values}. If only v0 "
+            f"(jar, baseline) pairs for *PSIDTS: {captured_pairs}. If both baselines "
+            "are v0 "
             "appears, the snapshot was captured on the loop thread before "
             "the lock — a stale-baseline race risking lost updates."
         )
@@ -1303,32 +1509,39 @@ class TestRefreshCmdSnapshotCapturedBeforeRetryFetch:
         _write_storage(
             storage,
             [
-                _stored_cookie("SID", "from_refresh_cmd"),
-                _stored_cookie("__Secure-1PSIDTS", "from_refresh_cmd"),
+                _stored_cookie("SID", "stale"),
+                _stored_cookie("__Secure-1PSIDTS", "stale"),
             ],
         )
 
-        # Stub _fetch_tokens_with_refresh to simulate the full refresh-cmd
-        # flow: jar gets wholesale-replaced from disk, then the retry fetch
-        # mutates *PSIDTS in place (simulating a redirect Set-Cookie).
-        async def fake_fetch_with_refresh(cookie_jar, storage_path, profile):
-            # Wholesale replacement: jar matches what refresh-cmd wrote to disk.
-            cookie_jar.jar.clear()
-            cookie_jar.set("SID", "from_refresh_cmd", domain=".google.com", path="/")
-            cookie_jar.set("__Secure-1PSIDTS", "from_refresh_cmd", domain=".google.com", path="/")
-            # Capture the post-replace snapshot — this is what the real
-            # _fetch_tokens_with_refresh returns: the baseline AT the
-            # moment refresh-cmd's writes landed on disk, before the
-            # retry fetch's mutations.
-            post_replace_snapshot = snapshot_cookie_jar(cookie_jar)
-            # Retry fetch mutates *PSIDTS via a redirect Set-Cookie.
-            _set_cookie_value(cookie_jar, "__Secure-1PSIDTS", "post_retry_rotation")
-            return ("csrf", "sid", True, post_replace_snapshot)
+        monkeypatch.setenv(auth_mod.NOTEBOOKLM_REFRESH_CMD_ENV, "dummy-refresh")
+        auth_mod._REFRESH_GENERATIONS.clear()
 
-        monkeypatch.setattr(auth_mod, "_fetch_tokens_with_refresh", fake_fetch_with_refresh)
+        async def fake_run_refresh_cmd(storage_path, profile):
+            _write_storage(
+                storage_path,
+                [
+                    _stored_cookie("SID", "from_refresh_cmd"),
+                    _stored_cookie("__Secure-1PSIDTS", "from_refresh_cmd"),
+                ],
+            )
+
+        fetch_calls = 0
+
+        async def fake_fetch_tokens_with_jar(cookie_jar, storage_path):
+            nonlocal fetch_calls
+            fetch_calls += 1
+            if fetch_calls == 1:
+                raise ValueError("Authentication expired. Run 'notebooklm login'.")
+            _set_cookie_value(cookie_jar, "__Secure-1PSIDTS", "post_retry_rotation")
+            return ("csrf", "sid")
+
+        monkeypatch.setattr(auth_mod, "_run_refresh_cmd", fake_run_refresh_cmd)
+        monkeypatch.setattr(auth_mod, "_fetch_tokens_with_jar", fake_fetch_tokens_with_jar)
 
         await auth_mod.fetch_tokens_with_domains(path=storage)
 
+        assert fetch_calls == 2
         assert _cookie_value(storage, "__Secure-1PSIDTS", ".google.com") == "post_retry_rotation", (
             "Rotations the retry fetch added to the jar must reach disk — they "
             "would be dropped if the baseline snapshot is captured after the "

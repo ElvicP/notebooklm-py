@@ -96,6 +96,15 @@ class CookieSnapshotValue(NamedTuple):
 
 CookieSnapshot: TypeAlias = dict[CookieSnapshotKey, CookieSnapshotValue]
 
+
+@dataclass(frozen=True)
+class CookieSaveResult:
+    """Detailed result for callers that need to maintain a save baseline."""
+
+    ok: bool
+    cas_rejected_keys: frozenset[CookieSnapshotKey] = frozenset()
+
+
 # Tier 1: cookies whose absence Google rejects deterministically.
 #
 # - ``SID``: only individually-required cookie (singleton ablation).
@@ -324,6 +333,10 @@ class AuthTokens:
         cookie_jar: Domain-preserving httpx.Cookies jar. Preferred over flat cookies dict
             for HTTP operations as it retains original cookie domains (e.g.,
             .googleusercontent.com vs .google.com).
+        cookie_snapshot: Internal save baseline used when a pre-client token
+            fetch mutates cookies but persistence fails or CAS-rejects. This
+            lets the eventual ClientCore retry the unpersisted delta instead
+            of snapshotting the already-mutated jar as clean state.
     """
 
     cookies: DomainCookieMap
@@ -331,6 +344,7 @@ class AuthTokens:
     session_id: str
     storage_path: Path | None = None
     cookie_jar: httpx.Cookies | None = None
+    cookie_snapshot: CookieSnapshot | None = None
 
     def __post_init__(self) -> None:
         """Normalize legacy flat cookie mappings into domain-keyed mappings."""
@@ -413,8 +427,28 @@ class AuthTokens:
         if refreshed and post_refresh_snapshot is not None:
             snapshot = post_refresh_snapshot
 
-        # Persist any refreshed cookies from the token fetch
-        save_cookies_to_storage(jar, path, original_snapshot=snapshot)
+        # Persist any refreshed cookies from the token fetch. If the save
+        # fails, carry the old baseline into the returned AuthTokens so a
+        # later ClientCore can retry the delta instead of treating the mutated
+        # jar as clean state.
+        post_save_snapshot = snapshot_cookie_jar(jar)
+        save_result = save_cookies_to_storage(
+            jar,
+            path,
+            original_snapshot=snapshot,
+            return_result=True,
+        )
+        if isinstance(save_result, CookieSaveResult):
+            if save_result.ok:
+                cookie_snapshot = None
+            elif save_result.cas_rejected_keys:
+                cookie_snapshot = advance_cookie_snapshot_after_save(
+                    snapshot, post_save_snapshot, save_result.cas_rejected_keys
+                )
+            else:
+                cookie_snapshot = snapshot
+        else:
+            cookie_snapshot = None if save_result else snapshot
         cookies = _cookie_map_from_jar(jar)
 
         return cls(
@@ -423,6 +457,7 @@ class AuthTokens:
             session_id=session_id,
             storage_path=path,
             cookie_jar=jar,
+            cookie_snapshot=cookie_snapshot,
         )
 
 
@@ -1018,25 +1053,25 @@ def build_httpx_cookies_from_storage(path: Path | None = None) -> "httpx.Cookies
     storage_state = _load_storage_state(path)
 
     cookies = httpx.Cookies()
-    # Dedup by (name, domain) to stay symmetric with save_cookies_to_storage,
-    # which keys cookies_by_key on the same pair. Cookie identity per RFC 6265
-    # is (name, domain, path), but the save side cannot represent multiple
-    # path-scoped siblings yet — so the load side keeps a compatible model
-    # rather than constructing pairs that would silently collapse on save.
-    seen_keys: set[CookieKey] = set()
+    # Cookie identity per RFC 6265 is (name, domain, path). Keep every path
+    # variant in the jar so the snapshot/delta save path can CAS-protect each
+    # storage row independently.
+    seen_names: set[str] = set()
+    seen_snapshot_keys: set[CookieSnapshotKey] = set()
     for entry in storage_state.get("cookies", []):
         domain = entry.get("domain", "")
         name = entry.get("name")
         value = entry.get("value", "")
         if not _is_allowed_auth_domain(domain) or not name or not value:
             continue
-        key = (name, domain)
-        if key in seen_keys:
+        key = CookieSnapshotKey(name, domain, entry.get("path") or "/")
+        if key in seen_snapshot_keys:
             continue
-        seen_keys.add(key)
+        seen_snapshot_keys.add(key)
+        seen_names.add(name)
         cookies.jar.set_cookie(_storage_entry_to_cookie(entry))
 
-    _validate_required_cookies({name for name, _ in seen_keys})
+    _validate_required_cookies(seen_names)
     return cookies
 
 
@@ -1241,12 +1276,58 @@ def _stored_cookie_snapshot_key(stored_cookie: dict[str, Any]) -> CookieSnapshot
     return CookieSnapshotKey(name, domain, path)
 
 
+def _stored_cookie_snapshot_value(stored_cookie: dict[str, Any]) -> CookieSnapshotValue:
+    """Build the persisted tuple that participates in snapshot CAS checks."""
+    expires = stored_cookie.get("expires")
+    expires_value = None if expires in (None, -1) else expires
+    return CookieSnapshotValue(
+        value=stored_cookie.get("value", ""),
+        expires=expires_value,
+        secure=bool(stored_cookie.get("secure", False)),
+        http_only=bool(stored_cookie.get("httpOnly", False)),
+    )
+
+
+def advance_cookie_snapshot_after_save(
+    original_snapshot: CookieSnapshot | None,
+    post_save_snapshot: CookieSnapshot,
+    cas_rejected_keys: frozenset[CookieSnapshotKey],
+) -> CookieSnapshot | None:
+    """Advance save baseline for successful keys while preserving rejected ones.
+
+    A save can partially succeed: one cookie delta may write through while a
+    sibling-process CAS conflict rejects another. Advancing the whole baseline
+    would lose the rejected delta; keeping the whole old baseline would replay
+    already-written deltas and wedge future saves. This helper advances every
+    key to ``post_save_snapshot`` except the CAS-rejected keys, which retain
+    their old baseline value or absence.
+    """
+    if original_snapshot is None:
+        return None
+
+    advanced = dict(post_save_snapshot)
+    for key in cas_rejected_keys:
+        if key in original_snapshot:
+            advanced[key] = original_snapshot[key]
+        else:
+            advanced.pop(key, None)
+    return advanced
+
+
+def _cookie_save_return(
+    result: CookieSaveResult, *, return_result: bool
+) -> bool | CookieSaveResult:
+    """Return either the detailed save result or its public bool projection."""
+    return result if return_result else result.ok
+
+
 def save_cookies_to_storage(
     cookie_jar: httpx.Cookies,
     path: Path | None = None,
     *,
     original_snapshot: CookieSnapshot | None = None,
-) -> bool:
+    return_result: bool = False,
+) -> bool | CookieSaveResult:
     """Save an updated httpx.Cookies jar back to Playwright storage_state.json.
 
     This ensures that when Google issues short-lived token refreshes (e.g.
@@ -1270,7 +1351,7 @@ def save_cookies_to_storage(
       for callers outside this repo; every first-party caller passes
       ``original_snapshot``.
     - **Snapshot/delta (``original_snapshot`` provided)**: only cookies
-      whose in-memory value differs from the snapshot are written, and
+      whose in-memory persisted tuple differs from the snapshot are written, and
       cookies present in the snapshot but no longer in the jar are
       deleted from disk. Cookies the in-process code never touched are
       left untouched on disk so a sibling-process write survives.
@@ -1283,15 +1364,17 @@ def save_cookies_to_storage(
         original_snapshot: Open-time snapshot from
             :func:`snapshot_cookie_jar`. When provided, only deltas and
             deletions relative to the snapshot are persisted.
+        return_result: Internal escape hatch for callers that need CAS-rejected
+            keys to maintain a per-cookie baseline. Public callers should use
+            the default bool return.
 
     Returns:
         ``True`` if the disk state now reflects the caller's intent (write
         succeeded, was a successful no-op, or the call was a deliberate skip
         because auth was loaded from an env var). ``False`` if an I/O error
-        prevented the save and the disk state may not match the in-memory
-        jar; callers using the snapshot/delta path should NOT advance their
-        baseline in that case so the failed delta gets retried on the next
-        save (see ``ClientCore.save_cookies``).
+        prevented the save or a CAS guard preserved a sibling-process write.
+        With ``return_result=True``, callers can inspect CAS-rejected keys and
+        advance their baseline for the keys that did write through.
     """
     if (
         not path
@@ -1299,11 +1382,11 @@ def save_cookies_to_storage(
         and os.environ["NOTEBOOKLM_AUTH_JSON"].strip()
     ):
         logger.debug("Skipping cookie sync: Auth loaded from NOTEBOOKLM_AUTH_JSON env var")
-        return True
+        return _cookie_save_return(CookieSaveResult(True), return_result=return_result)
 
     if not path:
         logger.debug("Skipping cookie sync: No storage file path available")
-        return True
+        return _cookie_save_return(CookieSaveResult(True), return_result=return_result)
 
     if original_snapshot is None:
         warnings.warn(
@@ -1319,33 +1402,36 @@ def save_cookies_to_storage(
     with _file_lock_exclusive(lock_path):
         if not path.exists():
             logger.debug("Skipping cookie sync: Storage file not found at %s", path)
-            return False
+            return _cookie_save_return(CookieSaveResult(False), return_result=return_result)
 
         try:
             storage_data = json.loads(path.read_text(encoding="utf-8"))
         except Exception as e:
             logger.warning("Failed to read storage state for cookie sync: %s", e)
-            return False
+            return _cookie_save_return(CookieSaveResult(False), return_result=return_result)
 
         if not isinstance(storage_data, dict) or "cookies" not in storage_data:
             logger.warning(
                 "storage_state at %s lacks 'cookies' key; rotated cookies will not be persisted",
                 path,
             )
-            return False
+            return _cookie_save_return(CookieSaveResult(False), return_result=return_result)
 
         if original_snapshot is None:
             updated_count = _merge_cookies_legacy(cookie_jar, storage_data)
-            cas_rejected = False
+            cas_rejected_keys: frozenset[CookieSnapshotKey] = frozenset()
         else:
-            updated_count, cas_rejected = _merge_cookies_with_snapshot(
+            updated_count, cas_rejected_keys = _merge_cookies_with_snapshot(
                 cookie_jar, storage_data, original_snapshot
             )
 
         if updated_count == 0:
             # A CAS rejection with no other successful work means disk does
             # not reflect our intent; the caller must not advance baseline.
-            return not cas_rejected
+            return _cookie_save_return(
+                CookieSaveResult(not cas_rejected_keys, cas_rejected_keys),
+                return_result=return_result,
+            )
 
         temp_path: Path | None = None
         try:
@@ -1369,7 +1455,10 @@ def save_cookies_to_storage(
             # Even on a successful disk write, if any CAS arm rejected work,
             # disk diverges from ``post`` for at least one key — caller must
             # not advance baseline.
-            return not cas_rejected
+            return _cookie_save_return(
+                CookieSaveResult(not cas_rejected_keys, cas_rejected_keys),
+                return_result=return_result,
+            )
         except Exception as e:
             logger.warning("Failed to write updated cookies to %s: %s", path, e)
             if temp_path is not None:
@@ -1377,7 +1466,7 @@ def save_cookies_to_storage(
                     temp_path.unlink(missing_ok=True)
                 except Exception as cleanup_err:
                     logger.debug("Failed to clean up temp file %s: %s", temp_path, cleanup_err)
-            return False
+            return _cookie_save_return(CookieSaveResult(False), return_result=return_result)
 
 
 def _merge_cookies_legacy(cookie_jar: httpx.Cookies, storage_data: dict[str, Any]) -> int:
@@ -1436,7 +1525,7 @@ def _merge_cookies_with_snapshot(
     cookie_jar: httpx.Cookies,
     storage_data: dict[str, Any],
     original_snapshot: CookieSnapshot,
-) -> tuple[int, bool]:
+) -> tuple[int, frozenset[CookieSnapshotKey]]:
     """Snapshot/delta merge: write only what this process actually changed.
 
     Closes §3.4.1 (stale-overwrite-fresh) and §3.4.2 (path collapse):
@@ -1444,18 +1533,17 @@ def _merge_cookies_with_snapshot(
     - **Deltas (CAS-guarded for keys in the snapshot)**: cookies in the
       jar whose snapshot tuple (``value, expires, secure, http_only``)
       differs from ``original_snapshot`` are written to disk **only if**
-      the on-disk value still matches the snapshot value. If disk has
+      the on-disk tuple still matches the snapshot tuple. If disk has
       rotated since open time, a sibling process has written it; we
       preserve their write rather than clobber it with our local
-      rotation. New cookies acquired during the session (no snapshot
-      entry) bypass the CAS check and write normally. Comparing the full
-      snapshot tuple keeps attribute-only refreshes (same value, new
-      ``expires``) flowing to disk; the legacy path tracked ``expires``
-      directly and a regression here would silently drop session-extension
-      Set-Cookies.
+      rotation. New cookies acquired during the session are written only
+      when no same-key storage row exists yet; an existing row means a
+      sibling acquired the same cookie first. Comparing the full snapshot
+      tuple keeps attribute-only refreshes (same value, new ``expires``)
+      flowing to disk while still protecting sibling attribute-only writes.
     - **Deletions (CAS-guarded)**: a key present in the snapshot but
       absent from the jar is dropped from disk **only if** the on-disk
-      value still matches the snapshot value — symmetric with the
+      tuple still matches the snapshot tuple — symmetric with the
       value-update CAS above. An ``Max-Age=0`` that evicted our
       locally-expired copy must not erase the sibling's freshly-issued
       replacement.
@@ -1470,15 +1558,13 @@ def _merge_cookies_with_snapshot(
         original_snapshot: Open-time snapshot of the same jar.
 
     Returns:
-        Tuple of ``(updated_count, cas_rejected)``:
+        Tuple of ``(updated_count, cas_rejected_keys)``:
 
         - ``updated_count``: cookie entries added, modified, or removed
           (drives whether the temp-write step runs).
-        - ``cas_rejected``: whether any CAS check rejected a delta or
-          deletion. Caller uses this to decide whether the post-save
-          baseline can be advanced — if disk still disagrees with our
-          intent on any key, the baseline must stay so the next save
-          retries the delta.
+        - ``cas_rejected_keys``: keys whose CAS check rejected a delta or
+          deletion. Caller uses this to advance the baseline only for keys
+          that were actually written or already matched.
     """
     current_snapshot = snapshot_cookie_jar(cookie_jar)
 
@@ -1517,7 +1603,7 @@ def _merge_cookies_with_snapshot(
     }
 
     updated_count = 0
-    cas_rejected = False
+    cas_rejected_keys: set[CookieSnapshotKey] = set()
 
     # Apply deltas + deletions to the existing storage entries in place.
     new_cookies: list[dict[str, Any]] = []
@@ -1547,8 +1633,8 @@ def _merge_cookies_with_snapshot(
             if matched_delta_key is None:  # pragma: no cover - loop invariant
                 raise RuntimeError("matched_delta_cookie set without matched_delta_key")
             # CAS-guard for value updates: if our snapshot had this key in any
-            # leading-dot variant and disk's current value differs from the
-            # snapshot value, a sibling process has rewritten the row between
+            # leading-dot variant and disk's current tuple differs from the
+            # snapshot tuple, a sibling process has rewritten the row between
             # our open and our save. Preserve their write rather than clobber.
             # Variant-aware lookup mirrors the delta match above: if the snapshot
             # was keyed on ``accounts.google.com`` but the matched delta key is
@@ -1562,14 +1648,35 @@ def _merge_cookies_with_snapshot(
                 ),
                 None,
             )
-            if snapshot_entry is not None and stored_cookie.get("value") != snapshot_entry.value:
+            stored_snapshot_value = _stored_cookie_snapshot_value(stored_cookie)
+            if snapshot_entry is not None and stored_snapshot_value != snapshot_entry:
                 logger.debug(
-                    "Skipped CAS-guarded value update of %s on %s: disk value "
+                    "Skipped CAS-guarded value update of %s on %s: disk tuple "
                     "differs from snapshot (sibling write preserved)",
                     matched_delta_key.name,
                     matched_delta_key.domain,
                 )
-                cas_rejected = True
+                cas_rejected_keys.add(matched_delta_key)
+                matched_delta_keys.add(matched_delta_key)
+                new_cookies.append(stored_cookie)
+                continue
+            if snapshot_entry is None and stored_snapshot_value != CookieSnapshotValue(
+                value=matched_delta_cookie.value,
+                expires=(
+                    matched_delta_cookie.expires
+                    if matched_delta_cookie.expires is not None
+                    else None
+                ),
+                secure=bool(matched_delta_cookie.secure),
+                http_only=_cookie_is_http_only(matched_delta_cookie),
+            ):
+                logger.debug(
+                    "Skipped CAS-guarded value update of new cookie %s on %s: "
+                    "disk row already exists (sibling write preserved)",
+                    matched_delta_key.name,
+                    matched_delta_key.domain,
+                )
+                cas_rejected_keys.add(matched_delta_key)
                 matched_delta_keys.add(matched_delta_key)
                 new_cookies.append(stored_cookie)
                 continue
@@ -1595,18 +1702,18 @@ def _merge_cookies_with_snapshot(
             None,
         )
         if deletion_match is not None:
-            # CAS-guard: only drop the disk row if its value still matches
-            # what we observed at snapshot time. A sibling process may have
+            # CAS-guard: only drop the disk row if its persisted tuple still
+            # matches what we observed at snapshot time. A sibling process may have
             # rewritten this key between our open and our save; clobbering
             # their fresh value with our local eviction would resurrect the
             # exact stale-overwrite-fresh hazard the snapshot path exists
             # to close (just inverted — deletion-of-fresh instead of
             # value-write-of-stale).
-            snapshot_value = original_snapshot[deletion_match].value
-            if stored_cookie.get("value") == snapshot_value:
+            snapshot_value = original_snapshot[deletion_match]
+            if _stored_cookie_snapshot_value(stored_cookie) == snapshot_value:
                 updated_count += 1
                 continue  # drop the entry from disk
-            cas_rejected = True
+            cas_rejected_keys.add(deletion_match)
 
         new_cookies.append(stored_cookie)
 
@@ -1619,7 +1726,7 @@ def _merge_cookies_with_snapshot(
         updated_count += 1
 
     storage_data["cookies"] = new_cookies
-    return updated_count, cas_rejected
+    return updated_count, frozenset(cas_rejected_keys)
 
 
 def _cookie_is_http_only(cookie: Any) -> bool:

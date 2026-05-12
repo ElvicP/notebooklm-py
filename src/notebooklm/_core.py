@@ -15,8 +15,10 @@ import httpx
 
 from .auth import (
     AuthTokens,
+    CookieSaveResult,
     CookieSnapshot,
     _rotate_cookies,
+    advance_cookie_snapshot_after_save,
     build_cookie_jar,
     save_cookies_to_storage,
     snapshot_cookie_jar,
@@ -226,10 +228,15 @@ class ClientCore:
 
             # Capture the open-time snapshot AFTER the AsyncClient is built
             # (httpx normalizes domains on ingest) but BEFORE any rotation
-            # could possibly fire. ``self._http_client.cookies.jar`` is the
-            # canonical source; the input ``cookies`` jar may have been
-            # copied or rewritten during construction.
-            self._loaded_cookie_snapshot = snapshot_cookie_jar(self._http_client.cookies)
+            # could possibly fire. When AuthTokens carries a snapshot from a
+            # failed pre-client save, keep it so the unpersisted delta can be
+            # retried instead of treating the already-mutated jar as clean.
+            self._loaded_cookie_snapshot = (
+                dict(self.auth.cookie_snapshot)
+                if self.auth.cookie_snapshot is not None
+                else snapshot_cookie_jar(self._http_client.cookies)
+            )
+            self.auth.cookie_snapshot = self._loaded_cookie_snapshot
 
             # Spawn the keepalive task once the client is ready
             if self._keepalive_interval is not None:
@@ -294,14 +301,28 @@ class ClientCore:
                 # state, hit CAS rejection on every key, and silently lose
                 # the local rotation.
                 snap = client._loaded_cookie_snapshot
-                # Advance the baseline only if save_cookies_to_storage reported
-                # the disk now reflects ``post``. A silent I/O error or CAS
-                # rejection returns False — in that case the baseline must
-                # stay where it was so the next save retries the same delta.
-                # An exception also leaves the baseline untouched. See
-                # class-level ``_loaded_cookie_snapshot``.
-                if save_cookies_to_storage(s, p, original_snapshot=snap):
+                # Advance successful keys while preserving CAS-rejected ones.
+                # A silent I/O error leaves the baseline untouched; an
+                # exception does too. See class-level
+                # ``_loaded_cookie_snapshot``.
+                result = save_cookies_to_storage(
+                    s,
+                    p,
+                    original_snapshot=snap,
+                    return_result=True,
+                )
+                if isinstance(result, CookieSaveResult):
+                    if result.ok:
+                        client._loaded_cookie_snapshot = post
+                    elif result.cas_rejected_keys:
+                        client._loaded_cookie_snapshot = advance_cookie_snapshot_after_save(
+                            snap, post, result.cas_rejected_keys
+                        )
+                    if client._loaded_cookie_snapshot is not None:
+                        client.auth.cookie_snapshot = client._loaded_cookie_snapshot
+                elif result:
                     client._loaded_cookie_snapshot = post
+                    client.auth.cookie_snapshot = post
 
         await asyncio.to_thread(_save)
 

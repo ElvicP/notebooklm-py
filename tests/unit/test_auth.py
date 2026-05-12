@@ -1066,7 +1066,14 @@ class TestFetchTokens:
             json.dumps(
                 {
                     "cookies": [
-                        {"name": "SID", "value": "old", "domain": ".google.com"},
+                        {
+                            "name": "SID",
+                            "value": "old",
+                            "domain": ".google.com",
+                            "path": "/",
+                            "httpOnly": True,
+                            "secure": False,
+                        },
                         {
                             "name": "__Secure-1PSIDTS",
                             "value": "test_1psidts",
@@ -1079,10 +1086,11 @@ class TestFetchTokens:
         storage_file.chmod(0o600)
 
         jar = httpx.Cookies()
-        empty_snapshot = snapshot_cookie_jar(jar)
+        jar.set("SID", "old", domain=".google.com")
+        snapshot = snapshot_cookie_jar(jar)
         jar.set("SID", "new", domain=".google.com")
 
-        save_cookies_to_storage(jar, storage_file, original_snapshot=empty_snapshot)
+        save_cookies_to_storage(jar, storage_file, original_snapshot=snapshot)
 
         assert storage_file.stat().st_mode & 0o777 == 0o600
         storage_state = json.loads(storage_file.read_text())
