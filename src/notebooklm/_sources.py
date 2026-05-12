@@ -527,8 +527,9 @@ class SourcesAPI:
                 # Only merge the new title onto the waited source. rename()'s
                 # response shape can be sparse (UPDATE_SOURCE sometimes returns
                 # just an id + title) and would otherwise null out _type_code,
-                # url, and created_at that wait_until_ready() populated.
-                source = replace(source, title=renamed.title)
+                # url, and created_at that wait_until_ready() populated. Fall
+                # back to the requested title if rename's response omits it.
+                source = replace(source, title=renamed.title or title)
             except (RPCError, NetworkError):
                 # Don't fail the whole upload if the rename fails — the file is
                 # already uploaded and registered. Surface a warning so the
