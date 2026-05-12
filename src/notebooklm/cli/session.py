@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -490,6 +491,118 @@ def _refresh_from_browser_cookies(
         )
 
 
+def _build_google_cookie_domains() -> list[str]:
+    """Return the list of Google cookie domains we ask cookie extractors to read."""
+    domains = list(ALLOWED_COOKIE_DOMAINS)
+    for cctld in GOOGLE_REGIONAL_CCTLDS:
+        domain = f".google.{cctld}"
+        if domain not in domains:
+            domains.append(domain)
+    return domains
+
+
+def _read_firefox_container_cookies(
+    container_spec: str, *, verbose: bool = True
+) -> list[dict[str, Any]]:
+    """Load Google cookies from a specific Firefox Multi-Account Container.
+
+    Bypasses rookiepy because rookiepy 0.5.6 does not filter on
+    ``originAttributes`` and silently merges every container's cookies (see
+    issue #366 / #367). We talk to ``cookies.sqlite`` directly via the
+    helpers in :mod:`notebooklm._firefox_containers`.
+
+    Args:
+        container_spec: The part after ``firefox::`` (e.g. ``"Work"`` or
+            ``"none"`` for the no-container default).
+        verbose: When False, suppress the progress line; used by
+            ``auth inspect --json``.
+
+    Returns:
+        Rookiepy-shape cookie dicts (compatible with
+        :func:`convert_rookiepy_cookies_to_storage_state`).
+
+    Raises:
+        SystemExit: With a friendly message on any failure (no Firefox
+            installed, unknown container, locked DB, …).
+    """
+    from .._firefox_containers import (
+        extract_firefox_container_cookies,
+        find_firefox_profile_path,
+        resolve_container_id,
+    )
+
+    profile_path = find_firefox_profile_path()
+    if profile_path is None:
+        console.print(
+            "[red]Could not locate a Firefox profile.[/red]\n"
+            "Looked for profiles.ini in the standard Firefox locations. "
+            "If you have Firefox installed in a non-standard location, the "
+            "container-aware extractor cannot find it. Drop the '::<container>' "
+            "suffix to fall back to rookiepy's autodetection."
+        )
+        raise SystemExit(1)
+
+    try:
+        container_id = resolve_container_id(profile_path, container_spec)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise SystemExit(1) from None
+
+    if verbose:
+        if container_id == "none":
+            console.print("[yellow]Reading cookies from Firefox (no container)...[/yellow]")
+        else:
+            console.print(
+                f"[yellow]Reading cookies from Firefox container "
+                f"'{container_spec}' (userContextId={container_id})...[/yellow]"
+            )
+
+    domains = _build_google_cookie_domains()
+    try:
+        return extract_firefox_container_cookies(profile_path, container_id, domains=domains)
+    except FileNotFoundError as e:
+        console.print(f"[red]{e}[/red]")
+        raise SystemExit(1) from None
+    except (OSError, RuntimeError) as e:
+        _handle_rookiepy_error(e, "firefox")
+        raise SystemExit(1) from None
+    except sqlite3.DatabaseError as e:
+        console.print(f"[red]Failed to read Firefox cookies database:[/red] {e}")
+        raise SystemExit(1) from None
+
+
+def _maybe_warn_firefox_containers_in_use() -> None:
+    """Emit a one-line warning when unscoped ``firefox`` is risky.
+
+    Triggers when ``cookies.sqlite`` has at least one row whose
+    ``originAttributes`` carries a ``userContextId=`` field — i.e. the user
+    really stored cookies inside some container. Cookie-driven (not
+    ``containers.json``-driven) so stock built-in containers count just the
+    same as user-created ones; First-Party-Isolation cookies (which only
+    carry ``firstPartyDomain=``) do not trigger.
+
+    Any probe failure is swallowed inside ``has_container_cookies_in_use``.
+    """
+    from .._firefox_containers import (
+        find_firefox_profile_path,
+        has_container_cookies_in_use,
+    )
+
+    profile_path = find_firefox_profile_path()
+    if profile_path is None:
+        return
+    if has_container_cookies_in_use(profile_path):
+        console.print(
+            "[yellow]Warning: this Firefox profile has cookies stored inside "
+            "a Multi-Account Container, but '--browser-cookies firefox' "
+            "merges every container into one jar. If your Google session "
+            "lives inside a container, re-run with "
+            "[cyan]--browser-cookies 'firefox::<container-name>'[/cyan] "
+            "(or [cyan]'firefox::none'[/cyan] for the no-container "
+            "default).[/yellow]"
+        )
+
+
 def _read_browser_cookies(browser_name: str, *, verbose: bool = True) -> list[dict[str, Any]]:
     """Load Google cookies from an installed browser via rookiepy.
 
@@ -497,18 +610,38 @@ def _read_browser_cookies(browser_name: str, *, verbose: bool = True) -> list[di
     (``login --browser-cookies``, ``auth inspect``) share one code path.
 
     Args:
-        browser_name: ``"auto"`` to use ``rookiepy.load()``, or a specific
-            browser alias from :data:`_ROOKIEPY_BROWSER_ALIASES`.
+        browser_name: ``"auto"`` to use ``rookiepy.load()``, a specific
+            browser alias from :data:`_ROOKIEPY_BROWSER_ALIASES`, or
+            ``"firefox::<container-name>"`` (or ``"firefox::none"``) to
+            extract from a single Firefox Multi-Account Container, bypassing
+            rookiepy entirely.
         verbose: When False, suppress the "Reading cookies from …" progress
             line. Used by ``auth inspect --json`` to keep stdout pure JSON.
 
     Returns:
-        Raw cookie dicts as returned by rookiepy.
+        Raw cookie dicts as returned by rookiepy (or by the Firefox
+        container extractor, which mirrors rookiepy's shape).
 
     Raises:
         SystemExit: With a user-friendly message printed to console on any
             rookiepy import / dispatch / read failure.
     """
+    # Firefox container syntax: ``firefox::<name>`` or ``firefox::none``.
+    # Routed to a direct sqlite3 reader because rookiepy does not honor
+    # ``originAttributes`` — see issue #367.
+    if browser_name.lower().startswith("firefox::"):
+        container_spec = browser_name.split("::", 1)[1].strip()
+        if not container_spec:
+            # Empty spec would silently fall through to an unfiltered SELECT —
+            # i.e. the merged-jar bug this feature exists to prevent. Reject.
+            console.print(
+                "[red]Empty Firefox container specifier in --browser-cookies.[/red]\n"
+                "Use [cyan]firefox::<container-name>[/cyan] (e.g. 'firefox::Work') or "
+                "[cyan]firefox::none[/cyan] for the no-container default."
+            )
+            raise SystemExit(1)
+        return _read_firefox_container_cookies(container_spec, verbose=verbose)
+
     try:
         import rookiepy
     except ImportError:
@@ -521,12 +654,7 @@ def _read_browser_cookies(browser_name: str, *, verbose: bool = True) -> list[di
         )
         raise SystemExit(1) from None
 
-    # Build domains list including base and regional Google domains for rookiepy
-    domains = list(ALLOWED_COOKIE_DOMAINS)
-    for cctld in GOOGLE_REGIONAL_CCTLDS:
-        domain = f".google.{cctld}"
-        if domain not in domains:
-            domains.append(domain)
+    domains = _build_google_cookie_domains()
 
     if browser_name == "auto":
         if verbose:
@@ -556,10 +684,18 @@ def _read_browser_cookies(browser_name: str, *, verbose: bool = True) -> list[di
         )
         raise SystemExit(1)
     try:
-        return browser_fn(domains=domains)
+        cookies = browser_fn(domains=domains)
     except (OSError, RuntimeError) as e:
         _handle_rookiepy_error(e, browser_name)
         raise SystemExit(1) from None
+
+    # Back-compat warning: unscoped 'firefox' silently merges cookies from
+    # every Multi-Account Container. Skip when ``verbose=False`` so callers
+    # like ``auth inspect --json`` don't pollute stdout before their JSON.
+    if canonical == "firefox" and verbose:
+        _maybe_warn_firefox_containers_in_use()
+
+    return cookies
 
 
 def _login_with_browser_cookies(
@@ -818,6 +954,8 @@ def register_session_commands(cli):
         help=(
             "Read cookies from an installed browser instead of launching Playwright. "
             "Optionally specify browser: chrome, firefox, brave, edge, safari, arc, ... "
+            "For Firefox Multi-Account Containers, target a specific container with "
+            "'firefox::<container-name>' (or 'firefox::none' for the default). "
             "Requires: pip install 'notebooklm-py[cookies]'"
         ),
     )

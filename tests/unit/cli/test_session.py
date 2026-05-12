@@ -1929,6 +1929,283 @@ class TestLoginBrowserCookies:
             result = runner.invoke(cli, ["login", "--browser-cookies", "netscape"])
         assert result.exit_code != 0
 
+    # ------------------------------------------------------------------
+    # firefox::<container> syntax (issue #367)
+    # ------------------------------------------------------------------
+
+    def test_firefox_container_syntax_invokes_extractor(self, runner, tmp_path):
+        """``--browser-cookies firefox::<name>`` calls the container extractor.
+
+        rookiepy must NOT be touched on this path — that's the whole point
+        of the bypass.
+        """
+        storage_file = tmp_path / "storage.json"
+        mock_cookies = [
+            {
+                "domain": ".google.com",
+                "name": "SID",
+                "value": "work_sid",
+                "path": "/",
+                "secure": True,
+                "expires": 9999,
+                "http_only": False,
+                "same_site": 0,
+            },
+            {
+                "domain": ".google.com",
+                "name": "__Secure-1PSIDTS",
+                "value": "ts",
+                "path": "/",
+                "secure": True,
+                "expires": 9999,
+                "http_only": False,
+                "same_site": 0,
+            },
+        ]
+        mock_rookiepy = MagicMock()
+        with (
+            patch.dict("sys.modules", {"rookiepy": mock_rookiepy}),
+            patch(
+                "notebooklm._firefox_containers.find_firefox_profile_path",
+                return_value=tmp_path / "ff_profile",
+            ),
+            patch(
+                "notebooklm._firefox_containers.resolve_container_id",
+                return_value=2,
+            ),
+            patch(
+                "notebooklm._firefox_containers.extract_firefox_container_cookies",
+                return_value=mock_cookies,
+            ) as mock_extract,
+            patch("notebooklm.cli.session.get_storage_path", return_value=storage_file),
+            patch("notebooklm.cli.session._sync_server_language_to_config"),
+            patch(
+                "notebooklm.cli.session.fetch_tokens_with_domains",
+                new_callable=AsyncMock,
+                return_value=("csrf", "sess"),
+            ),
+        ):
+            result = runner.invoke(cli, ["login", "--browser-cookies", "firefox::Work"])
+        assert result.exit_code == 0, result.output
+        mock_extract.assert_called_once()
+        # rookiepy must NOT have been called for the firefox:: path.
+        mock_rookiepy.firefox.assert_not_called()
+        mock_rookiepy.load.assert_not_called()
+        # The container's SID should land in the saved storage state.
+        data = json.loads(storage_file.read_text())
+        assert any(c["name"] == "SID" and c["value"] == "work_sid" for c in data["cookies"])
+
+    def test_firefox_container_none_passes_literal_none(self, runner, tmp_path):
+        """``firefox::none`` resolves to ``"none"`` and skips rookiepy."""
+        storage_file = tmp_path / "storage.json"
+        mock_cookies = [
+            {
+                "domain": ".google.com",
+                "name": "SID",
+                "value": "default_sid",
+                "path": "/",
+                "secure": True,
+                "expires": 9999,
+                "http_only": False,
+                "same_site": 0,
+            },
+            {
+                "domain": ".google.com",
+                "name": "__Secure-1PSIDTS",
+                "value": "ts",
+                "path": "/",
+                "secure": True,
+                "expires": 9999,
+                "http_only": False,
+                "same_site": 0,
+            },
+        ]
+        with (
+            patch.dict("sys.modules", {"rookiepy": MagicMock()}),
+            patch(
+                "notebooklm._firefox_containers.find_firefox_profile_path",
+                return_value=tmp_path / "ff_profile",
+            ),
+            patch(
+                "notebooklm._firefox_containers.extract_firefox_container_cookies",
+                return_value=mock_cookies,
+            ) as mock_extract,
+            patch("notebooklm.cli.session.get_storage_path", return_value=storage_file),
+            patch("notebooklm.cli.session._sync_server_language_to_config"),
+            patch(
+                "notebooklm.cli.session.fetch_tokens_with_domains",
+                new_callable=AsyncMock,
+                return_value=("csrf", "sess"),
+            ),
+        ):
+            result = runner.invoke(cli, ["login", "--browser-cookies", "firefox::none"])
+        assert result.exit_code == 0, result.output
+        # Confirm the extractor was called with the ``"none"`` sentinel.
+        _, kwargs = mock_extract.call_args
+        positional = mock_extract.call_args.args
+        # signature: extract_firefox_container_cookies(profile, container_id, domains=…)
+        assert positional[1] == "none" or kwargs.get("container_id") == "none"
+
+    def test_firefox_container_unknown_name_shows_listing(self, runner, tmp_path):
+        """Unknown container name shows a helpful error and exits non-zero."""
+        with (
+            patch.dict("sys.modules", {"rookiepy": MagicMock()}),
+            patch(
+                "notebooklm._firefox_containers.find_firefox_profile_path",
+                return_value=tmp_path / "ff_profile",
+            ),
+            patch(
+                "notebooklm._firefox_containers.resolve_container_id",
+                side_effect=ValueError(
+                    "Firefox container 'Nope' not found. "
+                    "Available containers: 'Work', 'Personal'."
+                ),
+            ),
+            patch(
+                "notebooklm.cli.session.get_storage_path",
+                return_value=tmp_path / "storage.json",
+            ),
+        ):
+            result = runner.invoke(cli, ["login", "--browser-cookies", "firefox::Nope"])
+        assert result.exit_code != 0
+        assert "Nope" in result.output
+        assert "Work" in result.output
+
+    def test_firefox_container_no_firefox_profile_shows_error(self, runner, tmp_path):
+        """Missing Firefox install shows a friendly error, not a stack trace."""
+        with (
+            patch.dict("sys.modules", {"rookiepy": MagicMock()}),
+            patch(
+                "notebooklm._firefox_containers.find_firefox_profile_path",
+                return_value=None,
+            ),
+            patch(
+                "notebooklm.cli.session.get_storage_path",
+                return_value=tmp_path / "storage.json",
+            ),
+        ):
+            result = runner.invoke(cli, ["login", "--browser-cookies", "firefox::Work"])
+        assert result.exit_code != 0
+        # The message should mention firefox / profile so the user knows what's up.
+        out_lower = result.output.lower()
+        assert "firefox" in out_lower
+        assert "profile" in out_lower
+
+    def test_firefox_empty_container_spec_rejected(self, runner, tmp_path):
+        """`--browser-cookies firefox::` (empty spec) must error, not silently
+        fall through to the unfiltered merge this feature exists to prevent.
+        Regression guard for the polish review (3-way HIGH consensus).
+        """
+        with (
+            patch.dict("sys.modules", {"rookiepy": MagicMock()}),
+            patch(
+                "notebooklm.cli.session.get_storage_path",
+                return_value=tmp_path / "storage.json",
+            ),
+        ):
+            result = runner.invoke(cli, ["login", "--browser-cookies", "firefox::"])
+        assert result.exit_code != 0
+        assert "Empty Firefox container specifier" in result.output
+        # The error should point at the correct syntax so the user can recover.
+        assert "firefox::none" in result.output
+        assert "container-name" in result.output
+
+    def test_unscoped_firefox_warns_when_containers_in_use(self, runner, tmp_path):
+        """Unscoped ``firefox`` emits a yellow warning if containers are in use."""
+        storage_file = tmp_path / "storage.json"
+        mock_cookies = [
+            {
+                "domain": ".google.com",
+                "name": "SID",
+                "value": "x",
+                "path": "/",
+                "secure": True,
+                "expires": 9999,
+                "http_only": False,
+            },
+            {
+                "domain": ".google.com",
+                "name": "__Secure-1PSIDTS",
+                "value": "ts",
+                "path": "/",
+                "secure": True,
+                "expires": 9999,
+                "http_only": False,
+            },
+        ]
+        mock_rookiepy = MagicMock()
+        mock_rookiepy.firefox = MagicMock(return_value=mock_cookies)
+        with (
+            patch.dict("sys.modules", {"rookiepy": mock_rookiepy}),
+            patch(
+                "notebooklm._firefox_containers.find_firefox_profile_path",
+                return_value=tmp_path / "ff_profile",
+            ),
+            patch(
+                "notebooklm._firefox_containers.has_container_cookies_in_use",
+                return_value=True,
+            ),
+            patch("notebooklm.cli.session.get_storage_path", return_value=storage_file),
+            patch("notebooklm.cli.session._sync_server_language_to_config"),
+            patch(
+                "notebooklm.cli.session.fetch_tokens_with_domains",
+                new_callable=AsyncMock,
+                return_value=("csrf", "sess"),
+            ),
+        ):
+            result = runner.invoke(cli, ["login", "--browser-cookies", "firefox"])
+        assert result.exit_code == 0, result.output
+        # Rich may wrap the message; assert on substrings that survive wrap.
+        assert "Multi-Account" in result.output
+        assert "firefox::" in result.output
+
+    def test_unscoped_firefox_no_warning_when_no_containers(self, runner, tmp_path):
+        """No warning when the profile is not actually using containers."""
+        storage_file = tmp_path / "storage.json"
+        mock_cookies = [
+            {
+                "domain": ".google.com",
+                "name": "SID",
+                "value": "x",
+                "path": "/",
+                "secure": True,
+                "expires": 9999,
+                "http_only": False,
+            },
+            {
+                "domain": ".google.com",
+                "name": "__Secure-1PSIDTS",
+                "value": "ts",
+                "path": "/",
+                "secure": True,
+                "expires": 9999,
+                "http_only": False,
+            },
+        ]
+        mock_rookiepy = MagicMock()
+        mock_rookiepy.firefox = MagicMock(return_value=mock_cookies)
+        with (
+            patch.dict("sys.modules", {"rookiepy": mock_rookiepy}),
+            patch(
+                "notebooklm._firefox_containers.find_firefox_profile_path",
+                return_value=tmp_path / "ff_profile",
+            ),
+            patch(
+                "notebooklm._firefox_containers.has_container_cookies_in_use",
+                return_value=False,
+            ),
+            patch("notebooklm.cli.session.get_storage_path", return_value=storage_file),
+            patch("notebooklm.cli.session._sync_server_language_to_config"),
+            patch(
+                "notebooklm.cli.session.fetch_tokens_with_domains",
+                new_callable=AsyncMock,
+                return_value=("csrf", "sess"),
+            ),
+        ):
+            result = runner.invoke(cli, ["login", "--browser-cookies", "firefox"])
+        assert result.exit_code == 0, result.output
+        assert "Multi-Account" not in result.output
+
 
 # =============================================================================
 # AUTH LOGOUT COMMAND TESTS
