@@ -497,12 +497,13 @@ class TestAddFile:
             [[[["src_md"]]]],
             [[[["src_md"], "Real Intended Title", [None, None, None, None, 8]]]],
         ]
-        # The forced pre-rename wait is mocked — we don't want this test to
-        # depend on the wait_until_ready polling implementation. It returns the
+        # The forced pre-rename registration wait is mocked — we don't want
+        # this test to depend on the polling implementation. It returns the
         # registered source so add_file then issues the rename RPC.
-        sources_api.wait_until_ready = AsyncMock(
+        sources_api.wait_until_registered = AsyncMock(
             return_value=Source(id="src_md", title="boring-filename.md", _type_code=8)
         )
+        sources_api.wait_until_ready = AsyncMock()
 
         mock_start_response = MagicMock()
         mock_start_response.headers = {"x-goog-upload-url": "https://upload.example.com"}
@@ -525,7 +526,9 @@ class TestAddFile:
         assert mock_core.rpc_call.call_count == 2
         rename_params = mock_core.rpc_call.call_args_list[1].args[1]
         assert rename_params == [None, ["src_md"], [[["Real Intended Title"]]]]
-        sources_api.wait_until_ready.assert_awaited_once_with("nb_123", "src_md", timeout=120.0)
+        # Narrow wait (default 30s cap) — not the full wait_until_ready.
+        sources_api.wait_until_registered.assert_awaited_once_with("nb_123", "src_md", timeout=30.0)
+        sources_api.wait_until_ready.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_add_file_with_custom_title_renames_after_wait(
@@ -593,14 +596,15 @@ class TestAddFile:
         ]
 
         async def wait_side_effect(notebook_id, source_id, *, timeout):
-            # Forwarded wait_timeout — default 120.0 in this call.
-            assert timeout == 120.0
+            # Narrow registration wait — default cap is 30s for wait=False.
+            assert timeout == 30.0
             # Wait runs BEFORE the rename: at this point only the register
             # RPC has been issued.
             assert mock_core.rpc_call.call_count == 1
             return Source(id=source_id, title="boring-filename.md", _type_code=8)
 
-        sources_api.wait_until_ready = AsyncMock(side_effect=wait_side_effect)
+        sources_api.wait_until_registered = AsyncMock(side_effect=wait_side_effect)
+        sources_api.wait_until_ready = AsyncMock()
 
         mock_start_response = MagicMock()
         mock_start_response.headers = {"x-goog-upload-url": "https://upload.example.com"}
@@ -620,14 +624,16 @@ class TestAddFile:
             )
 
         assert result.title == "Real Intended Title"
-        sources_api.wait_until_ready.assert_awaited_once_with("nb_123", "src_md", timeout=120.0)
+        sources_api.wait_until_registered.assert_awaited_once_with("nb_123", "src_md", timeout=30.0)
+        sources_api.wait_until_ready.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_add_file_with_title_forwards_wait_timeout(
         self, sources_api, mock_core, tmp_path
     ):
-        """The caller's wait_timeout must reach the forced-wait path so long
-        audio uploads can override the 120s default.
+        """The caller's wait_timeout must cap the narrow registration wait, but
+        the wait stays narrow (capped at 30s default) when wait=False — large
+        wait_timeout values don't extend the forced-wait beyond the cap.
         """
         test_file = tmp_path / "podcast.mp3"
         test_file.write_bytes(b"fake audio")
@@ -637,9 +643,10 @@ class TestAddFile:
             [[[["src_audio"], "Episode 1", [None, None, None, None, 10]]]],
         ]
 
-        sources_api.wait_until_ready = AsyncMock(
+        sources_api.wait_until_registered = AsyncMock(
             return_value=Source(id="src_audio", title="podcast.mp3", _type_code=10)
         )
+        sources_api.wait_until_ready = AsyncMock()
 
         mock_start_response = MagicMock()
         mock_start_response.headers = {"x-goog-upload-url": "https://upload.example.com"}
@@ -659,7 +666,11 @@ class TestAddFile:
                 wait_timeout=600.0,
             )
 
-        sources_api.wait_until_ready.assert_awaited_once_with("nb_123", "src_audio", timeout=600.0)
+        # min(600.0, 30.0) = 30.0 — narrow wait stays narrow.
+        sources_api.wait_until_registered.assert_awaited_once_with(
+            "nb_123", "src_audio", timeout=30.0
+        )
+        sources_api.wait_until_ready.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_add_file_no_title_no_wait_does_not_wait(self, sources_api, mock_core, tmp_path):
@@ -760,7 +771,7 @@ class TestAddFile:
             [[[["src_doc"]]]],
             rename_error,
         ]
-        sources_api.wait_until_ready = AsyncMock(
+        sources_api.wait_until_registered = AsyncMock(
             return_value=Source(id="src_doc", title="doc.txt", _type_code=4)
         )
 
@@ -813,7 +824,7 @@ class TestAddFile:
             [[[["src_audio"]]]],
             None,  # Triggers rename()'s Source(id=source_id, title=new_title) fallback
         ]
-        sources_api.wait_until_ready = AsyncMock(
+        sources_api.wait_until_registered = AsyncMock(
             return_value=Source(
                 id="src_audio",
                 title="podcast.mp3",
@@ -842,6 +853,52 @@ class TestAddFile:
         assert result._type_code == 10
         assert result.url == "https://example.com/audio"
         assert result.created_at == created_at
+
+    @pytest.mark.asyncio
+    async def test_add_file_title_uses_narrow_wait_not_full_wait(
+        self, sources_api, mock_core, tmp_path
+    ):
+        """With wait=False but a custom title, add_file must call the narrow
+        wait_until_registered helper, NOT the full wait_until_ready. This is
+        the regression guard for the HIGH gemini-code-assist comment on #396:
+        callers that pass wait=False should not be blocked on full processing
+        just because they wanted to set a title.
+        """
+        test_file = tmp_path / "long-audio.mp3"
+        test_file.write_bytes(b"fake audio")
+
+        mock_core.rpc_call.side_effect = [
+            [[[["src_audio"]]]],
+            [[[["src_audio"], "My Title", [None, None, None, None, 10]]]],
+        ]
+
+        sources_api.wait_until_registered = AsyncMock(
+            return_value=Source(id="src_audio", title="long-audio.mp3", _type_code=10)
+        )
+        sources_api.wait_until_ready = AsyncMock()
+
+        mock_start_response = MagicMock()
+        mock_start_response.headers = {"x-goog-upload-url": "https://upload.example.com"}
+        mock_upload_response = MagicMock()
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.__aenter__.return_value = mock_client
+            mock_client.__aexit__.return_value = None
+            mock_client.post.side_effect = [mock_start_response, mock_upload_response]
+            mock_client_cls.return_value = mock_client
+
+            await sources_api.add_file(
+                "nb_123",
+                str(test_file),
+                title="My Title",
+                wait=False,
+            )
+
+        # Narrow wait was used...
+        sources_api.wait_until_registered.assert_awaited_once()
+        # ...and the full wait was NOT.
+        sources_api.wait_until_ready.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_add_file_rename_failure_still_waits(self, sources_api, mock_core, tmp_path):

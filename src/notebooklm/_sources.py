@@ -274,6 +274,77 @@ class SourcesAPI:
             await asyncio.sleep(sleep_time)
             interval = min(interval * backoff_factor, max_interval)
 
+    async def wait_until_registered(
+        self,
+        notebook_id: str,
+        source_id: str,
+        timeout: float = 30.0,
+        initial_interval: float = 0.5,
+        max_interval: float = 5.0,
+        backoff_factor: float = 1.5,
+    ) -> Source:
+        """Wait for a source to be registered server-side (status >= PROCESSING).
+
+        Polls until the source is visible in the notebook listing and has a
+        non-ERROR status (or, for audio/unclassified sources, a transient
+        ERROR — see ``_NON_AUDIO_TERMINAL_TYPES``). Returns as soon as the
+        source exists, without waiting for full processing.
+
+        This is intended for narrow follow-up RPCs like UPDATE_SOURCE that
+        only require the source to be registered, not fully processed.
+        Registration is fast (seconds) even for long audio sources, so the
+        default timeout is much shorter than ``wait_until_ready``'s.
+
+        Args:
+            notebook_id: The notebook ID.
+            source_id: The source ID to wait for.
+            timeout: Maximum time to wait in seconds (default: 30).
+            initial_interval: Initial polling interval in seconds (default: 0.5).
+            max_interval: Maximum polling interval in seconds (default: 5).
+            backoff_factor: Multiplier for polling interval (default: 1.5).
+
+        Returns:
+            The registered Source object (status is PROCESSING, READY, or
+            PREPARING).
+
+        Raises:
+            SourceTimeoutError: If timeout is reached before source is registered.
+            SourceProcessingError: If source reports a terminal ERROR for a
+                non-transient source type.
+        """
+        start = monotonic()
+        interval = initial_interval
+        last_status: int | None = None
+
+        while True:
+            elapsed = monotonic() - start
+            if elapsed >= timeout:
+                raise SourceTimeoutError(source_id, timeout, last_status)
+
+            source = await self.get(notebook_id, source_id)
+
+            if source is not None:
+                last_status = source.status
+
+                if source.is_error:
+                    type_code = source._type_code
+                    if type_code in _NON_AUDIO_TERMINAL_TYPES:
+                        raise SourceProcessingError(source_id, source.status)
+                    # Transient ERROR for audio (type 10) or unclassified
+                    # (None / 0) — keep polling. See #391.
+                else:
+                    # Any non-error status (PROCESSING, READY, PREPARING)
+                    # means the source is registered server-side; we're done.
+                    return source
+
+            remaining = timeout - (monotonic() - start)
+            if remaining <= 0:
+                raise SourceTimeoutError(source_id, timeout, last_status)
+
+            sleep_time = min(interval, remaining)
+            await asyncio.sleep(sleep_time)
+            interval = min(interval * backoff_factor, max_interval)
+
     async def wait_for_sources(
         self,
         notebook_id: str,
@@ -450,18 +521,22 @@ class SourcesAPI:
                 the post-upload rename fails, the upload is preserved, a warning
                 is logged, and the returned source keeps the filename title.
 
-                Important: supplying a non-default title forces a brief wait
-                for the source to become registered *before* the rename is
-                issued, even when ``wait=False``. The UPDATE_SOURCE RPC
-                silently no-ops against an unregistered source, so blocking
-                here is the only way to honor the caller's intent. ``wait_timeout``
-                bounds this forced wait. See #388.
-            wait: If True, wait for source to be ready before returning. Note
-                that supplying ``title`` also forces a pre-rename wait
-                regardless of this flag — see the ``title`` parameter above.
-            wait_timeout: Maximum seconds to wait if ``wait=True``. Also bounds
-                the forced pre-rename wait triggered by a custom ``title``
-                (even when ``wait=False``). Default: 120.
+                Important: supplying a non-default title forces a brief
+                registration wait (~seconds) for the source to become visible
+                server-side *before* the rename is issued, even when
+                ``wait=False``. The UPDATE_SOURCE RPC silently no-ops against
+                an unregistered source, so blocking here is the only way to
+                honor the caller's intent. This narrow wait completes once
+                the source's status is non-ERROR (or transient-ERROR for
+                audio); it does NOT wait for full processing. See #388.
+            wait: If True, wait for source to be fully ready before returning.
+                Note that supplying ``title`` also forces a narrow pre-rename
+                registration wait regardless of this flag — see the ``title``
+                parameter above.
+            wait_timeout: Maximum seconds to wait if ``wait=True``. Also caps
+                the narrow registration wait triggered by a custom ``title``
+                (which is otherwise bounded by a 30s default to keep callers
+                that passed ``wait=False`` fast). Default: 120.
 
         Returns:
             The created Source object. If wait=False, status may be PROCESSING.
@@ -500,14 +575,27 @@ class SourcesAPI:
         # Step 3: Stream upload file content (memory-efficient)
         await self._upload_file_streaming(upload_url, file_path)
 
-        # Step 4: Wait for the source to be fully registered BEFORE renaming.
+        # Step 4: Ensure the source is registered server-side BEFORE renaming.
         # The UPDATE_SOURCE RPC silently no-ops against an unregistered source
         # (returns success-shaped data, but the title change never propagates),
-        # so a custom-title request must force a brief wait even when the
-        # caller passed wait=False. See #388.
-        should_wait = wait or (title is not None and title != filename)
-        if should_wait:
+        # so a custom-title request must force a brief registration wait even
+        # when the caller passed wait=False. See #388.
+        #
+        # When wait=True the caller asked for full processing; use
+        # wait_until_ready. When only a custom title was supplied, use the
+        # narrower wait_until_registered (default 30s) so wait=False callers
+        # don't pay the full processing latency just to get a rename through.
+        needs_title_rename = title is not None and title != filename
+        if wait:
             source = await self.wait_until_ready(notebook_id, source_id, timeout=wait_timeout)
+        elif needs_title_rename:
+            # Cap the narrow wait at min(wait_timeout, 30) — registration is
+            # fast (seconds), so honor a tighter user-supplied bound but cap
+            # the default at 30s rather than blocking on full processing.
+            registered_timeout = min(wait_timeout, 30.0)
+            source = await self.wait_until_registered(
+                notebook_id, source_id, timeout=registered_timeout
+            )
         else:
             # Note: _type_code is None because the actual type is determined
             # by the API after processing (PDF, TEXT, IMAGE, etc.). Callers

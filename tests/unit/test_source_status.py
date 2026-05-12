@@ -296,6 +296,108 @@ class TestWaitUntilReady:
         assert sleep_intervals[1] >= sleep_intervals[0] * 1.5
 
 
+class TestWaitUntilRegistered:
+    """Tests for wait_until_registered helper (narrow forced-rename wait)."""
+
+    @pytest.fixture
+    def sources_api(self):
+        core = MagicMock()
+        return SourcesAPI(core)
+
+    @pytest.mark.asyncio
+    async def test_wait_until_registered_returns_on_processing(self, sources_api):
+        """Status=PROCESSING (1) on first poll → return immediately."""
+        processing = Source(id="src_1", status=SourceStatus.PROCESSING, _type_code=8)
+
+        with patch.object(sources_api, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = processing
+
+            result = await sources_api.wait_until_registered("nb_1", "src_1", timeout=10.0)
+
+            assert result is processing
+            assert mock_get.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_wait_until_registered_returns_on_ready(self, sources_api):
+        """Status=READY (2) on first poll → return immediately."""
+        ready = Source(id="src_1", status=SourceStatus.READY, _type_code=8)
+
+        with patch.object(sources_api, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = ready
+
+            result = await sources_api.wait_until_registered("nb_1", "src_1", timeout=10.0)
+
+            assert result is ready
+            assert mock_get.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_wait_until_registered_polls_when_not_yet_visible(self, sources_api):
+        """Source not yet in list → keep polling; return once it appears with status=PROCESSING."""
+        processing = Source(id="src_1", status=SourceStatus.PROCESSING, _type_code=8)
+
+        call_count = 0
+
+        async def mock_get(notebook_id, source_id):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return None  # Not yet visible in listing
+            return processing
+
+        with patch.object(sources_api, "get", side_effect=mock_get):
+            result = await sources_api.wait_until_registered(
+                "nb_1", "src_1", timeout=10.0, initial_interval=0.01
+            )
+
+        assert result is processing
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_wait_until_registered_respects_audio_transient(self, sources_api):
+        """Audio (type 10) transient ERROR → keep polling; return on next non-error status."""
+        transient_error = Source(id="src_audio", status=SourceStatus.ERROR, _type_code=10)
+        processing = Source(id="src_audio", status=SourceStatus.PROCESSING, _type_code=10)
+
+        call_count = 0
+
+        async def mock_get(notebook_id, source_id):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return transient_error
+            return processing
+
+        with patch.object(sources_api, "get", side_effect=mock_get):
+            result = await sources_api.wait_until_registered(
+                "nb_1", "src_audio", timeout=10.0, initial_interval=0.01
+            )
+
+        assert result is processing
+        assert call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_wait_until_registered_raises_on_non_transient_error(self, sources_api):
+        """Status=ERROR for a non-transient type (e.g. PDF type_code=3) → raise immediately."""
+        pdf_error = Source(id="src_pdf", status=SourceStatus.ERROR, _type_code=3)
+
+        with patch.object(sources_api, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = pdf_error
+
+            with pytest.raises(SourceProcessingError):
+                await sources_api.wait_until_registered("nb_1", "src_pdf", timeout=10.0)
+
+    @pytest.mark.asyncio
+    async def test_wait_until_registered_times_out(self, sources_api):
+        """If the source never registers, wait_until_registered raises SourceTimeoutError."""
+        with patch.object(sources_api, "get", new_callable=AsyncMock) as mock_get:
+            mock_get.return_value = None
+
+            with pytest.raises(SourceTimeoutError):
+                await sources_api.wait_until_registered(
+                    "nb_1", "src_1", timeout=0.05, initial_interval=0.02
+                )
+
+
 class TestWaitForSources:
     """Tests for wait_for_sources method."""
 
