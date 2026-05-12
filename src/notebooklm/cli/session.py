@@ -849,9 +849,7 @@ def register_session_commands(cli):
         type=click.IntRange(min=0),
         default=None,
         hidden=True,
-        help=(
-            "Internal compatibility option. Prefer --account EMAIL."
-        ),
+        help=("Internal compatibility option. Prefer --account EMAIL."),
     )
     @click.option(
         "--all-accounts",
@@ -1494,10 +1492,7 @@ def register_session_commands(cli):
             json_output_response(
                 {
                     "browser": browser_name,
-                    "accounts": [
-                        {"email": a.email, "is_default": a.is_default}
-                        for a in accounts
-                    ],
+                    "accounts": [{"email": a.email, "is_default": a.is_default} for a in accounts],
                 }
             )
             return
