@@ -4,7 +4,6 @@ import asyncio
 import builtins
 import logging
 import re
-from dataclasses import replace
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -29,6 +28,13 @@ from .types import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Source type codes where status=ERROR is genuinely terminal.
+# Audio/media (10) and unclassified (None / 0) sources can briefly
+# report status=3 during transcription before settling at status=2.
+# See #391.
+_NON_AUDIO_TERMINAL_TYPES: frozenset[int] = frozenset({1, 2, 3, 4, 5, 8, 9, 11, 13, 14, 16, 17})
 
 
 class SourcesAPI:
@@ -244,7 +250,12 @@ class SourcesAPI:
                 return source
 
             if source.is_error:
-                raise SourceProcessingError(source_id, source.status)
+                type_code = source._type_code
+                if type_code in _NON_AUDIO_TERMINAL_TYPES:
+                    raise SourceProcessingError(source_id, source.status)
+                # For audio (type 10) or unclassified (None / 0) sources,
+                # status=3 can be a transient state during transcription —
+                # keep polling instead of treating it as terminal. See #391.
 
             # Don't sleep longer than remaining time
             remaining = timeout - (monotonic() - start)
@@ -470,38 +481,41 @@ class SourcesAPI:
         # Step 3: Stream upload file content (memory-efficient)
         await self._upload_file_streaming(upload_url, file_path)
 
-        # Return source with the ID we got from registration
-        # Note: _type_code is None because the actual type is determined
-        # by the API after processing (PDF, TEXT, IMAGE, etc.)
-        # Use wait=True or get() to retrieve the actual type after processing
-        source = Source(
-            id=source_id,
-            title=filename,
-            _type_code=None,  # Placeholder until processed
-        )
+        # Step 4: Wait for the source to be fully registered BEFORE renaming.
+        # The UPDATE_SOURCE RPC silently no-ops against an unregistered source
+        # (returns success-shaped data, but the title change never propagates),
+        # so a custom-title request must force a brief wait even when the
+        # caller passed wait=False. See #388.
+        should_wait = wait or (title is not None and title != filename)
+        if should_wait:
+            source = await self.wait_until_ready(notebook_id, source_id, timeout=wait_timeout)
+        else:
+            # Note: _type_code is None because the actual type is determined
+            # by the API after processing (PDF, TEXT, IMAGE, etc.). Callers
+            # can use wait=True or get() to retrieve the resolved type.
+            source = Source(
+                id=source_id,
+                title=filename,
+                _type_code=None,  # Placeholder until processed
+            )
 
-        # Step 4: Apply custom title if requested. The file-add RPC ignores any
-        # title hint, so a separate UPDATE_SOURCE call is the only way to honor
-        # the caller's intent.
+        # Step 5: Apply custom title now that the source is registered. The
+        # file-add RPC ignores any title hint, so a separate UPDATE_SOURCE
+        # call is the only way to honor the caller's intent.
         if title is not None and title != filename:
             try:
-                renamed = await self.rename(notebook_id, source_id, title)
-                # Use any metadata UPDATE_SOURCE returned, but force _type_code
-                # back to None because rename runs before file processing finishes.
-                source = replace(renamed, _type_code=None)
+                source = await self.rename(notebook_id, source_id, title)
             except (RPCError, NetworkError):
                 # Don't fail the whole upload if the rename fails — the file is
-                # already uploaded. Surface a warning so the caller can retry.
+                # already uploaded and registered. Surface a warning so the
+                # caller can retry. The registered source (from the forced wait
+                # above) is returned with its server-side title.
                 logger.warning(
-                    "Source %s uploaded but rename to %r failed; keeping default title %r",
+                    "Source %s uploaded but rename to %r failed",
                     source_id,
                     title,
-                    filename,
                     exc_info=True,
                 )
-
-        if wait:
-            return await self.wait_until_ready(notebook_id, source.id, timeout=wait_timeout)
 
         return source
 
