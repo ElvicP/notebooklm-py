@@ -76,7 +76,10 @@ class TestLoginUrlValidation:
 
         from notebooklm.cli.session import _connection_error_help
 
-        assert "notebooklm.cloud.google.com" in _connection_error_help()
+        blocked_host = (
+            _connection_error_help().split("Firewall or VPN blocking ", 1)[1].split("\n", 1)[0]
+        )
+        assert blocked_host == "notebooklm.cloud.google.com"
 
 
 class TestLoginCommand:
