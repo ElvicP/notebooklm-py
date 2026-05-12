@@ -1,5 +1,6 @@
 """Tests for cli.profile helpers."""
 
+import importlib
 import json
 from unittest.mock import patch
 
@@ -8,6 +9,8 @@ from click.testing import CliRunner
 
 from notebooklm.cli.profile import _PROFILE_NAME_RE, email_to_profile_name
 from notebooklm.notebooklm_cli import cli
+
+profile_module = importlib.import_module("notebooklm.cli.profile")
 
 
 class TestEmailToProfileName:
@@ -65,9 +68,9 @@ class TestProfileListAccountMetadata:
 
         runner = CliRunner()
         with (
-            patch("notebooklm.cli.profile.list_profiles", return_value=["bob"]),
-            patch("notebooklm.cli.profile.resolve_profile", return_value="bob"),
-            patch("notebooklm.cli.profile.get_storage_path", side_effect=fake_get_storage_path),
+            patch.object(profile_module, "list_profiles", return_value=["bob"]),
+            patch.object(profile_module, "resolve_profile", return_value="bob"),
+            patch.object(profile_module, "get_storage_path", side_effect=fake_get_storage_path),
         ):
             result = runner.invoke(cli, ["profile", "list", "--json"])
 

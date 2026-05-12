@@ -1894,33 +1894,6 @@ class TestLoginBrowserCookies:
                 "expires": 9999,
                 "http_only": False,
             },
-            {
-                "domain": ".google.com",
-                "name": "__Secure-1PSIDTS",
-                "value": "ts",
-                "path": "/",
-                "secure": True,
-                "expires": 9999,
-                "http_only": False,
-            },
-            {
-                "domain": ".google.com",
-                "name": "APISID",
-                "value": "apisid",
-                "path": "/",
-                "secure": True,
-                "expires": 9999,
-                "http_only": False,
-            },
-            {
-                "domain": ".google.com",
-                "name": "SAPISID",
-                "value": "sapisid",
-                "path": "/",
-                "secure": True,
-                "expires": 9999,
-                "http_only": False,
-            },
         ]
         mock_rookiepy = MagicMock()
         mock_rookiepy.load = MagicMock(return_value=mock_cookies)

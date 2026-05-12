@@ -1453,7 +1453,7 @@ class TestCASVariantAware:
             ],
         )
 
-        async def fake_fetch_with_refresh(cookie_jar, storage_path, profile):
+        async def fake_fetch_with_refresh(cookie_jar, storage_path, profile, *, authuser=0):
             # Drop the bare-host OSID from the jar and re-key it on the
             # leading-dot variant so the in-memory jar diverges from disk on
             # domain shape — the exact variance the variant-aware CAS lookup
