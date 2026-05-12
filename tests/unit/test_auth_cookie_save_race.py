@@ -31,6 +31,7 @@ from notebooklm.auth import (
     CookieSaveResult,
     CookieSnapshotKey,
     CookieSnapshotValue,
+    advance_cookie_snapshot_after_save,
     build_httpx_cookies_from_storage,
     save_cookies_to_storage,
     snapshot_cookie_jar,
@@ -480,8 +481,8 @@ class TestAttributeOnlyRefresh:
             "regressed it"
         )
 
-    def test_attribute_only_sibling_refresh_is_cas_protected(self, tmp_path):
-        """A same-value sibling expiry refresh must not be overwritten."""
+    def test_attribute_only_sibling_refresh_does_not_block_value_rotation(self, tmp_path):
+        """Same-value sibling metadata drift must not wedge value rotations."""
         storage = tmp_path / "storage_state.json"
         _write_storage(storage, [_stored_cookie("SID", "abc", expires=1_000_000)])
 
@@ -501,11 +502,14 @@ class TestAttributeOnlyRefresh:
             if cookie.name == "SID":
                 cookie.expires = 2_000_000
 
+        _set_cookie_value(jar, "SID", "rotated")
+
         result = save_cookies_to_storage(jar, storage, original_snapshot=snapshot)
 
         on_disk = next(c for c in _read_cookies(storage) if c["name"] == "SID")
-        assert result is False
-        assert on_disk["expires"] == 3_000_000
+        assert result is True
+        assert on_disk["value"] == "rotated"
+        assert on_disk["expires"] == 2_000_000
 
 
 class TestSnapshotRefreshedAfterSave:
@@ -607,8 +611,8 @@ class TestDeletionCASGuard:
             "the disk value has rotated since our snapshot (CAS guard)"
         )
 
-    def test_deletion_skipped_when_disk_attributes_differ(self, tmp_path):
-        """Same-value sibling attribute refresh must also block deletion."""
+    def test_deletion_applied_when_only_disk_attributes_differ(self, tmp_path):
+        """Value-only CAS allows deletion when only sibling metadata drifted."""
         storage = tmp_path / "storage_state.json"
         _write_storage(storage, [_stored_cookie("__Secure-1PSIDTS", "OLD", expires=1_000_000)])
 
@@ -627,10 +631,8 @@ class TestDeletionCASGuard:
 
         result = save_cookies_to_storage(jar, storage, original_snapshot=snapshot)
 
-        assert result is False
-        assert _cookie_value(storage, "__Secure-1PSIDTS", ".google.com") == "OLD"
-        on_disk = next(c for c in _read_cookies(storage) if c["name"] == "__Secure-1PSIDTS")
-        assert on_disk["expires"] == 2_000_000
+        assert result is True
+        assert _cookie_value(storage, "__Secure-1PSIDTS", ".google.com") is None
 
     def test_deletion_applied_when_disk_value_matches(self, tmp_path):
         """The CAS-guarded deletion still fires when no sibling write has
@@ -1372,6 +1374,39 @@ class TestCASVariantAware:
             "versa), the lookup must find the snapshot entry and apply CAS"
         )
 
+    def test_rejected_variant_preserves_original_baseline_variant(self):
+        """Baseline advancement must mirror the variant-aware CAS lookup."""
+        bare_key = CookieSnapshotKey("OSID", "accounts.google.com", "/")
+        dotted_key = CookieSnapshotKey("OSID", ".accounts.google.com", "/")
+        original_snapshot = {
+            bare_key: CookieSnapshotValue(
+                value="OLD",
+                expires=None,
+                secure=False,
+                http_only=True,
+            )
+        }
+        post_save_snapshot = {
+            dotted_key: CookieSnapshotValue(
+                value="OURS",
+                expires=None,
+                secure=False,
+                http_only=True,
+            )
+        }
+
+        advanced = advance_cookie_snapshot_after_save(
+            original_snapshot,
+            post_save_snapshot,
+            frozenset({dotted_key}),
+        )
+
+        assert advanced == original_snapshot, (
+            "A CAS rejection reported for a leading-dot variant must preserve "
+            "the original bare-host baseline, not drop the key and later treat "
+            "the cookie as newly acquired"
+        )
+
 
 class TestSaveCookiesSeesLatestBaselineUnderContention:
     """``ClientCore.save_cookies`` captures ``original_snapshot`` on the
@@ -1487,8 +1522,7 @@ class TestSaveCookiesSeesLatestBaselineUnderContention:
             "When two saves serialize through _save_lock, the second worker "
             "must observe the baseline advanced by the first. Observed "
             f"(jar, baseline) pairs for *PSIDTS: {captured_pairs}. If both baselines "
-            "are v0 "
-            "appears, the snapshot was captured on the loop thread before "
+            "are v0, the snapshot was captured on the loop thread before "
             "the lock — a stale-baseline race risking lost updates."
         )
 

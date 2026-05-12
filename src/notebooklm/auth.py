@@ -1276,18 +1276,6 @@ def _stored_cookie_snapshot_key(stored_cookie: dict[str, Any]) -> CookieSnapshot
     return CookieSnapshotKey(name, domain, path)
 
 
-def _stored_cookie_snapshot_value(stored_cookie: dict[str, Any]) -> CookieSnapshotValue:
-    """Build the persisted tuple that participates in snapshot CAS checks."""
-    expires = stored_cookie.get("expires")
-    expires_value = None if expires in (None, -1) else expires
-    return CookieSnapshotValue(
-        value=stored_cookie.get("value", ""),
-        expires=expires_value,
-        secure=bool(stored_cookie.get("secure", False)),
-        http_only=bool(stored_cookie.get("httpOnly", False)),
-    )
-
-
 def advance_cookie_snapshot_after_save(
     original_snapshot: CookieSnapshot | None,
     post_save_snapshot: CookieSnapshot,
@@ -1300,17 +1288,27 @@ def advance_cookie_snapshot_after_save(
     would lose the rejected delta; keeping the whole old baseline would replay
     already-written deltas and wedge future saves. This helper advances every
     key to ``post_save_snapshot`` except the CAS-rejected keys, which retain
-    their old baseline value or absence.
+    their old baseline value or absence. Rejected keys are matched through
+    leading-dot variants because the merge path can reject a normalized variant
+    of the key captured in ``original_snapshot``.
     """
     if original_snapshot is None:
         return None
 
     advanced = dict(post_save_snapshot)
     for key in cas_rejected_keys:
-        if key in original_snapshot:
-            advanced[key] = original_snapshot[key]
-        else:
-            advanced.pop(key, None)
+        original_key = next(
+            (
+                variant
+                for variant in _cookie_snapshot_key_variants(key)
+                if variant in original_snapshot
+            ),
+            None,
+        )
+        for variant in _cookie_snapshot_key_variants(key):
+            advanced.pop(variant, None)
+        if original_key is not None:
+            advanced[original_key] = original_snapshot[original_key]
     return advanced
 
 
@@ -1533,17 +1531,19 @@ def _merge_cookies_with_snapshot(
     - **Deltas (CAS-guarded for keys in the snapshot)**: cookies in the
       jar whose snapshot tuple (``value, expires, secure, http_only``)
       differs from ``original_snapshot`` are written to disk **only if**
-      the on-disk tuple still matches the snapshot tuple. If disk has
+      the on-disk value still matches the snapshot value. If disk has
       rotated since open time, a sibling process has written it; we
       preserve their write rather than clobber it with our local
       rotation. New cookies acquired during the session are written only
       when no same-key storage row exists yet; an existing row means a
       sibling acquired the same cookie first. Comparing the full snapshot
       tuple keeps attribute-only refreshes (same value, new ``expires``)
-      flowing to disk while still protecting sibling attribute-only writes.
+      flowing to disk, but CAS remains value-only because attribute-only
+      sibling drift is routine session metadata and should not wedge later
+      value rotations.
     - **Deletions (CAS-guarded)**: a key present in the snapshot but
       absent from the jar is dropped from disk **only if** the on-disk
-      tuple still matches the snapshot tuple — symmetric with the
+      value still matches the snapshot value — symmetric with the
       value-update CAS above. An ``Max-Age=0`` that evicted our
       locally-expired copy must not erase the sibling's freshly-issued
       replacement.
@@ -1633,8 +1633,8 @@ def _merge_cookies_with_snapshot(
             if matched_delta_key is None:  # pragma: no cover - loop invariant
                 raise RuntimeError("matched_delta_cookie set without matched_delta_key")
             # CAS-guard for value updates: if our snapshot had this key in any
-            # leading-dot variant and disk's current tuple differs from the
-            # snapshot tuple, a sibling process has rewritten the row between
+            # leading-dot variant and disk's current value differs from the
+            # snapshot value, a sibling process has rewritten the row between
             # our open and our save. Preserve their write rather than clobber.
             # Variant-aware lookup mirrors the delta match above: if the snapshot
             # was keyed on ``accounts.google.com`` but the matched delta key is
@@ -1648,10 +1648,10 @@ def _merge_cookies_with_snapshot(
                 ),
                 None,
             )
-            stored_snapshot_value = _stored_cookie_snapshot_value(stored_cookie)
-            if snapshot_entry is not None and stored_snapshot_value != snapshot_entry:
+            stored_value = stored_cookie.get("value")
+            if snapshot_entry is not None and stored_value != snapshot_entry.value:
                 logger.debug(
-                    "Skipped CAS-guarded value update of %s on %s: disk tuple "
+                    "Skipped CAS-guarded value update of %s on %s: disk value "
                     "differs from snapshot (sibling write preserved)",
                     matched_delta_key.name,
                     matched_delta_key.domain,
@@ -1660,16 +1660,7 @@ def _merge_cookies_with_snapshot(
                 matched_delta_keys.add(matched_delta_key)
                 new_cookies.append(stored_cookie)
                 continue
-            if snapshot_entry is None and stored_snapshot_value != CookieSnapshotValue(
-                value=matched_delta_cookie.value,
-                expires=(
-                    matched_delta_cookie.expires
-                    if matched_delta_cookie.expires is not None
-                    else None
-                ),
-                secure=bool(matched_delta_cookie.secure),
-                http_only=_cookie_is_http_only(matched_delta_cookie),
-            ):
+            if snapshot_entry is None and stored_value != matched_delta_cookie.value:
                 logger.debug(
                     "Skipped CAS-guarded value update of new cookie %s on %s: "
                     "disk row already exists (sibling write preserved)",
@@ -1702,15 +1693,15 @@ def _merge_cookies_with_snapshot(
             None,
         )
         if deletion_match is not None:
-            # CAS-guard: only drop the disk row if its persisted tuple still
-            # matches what we observed at snapshot time. A sibling process may have
+            # CAS-guard: only drop the disk row if its value still matches
+            # what we observed at snapshot time. A sibling process may have
             # rewritten this key between our open and our save; clobbering
             # their fresh value with our local eviction would resurrect the
             # exact stale-overwrite-fresh hazard the snapshot path exists
             # to close (just inverted — deletion-of-fresh instead of
             # value-write-of-stale).
-            snapshot_value = original_snapshot[deletion_match]
-            if _stored_cookie_snapshot_value(stored_cookie) == snapshot_value:
+            snapshot_value = original_snapshot[deletion_match].value
+            if stored_cookie.get("value") == snapshot_value:
                 updated_count += 1
                 continue  # drop the entry from disk
             cas_rejected_keys.add(deletion_match)

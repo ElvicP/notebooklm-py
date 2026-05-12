@@ -406,8 +406,8 @@ reading `auth.py` against the lifecycle of `NotebookLMClient` /
 > accepts an ``original_snapshot=...`` kwarg and, when provided, writes only
 > the deltas (cookies whose persisted tuple differs from the snapshot) plus deletions
 > (cookies present in the snapshot but absent from the jar) — both arms
-> CAS-guarded against the current on-disk tuple so a sibling-process write
-> on the same key is never clobbered. Cookies the in-process code never
+> CAS-guarded against the current on-disk cookie value so a sibling-process
+> value write on the same key is never clobbered. Cookies the in-process code never
 > touched are left to whatever a sibling process may have written, so the
 > stale-overwrite-fresh race below cannot fire. The
 > ``original_snapshot=None`` form remains as a public-API back-compat shim
@@ -451,8 +451,11 @@ genuinely needs the defenses we have. The peer-ecosystem state of the
 art is "last writer wins, hope for the best."
 
 Fix shipped in #361 (write-only-deltas + dirty-flag against open-time
-snapshot, with CAS guards against the live on-disk tuple on both write
-and deletion). The two alternatives considered and rejected:
+snapshot, with value-CAS guards against the live on-disk value on both
+write and deletion). Attribute-only refreshes are still detected and
+persisted as deltas, but attribute-only sibling drift does not block later
+value rotations; the stale-overwrite hazard is about cookie values. The
+two alternatives considered and rejected:
 
 - **Generation counter** stamped on every cookie write — would require
   every external writer to opt in to the new format and breaks
@@ -476,11 +479,12 @@ Mitigations available today (still useful even with the fix in place):
 > path-aware ``CookieSnapshotKey(name, domain, path)`` NamedTuple, and
 > ``build_httpx_cookies_from_storage`` loads all path variants into the live
 > jar. Two storage entries with the same ``(name, domain)`` but different paths
-> are distinct keys and survive a load → save round trip. The legacy
-> ``(name, domain)`` maps listed below (``_cookie_map_from_jar``,
+> are distinct keys and survive a load → save round trip in the live jar/save
+> path. The legacy ``(name, domain)`` maps listed below (``AuthTokens.cookies``,
+> ``AuthTokens.cookie_header``, ``_cookie_map_from_jar``,
 > ``extract_cookies_with_domains``, etc.) are intentionally still lossy because
-> their public return type cannot represent path; they are not on the
-> persistence-merge hot path that fired §3.4.1.
+> their public return type cannot represent path; they are compatibility
+> surfaces, not the persistence-merge hot path that fired §3.4.1.
 
 Multiple paths in `auth.py` key cookies by `(name, domain)` and drop
 `path`:
