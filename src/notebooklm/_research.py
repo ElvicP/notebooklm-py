@@ -160,7 +160,8 @@ class ResearchAPI:
         report_sources = [
             source
             for source in sources
-            if source.get("result_type") == 5 and source.get("report_markdown")
+            if source.get("result_type") == _RESEARCH_RESULT_TYPE_ALIASES["report"]
+            and source.get("report_markdown")
         ]
         report_source_ids = {id(source) for source in report_sources}
         matched_url_sources = [
