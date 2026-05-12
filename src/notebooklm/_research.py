@@ -22,9 +22,10 @@ _RESEARCH_RESULT_TYPE_ALIASES = {
     "report": 5,
 }
 
-_URL_PATTERN = re.compile(r"https?://[^\s<>\]\)\"']+")
-_MARKDOWN_IMAGE_PATTERN = re.compile(r"!\[[^\]]*\]\((https?://[^\s\)]+)")
-_MARKDOWN_LINK_PATTERN = re.compile(r"(?<!!)\[[^\]]+\]\((https?://[^\s\)]+)")
+_URL_RE = r"https?://(?:[^\s<>\]\(\)\"']+|\([^\s<>\]\(\)\"']*\))+"
+_URL_PATTERN = re.compile(_URL_RE)
+_MARKDOWN_IMAGE_PATTERN = re.compile(rf"!\[[^\]]*\]\(({_URL_RE})\)")
+_MARKDOWN_LINK_PATTERN = re.compile(rf"(?<!!)\[[^\]]+\]\(({_URL_RE})\)")
 _TRAILING_URL_PUNCTUATION = ".,;:!?"
 
 

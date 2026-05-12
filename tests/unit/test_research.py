@@ -83,9 +83,21 @@ class TestCitedSourceSelection:
 
         assert urls == {"https://example.com/a", "https://example.com/b"}
 
+    def test_extract_report_urls_keeps_balanced_parentheses(self):
+        urls = ResearchAPI.extract_report_urls(
+            "See [Function](https://en.wikipedia.org/wiki/Function_(mathematics)) "
+            "and https://example.com/Topic_(research)."
+        )
+
+        assert urls == {
+            "https://en.wikipedia.org/wiki/Function_(mathematics)",
+            "https://example.com/Topic_(research)",
+        }
+
     def test_extract_report_urls_ignores_markdown_images(self):
         urls = ResearchAPI.extract_report_urls(
-            "![chart](https://example.com/chart.png) and ![](https://example.com/empty.png) "
+            "![chart](https://example.com/chart_(v2).png) and "
+            "![](https://example.com/empty.png) "
             "cite [Article](https://example.com/a)"
         )
 
