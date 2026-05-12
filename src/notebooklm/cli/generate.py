@@ -14,11 +14,13 @@ Commands:
 """
 
 import asyncio
+import os
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 import click
 
+from .._env import get_default_language
 from ..client import NotebookLMClient
 from ..types import (
     AudioFormat,
@@ -135,11 +137,11 @@ async def generate_with_retry(
 
 
 def resolve_language(language: str | None) -> str:
-    """Resolve language from CLI flag, config, or default.
+    """Resolve language from CLI flag, NOTEBOOKLM_HL env, config, or default.
 
-    Priority: CLI flag > config file > "en" default.
-    Uses explicit None checks to avoid treating empty string as falsy.
-    Validates that the language code is supported.
+    Priority: ``--language`` flag > ``NOTEBOOKLM_HL`` env var > config file
+    > "en" default. Uses explicit None checks to avoid treating empty
+    string as falsy. Validates each candidate against the supported list.
     """
     if language is not None:
         if language not in SUPPORTED_LANGUAGES:
@@ -149,10 +151,21 @@ def resolve_language(language: str | None) -> str:
                 param_hint="'--language'",
             )
         return language
+    env_lang = os.environ.get("NOTEBOOKLM_HL", "")
+    if env_lang:
+        if env_lang not in SUPPORTED_LANGUAGES:
+            raise click.BadParameter(
+                f"Unknown language code: {env_lang}\n"
+                "Run 'notebooklm language list' to see supported codes.",
+                param_hint="'NOTEBOOKLM_HL'",
+            )
+        return env_lang
     config_lang = get_language()
     if config_lang is not None:
         return config_lang
-    return DEFAULT_LANGUAGE
+    # Falls back through get_default_language() so an explicitly-empty
+    # NOTEBOOKLM_HL still becomes the documented DEFAULT_LANGUAGE.
+    return get_default_language() or DEFAULT_LANGUAGE
 
 
 async def handle_generation_result(

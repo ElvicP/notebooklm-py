@@ -2440,3 +2440,91 @@ class TestWaitForCompletionDeprecated:
                 assert any(issubclass(warning.category, DeprecationWarning) for warning in w)
 
         assert result.status == "completed"
+
+
+def _decoded_request_body(request) -> str:
+    """Return the readable URL-decoded body of the latest CREATE_ARTIFACT POST.
+
+    The batchexecute payload double-encodes the inner params (the f.req
+    array is JSON, and one of its slots is itself a JSON-encoded string),
+    so we further normalise the embedded backslash-escaped quotes back to
+    plain ``"`` to make substring assertions stable.
+    """
+    from urllib.parse import unquote_plus
+
+    raw = unquote_plus(request.content.decode("utf-8"))
+    # Collapse the JSON-in-JSON escaping so that '"ja"' literally appears.
+    return raw.replace('\\"', '"')
+
+
+class TestGenerateUsesNotebookLMHL:
+    """The 9 language-aware generate_* methods must honor NOTEBOOKLM_HL when
+    the caller does not pass an explicit language argument, and the explicit
+    argument must still win when both are present.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "method_name",
+        ["generate_audio", "generate_video", "generate_report"],
+    )
+    async def test_generate_uses_env_language_when_none(
+        self,
+        method_name,
+        auth_tokens,
+        httpx_mock: HTTPXMock,
+        build_rpc_response,
+        monkeypatch,
+    ):
+        """NOTEBOOKLM_HL=ja, no language arg -> outgoing RPC carries 'ja'."""
+        monkeypatch.setenv("NOTEBOOKLM_HL", "ja")
+
+        create_response = build_rpc_response(
+            RPCMethod.CREATE_ARTIFACT,
+            [["artifact_123", "Title", "2024-01-05", None, 1]],
+        )
+        httpx_mock.add_response(content=create_response.encode())
+
+        async with NotebookLMClient(auth_tokens) as client:
+            method = getattr(client.artifacts, method_name)
+            await method(notebook_id="nb_123", source_ids=["src_001"])
+
+        body = _decoded_request_body(httpx_mock.get_requests()[-1])
+        # The language code is embedded as a quoted JSON string inside the
+        # nested params list. Assert presence/absence.
+        assert '"ja"' in body
+        assert '"en"' not in body
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "method_name",
+        ["generate_audio", "generate_video", "generate_report"],
+    )
+    async def test_generate_explicit_language_overrides_env(
+        self,
+        method_name,
+        auth_tokens,
+        httpx_mock: HTTPXMock,
+        build_rpc_response,
+        monkeypatch,
+    ):
+        """NOTEBOOKLM_HL=ja but explicit language='ko' -> outgoing carries 'ko'."""
+        monkeypatch.setenv("NOTEBOOKLM_HL", "ja")
+
+        create_response = build_rpc_response(
+            RPCMethod.CREATE_ARTIFACT,
+            [["artifact_123", "Title", "2024-01-05", None, 1]],
+        )
+        httpx_mock.add_response(content=create_response.encode())
+
+        async with NotebookLMClient(auth_tokens) as client:
+            method = getattr(client.artifacts, method_name)
+            await method(
+                notebook_id="nb_123",
+                source_ids=["src_001"],
+                language="ko",
+            )
+
+        body = _decoded_request_body(httpx_mock.get_requests()[-1])
+        assert '"ko"' in body
+        assert '"ja"' not in body
