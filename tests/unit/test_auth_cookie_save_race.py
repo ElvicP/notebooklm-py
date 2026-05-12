@@ -1433,7 +1433,6 @@ class TestSaveCookiesSeesLatestBaselineUnderContention:
         second worker observes the first's advance.
         """
         import asyncio
-        import threading
 
         from notebooklm import auth as auth_mod
         from notebooklm._core import ClientCore
@@ -1476,26 +1475,25 @@ class TestSaveCookiesSeesLatestBaselineUnderContention:
 
         monkeypatch.setattr("notebooklm._core.save_cookies_to_storage", capture_save)
 
-        # Explicit barrier: each coroutine records its submission under a
-        # threading.Lock, and the second arrival sets ``both_submitted``.
-        # Until then, both coroutines spin on ``asyncio.sleep(0)``, which
-        # yields control to the event loop so the OTHER coroutine can be
-        # scheduled and reach the same point. This makes the synchronization
-        # point explicit and does NOT rely on the asyncio scheduler being
-        # FIFO — once ``both_submitted`` is set, both coroutines proceed
-        # regardless of resume order. Free-threaded CPython, uvloop, or any
-        # future loop implementation must honour this barrier.
-        submitted_lock = threading.Lock()
+        # Explicit barrier: each coroutine records its submission and the
+        # second arrival sets ``both_submitted``; both then ``await`` the
+        # event before running ``func``. Because asyncio coroutines on one
+        # loop don't preempt, the ``append``/``set`` pair is already atomic
+        # from each coroutine's POV — no extra lock needed. The barrier is
+        # an ``asyncio.Event`` (suspending wait) rather than ``threading.Event``
+        # (busy-poll) so the test doesn't depend on the loop preferring to
+        # resume a particular task. Once ``both_submitted`` is set, both
+        # coroutines proceed regardless of resume order — free-threaded
+        # CPython, uvloop, or any future loop implementation must honour
+        # this barrier.
         submitted: list[tuple] = []
-        both_submitted = threading.Event()
+        both_submitted = asyncio.Event()
 
         async def fake_to_thread(func, /, *args, **kwargs):
-            with submitted_lock:
-                submitted.append((func, args, kwargs))
-                if len(submitted) == 2:
-                    both_submitted.set()
-            while not both_submitted.is_set():
-                await asyncio.sleep(0)
+            submitted.append((func, args, kwargs))
+            if len(submitted) == 2:
+                both_submitted.set()
+            await both_submitted.wait()
             return func(*args, **kwargs)
 
         monkeypatch.setattr("notebooklm._core.asyncio.to_thread", fake_to_thread)
