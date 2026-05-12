@@ -279,6 +279,100 @@ class TestRPCCallHTTPErrors:
                 await core.rpc_call(RPCMethod.LIST_NOTEBOOKS, [])
 
 
+class TestRPCCallNullPayloadDiagnostic:
+    """Tests for diagnostic logging when an allow_null RPC returns None.
+
+    These cover the diagnostic-only path added for #407: when a call with
+    ``allow_null=True`` decodes to ``None``, the client should emit a one-line
+    WARNING pointing reporters at ``NOTEBOOKLM_DEBUG_RPC`` and, when DEBUG
+    logging is enabled, a full request/response dump for capture.
+    """
+
+    @pytest.mark.asyncio
+    async def test_warning_emitted_when_allow_null_returns_none(self, auth_tokens, caplog):
+        async with NotebookLMClient(auth_tokens) as client:
+            core = client._core
+
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.text = "null_payload_body"
+            mock_response.headers = {"content-type": "application/json+protobuf"}
+
+            with (
+                patch.object(core._http_client, "post", return_value=mock_response),
+                patch("notebooklm._core.decode_response", return_value=None),
+                caplog.at_level("WARNING", logger="notebooklm._core"),
+            ):
+                result = await core.rpc_call(
+                    RPCMethod.ADD_SOURCE,
+                    [["param"]],
+                    source_path="/notebook/nbid",
+                    allow_null=True,
+                )
+
+            assert result is None
+            warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+            assert any("returned null payload" in r.getMessage() for r in warnings)
+            assert any("NOTEBOOKLM_DEBUG_RPC" in r.getMessage() for r in warnings)
+
+    @pytest.mark.asyncio
+    async def test_no_warning_when_allow_null_false(self, auth_tokens, caplog):
+        async with NotebookLMClient(auth_tokens) as client:
+            core = client._core
+
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.text = ""
+            mock_response.headers = {}
+
+            with (
+                patch.object(core._http_client, "post", return_value=mock_response),
+                patch("notebooklm._core.decode_response", return_value=None),
+                caplog.at_level("WARNING", logger="notebooklm._core"),
+            ):
+                await core.rpc_call(RPCMethod.LIST_NOTEBOOKS, [], allow_null=False)
+
+            assert not any("returned null payload" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_debug_diagnostic_dumps_request_and_response(self, auth_tokens, caplog):
+        async with NotebookLMClient(auth_tokens) as client:
+            core = client._core
+
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.text = "raw_server_body_here"
+            mock_response.headers = {
+                "content-type": "application/json+protobuf",
+                "set-cookie": "SECRET=should_not_appear",
+            }
+
+            with (
+                patch.object(core._http_client, "post", return_value=mock_response),
+                patch("notebooklm._core.decode_response", return_value=None),
+                caplog.at_level("DEBUG", logger="notebooklm._core"),
+            ):
+                await core.rpc_call(
+                    RPCMethod.ADD_SOURCE_FILE,
+                    [["fake-params"]],
+                    source_path="/notebook/abc",
+                    allow_null=True,
+                )
+
+            dump_lines = [
+                r.getMessage()
+                for r in caplog.records
+                if "null-payload diagnostic" in r.getMessage()
+            ]
+            assert dump_lines, "expected a DEBUG diagnostic line"
+            dump = dump_lines[0]
+            assert "ADD_SOURCE_FILE" in dump
+            assert "/notebook/abc" in dump
+            assert "raw_server_body_here" in dump
+            assert "application/json+protobuf" in dump
+            assert "SECRET" not in dump  # set-cookie must be filtered out
+
+
 class TestRPCCallAuthRetry:
     """Tests for auth retry path after decode_response raises RPCError."""
 

@@ -118,6 +118,62 @@ def is_auth_error(error: Exception) -> bool:
     return False
 
 
+_NULL_RESPONSE_PARAMS_PREVIEW = 512
+_NULL_RESPONSE_BODY_PREVIEW = 4096
+_NULL_RESPONSE_SAFE_HEADERS = frozenset(
+    {
+        "content-type",
+        "content-length",
+        "date",
+        "server",
+        "x-content-type-options",
+        "alt-svc",
+    }
+)
+
+
+def _log_null_response_diagnostic(
+    method: RPCMethod,
+    source_path: str,
+    rpc_request: list[Any],
+    response: httpx.Response,
+) -> None:
+    """Emit a DEBUG-level dump for null/empty RPC responses.
+
+    Triggered when ``allow_null=True`` caused the decoder to return ``None``.
+    Captures both request params and response status/headers/body so reporters
+    of issues like #407 can attach a single log line covering both sides.
+    Captured params and body may include user content — redact before sharing.
+    """
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    inner = rpc_request[0][0] if rpc_request and rpc_request[0] else None
+    params_json = (
+        inner[1]
+        if isinstance(inner, list) and len(inner) >= 2 and isinstance(inner[1], str)
+        else ""
+    )
+    params_preview = params_json[:_NULL_RESPONSE_PARAMS_PREVIEW]
+    body_preview = response.text[:_NULL_RESPONSE_BODY_PREVIEW]
+    safe_headers = {
+        k: v for k, v in response.headers.items() if k.lower() in _NULL_RESPONSE_SAFE_HEADERS
+    }
+    logger.debug(
+        "RPC %s null-payload diagnostic: id=%s path=%s "
+        "request_params=%r%s response_status=%d response_headers=%s "
+        "response_body=%r%s",
+        method.name,
+        method.value,
+        source_path,
+        params_preview,
+        " (truncated)" if len(params_json) > len(params_preview) else "",
+        response.status_code,
+        safe_headers,
+        body_preview,
+        " (truncated)" if len(response.text) > len(body_preview) else "",
+    )
+
+
 class ClientCore:
     """Core client infrastructure for HTTP and RPC operations.
 
@@ -611,6 +667,17 @@ class ClientCore:
             result = decode_response(response.text, method.value, allow_null=allow_null)
             elapsed = time.perf_counter() - start
             logger.debug("RPC %s completed in %.3fs", method.name, elapsed)
+            if result is None and allow_null:
+                logger.warning(
+                    "RPC %s returned null payload (HTTP %d, path=%s). "
+                    "Set NOTEBOOKLM_DEBUG_RPC=1 and re-run to capture the raw "
+                    "request/response, then attach the DEBUG log to "
+                    "https://github.com/teng-lin/notebooklm-py/issues",
+                    method.name,
+                    response.status_code,
+                    source_path,
+                )
+                _log_null_response_diagnostic(method, source_path, rpc_request, response)
             return result
         except RPCError as e:
             elapsed = time.perf_counter() - start
