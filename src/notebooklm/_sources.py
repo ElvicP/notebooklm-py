@@ -31,18 +31,13 @@ from .types import (
 logger = logging.getLogger(__name__)
 
 
-# Source type codes where status=ERROR is genuinely terminal.
-# Audio/media (code 10) and unclassified (None / 0) sources can briefly
-# report status=3 during transcription before settling at status=2,
-# so they must keep polling instead of raising. See #391.
-#
-# This is intentionally a hand-maintained whitelist (not derived from
-# _SOURCE_TYPE_CODE_MAP minus {10}): if Google adds a new audio-adjacent
-# code with the same transient-status=3 behavior, a derived set would
-# silently regress the fix. Keep the codes here in sync with
-# _SOURCE_TYPE_CODE_MAP in types.py — adding a code here opts it in to
-# strict terminal-error semantics.
-_NON_AUDIO_TERMINAL_TYPES: frozenset[int] = frozenset({1, 2, 3, 4, 5, 8, 9, 11, 13, 14, 16, 17})
+# Source type codes where status=3 (ERROR) is transient rather than
+# terminal. Audio/media (10) and unclassified (None / 0) sources can
+# briefly report status=3 during transcription/classification before
+# settling at status=2. All other types (PDFs, web, YouTube, etc.) treat
+# status=3 as a terminal failure. New unknown types default to terminal
+# — fail fast rather than silently looping until timeout. See #391.
+_TRANSIENT_ERROR_TYPES: tuple[int | None, ...] = (10, 0, None)
 
 
 class SourcesAPI:
@@ -258,8 +253,7 @@ class SourcesAPI:
                 return source
 
             if source.is_error:
-                type_code = source._type_code
-                if type_code in _NON_AUDIO_TERMINAL_TYPES:
+                if source._type_code not in _TRANSIENT_ERROR_TYPES:
                     raise SourceProcessingError(source_id, source.status)
                 # For audio (type 10) or unclassified (None / 0) sources,
                 # status=3 can be a transient state during transcription —
@@ -287,7 +281,7 @@ class SourcesAPI:
 
         Polls until the source is visible in the notebook listing and has a
         non-ERROR status (or, for audio/unclassified sources, a transient
-        ERROR — see ``_NON_AUDIO_TERMINAL_TYPES``). Returns as soon as the
+        ERROR — see ``_TRANSIENT_ERROR_TYPES``). Returns as soon as the
         source exists, without waiting for full processing.
 
         This is intended for narrow follow-up RPCs like UPDATE_SOURCE that
@@ -327,8 +321,7 @@ class SourcesAPI:
                 last_status = source.status
 
                 if source.is_error:
-                    type_code = source._type_code
-                    if type_code in _NON_AUDIO_TERMINAL_TYPES:
+                    if source._type_code not in _TRANSIENT_ERROR_TYPES:
                         raise SourceProcessingError(source_id, source.status)
                     # Transient ERROR for audio (type 10) or unclassified
                     # (None / 0) — keep polling. See #391.
