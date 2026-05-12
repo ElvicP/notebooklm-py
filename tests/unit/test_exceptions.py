@@ -271,6 +271,15 @@ class TestDomainExceptions:
         assert "Known NotebookLM limits include: 100, 500" in str(e)
         assert e.to_error_response_extra()["known_limits"] == [100, 500]
 
+    def test_notebook_limit_error_tolerates_invalid_base_url_env(self, monkeypatch):
+        """NotebookLimitError should preserve quota context even if env config is invalid."""
+        monkeypatch.setenv("NOTEBOOKLM_BASE_URL", "https://evil.example.com")
+
+        e = NotebookLimitError(499, limit=500)
+
+        assert "499/500" in str(e)
+        assert "https://notebooklm.google.com" in str(e)
+
     def test_source_not_found_has_source_id(self):
         """SourceNotFoundError stores source_id."""
         e = SourceNotFoundError("src_456")

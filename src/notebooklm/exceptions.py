@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._env import get_base_url
+from ._env import DEFAULT_BASE_URL, get_base_url
 
 __all__ = [
     # Base
@@ -347,10 +347,14 @@ class NotebookLimitError(NotebookError):
             count_text = f"{current_count}/{limit}"
 
         known_text = ", ".join(str(value) for value in known_limits)
+        try:
+            base_url = get_base_url()
+        except ValueError:
+            base_url = DEFAULT_BASE_URL
         message = (
             "Cannot create notebook: account appears to be at or very near the "
             f"NotebookLM notebook limit ({count_text} owned notebooks reported). "
-            f"Delete old notebooks at {get_base_url()} and try again."
+            f"Delete old notebooks at {base_url} and try again."
         )
         if known_limits:
             message += f" Known NotebookLM limits include: {known_text}."
