@@ -139,7 +139,7 @@ All generate commands support:
 - `--json` for machine-readable output (returns `task_id` and `status`)
 - `--retry N` to automatically retry on rate limits with exponential backoff
 
-Language-aware generate commands (`audio`, `video`, `cinematic-video`, `report`, `study-guide`, `infographic`, `slide-deck`, `data-table`, `mind-map`) also support:
+Language-aware generate commands (`audio`, `video`, `cinematic-video`, `report`, `infographic`, `slide-deck`, `data-table`, `mind-map`) also support:
 - `--language` to override output language (precedence: `--language` > `NOTEBOOKLM_HL` env > config > `'en'`)
 
 `quiz`, `flashcards`, and `revise-slide` do not accept `--language`.
