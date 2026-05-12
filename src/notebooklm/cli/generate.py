@@ -491,6 +491,7 @@ def generate_video(
     Example:
       notebooklm generate video "a funny explainer for kids age 5"
       notebooklm generate video "professional presentation" --style classic
+      notebooklm generate video --style custom --style-prompt "hand-drawn diagrams"
       notebooklm generate video --format cinematic "documentary overview"
       notebooklm generate video -s src_001 "from specific source"
     """
