@@ -78,19 +78,24 @@ BROWSER_CLOSED_HELP = (
     "  1. Run: notebooklm login --fresh\n"
     "  2. Or run: notebooklm auth logout && notebooklm login"
 )
-CONNECTION_ERROR_HELP = (
-    "[red]Failed to connect to NotebookLM after multiple retries.[/red]\n"
-    "This may be caused by:\n"
-    "  • Network connectivity issues\n"
-    "  • Firewall or VPN blocking notebooklm.google.com\n"
-    "  • Corporate proxy interfering with the connection\n"
-    "  • Google rate limiting (too many login attempts)\n\n"
-    "Try:\n"
-    "  1. Check your internet connection\n"
-    "  2. Disable VPN/proxy temporarily\n"
-    "  3. Wait a few minutes before retrying\n"
-    "  4. Check if notebooklm.google.com is accessible in your browser"
-)
+
+
+def _connection_error_help() -> str:
+    """Return login connection troubleshooting text for the configured host."""
+    base_host = get_base_host()
+    return (
+        "[red]Failed to connect to NotebookLM after multiple retries.[/red]\n"
+        "This may be caused by:\n"
+        "  • Network connectivity issues\n"
+        f"  • Firewall or VPN blocking {base_host}\n"
+        "  • Corporate proxy interfering with the connection\n"
+        "  • Google rate limiting (too many login attempts)\n\n"
+        "Try:\n"
+        "  1. Check your internet connection\n"
+        "  2. Disable VPN/proxy temporarily\n"
+        "  3. Wait a few minutes before retrying\n"
+        f"  4. Check if {base_host} is accessible in your browser"
+    )
 
 
 def _is_navigation_interrupted_error(error: str | Exception) -> bool:
@@ -599,7 +604,7 @@ def register_session_commands(cli):
                                 f"Failed to connect to NotebookLM after {LOGIN_MAX_RETRIES} attempts. "
                                 f"Last error: {error_str}"
                             )
-                            console.print(CONNECTION_ERROR_HELP)
+                            console.print(_connection_error_help())
                             raise SystemExit(1) from exc
                         else:
                             # Non-retryable error - re-raise immediately

@@ -31,6 +31,7 @@ def get_base_url() -> str:
     host = parsed.hostname
     if (
         parsed.scheme != "https"
+        or host is None
         or host not in _ALLOWED_BASE_HOSTS
         or port is not None
         or parsed.username is not None

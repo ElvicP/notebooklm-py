@@ -3,6 +3,7 @@
 import pytest
 
 import notebooklm
+from notebooklm._env import DEFAULT_BASE_URL
 from notebooklm.exceptions import (
     ArtifactDownloadError,
     ArtifactError,
@@ -278,7 +279,15 @@ class TestDomainExceptions:
         e = NotebookLimitError(499, limit=500)
 
         assert "499/500" in str(e)
-        assert "https://notebooklm.google.com" in str(e)
+        base_url = (
+            str(e)
+            .split("Delete old notebooks at ", 1)[1]
+            .split(
+                " and try again.",
+                1,
+            )[0]
+        )
+        assert base_url == DEFAULT_BASE_URL
 
     def test_source_not_found_has_source_id(self):
         """SourceNotFoundError stores source_id."""

@@ -71,6 +71,13 @@ class TestLoginUrlValidation:
         assert _url_matches_base_host("https://notebooklm.cloud.google.com/notebook/abc")
         assert not _url_matches_base_host("https://notebooklm.google.com/notebook/abc")
 
+    def test_connection_error_help_uses_enterprise_base_host(self, monkeypatch):
+        monkeypatch.setenv("NOTEBOOKLM_BASE_URL", "https://notebooklm.cloud.google.com")
+
+        from notebooklm.cli.session import _connection_error_help
+
+        assert "notebooklm.cloud.google.com" in _connection_error_help()
+
 
 class TestLoginCommand:
     def test_login_playwright_import_error_handling(self, runner):
