@@ -1408,8 +1408,10 @@ class TestCASVariantAware:
         )
 
     @pytest.mark.asyncio
-    async def test_variant_aware_cas_rejection_then_recovery_e2e(self, tmp_path, monkeypatch):
-        """End-to-end composition of variant-aware CAS + variant-aware baseline.
+    async def test_variant_aware_cas_rejection_then_recovery_through_real_plumbing(
+        self, tmp_path, monkeypatch
+    ):
+        """Composition of variant-aware CAS + variant-aware baseline through real plumbing.
 
         Wires the full ``AuthTokens.from_storage`` -> ``ClientCore`` ->
         ``save_cookies`` plumbing rather than driving the helpers directly,
