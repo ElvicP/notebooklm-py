@@ -9,6 +9,7 @@ from notebooklm.notebooklm_cli import cli
 from .conftest import create_mock_client, patch_client_for_module
 
 research_module = importlib.import_module("notebooklm.cli.research")
+helpers_module = importlib.import_module("notebooklm.cli.helpers")
 
 # =============================================================================
 # RESEARCH STATUS TESTS
@@ -178,7 +179,7 @@ class TestResearchWait:
         with (
             patch_client_for_module("research") as mock_client_cls,
             patch.object(
-                research_module, "import_with_retry", new_callable=AsyncMock
+                helpers_module, "import_with_retry", new_callable=AsyncMock
             ) as mock_import,
         ):
             mock_client = create_mock_client()
@@ -209,7 +210,7 @@ class TestResearchWait:
         with (
             patch_client_for_module("research") as mock_client_cls,
             patch.object(
-                research_module, "import_with_retry", new_callable=AsyncMock
+                helpers_module, "import_with_retry", new_callable=AsyncMock
             ) as mock_import,
         ):
             mock_client = create_mock_client()
@@ -275,7 +276,7 @@ class TestResearchWait:
         with (
             patch_client_for_module("research") as mock_client_cls,
             patch.object(
-                research_module, "import_with_retry", new_callable=AsyncMock
+                helpers_module, "import_with_retry", new_callable=AsyncMock
             ) as mock_import,
         ):
             mock_client = create_mock_client()
@@ -312,7 +313,7 @@ class TestResearchWait:
         with (
             patch_client_for_module("research") as mock_client_cls,
             patch.object(
-                research_module, "import_with_retry", new_callable=AsyncMock
+                helpers_module, "import_with_retry", new_callable=AsyncMock
             ) as mock_import,
         ):
             mock_client = create_mock_client()

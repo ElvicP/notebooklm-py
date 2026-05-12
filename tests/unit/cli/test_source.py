@@ -20,6 +20,7 @@ from notebooklm.types import (
 from .conftest import create_mock_client, patch_client_for_module
 
 source_module = importlib.import_module("notebooklm.cli.source")
+helpers_module = importlib.import_module("notebooklm.cli.helpers")
 
 
 @pytest.fixture
@@ -727,7 +728,9 @@ class TestSourceAddResearch:
     def test_add_research_with_import_all_uses_retry_helper(self, runner, mock_auth):
         with (
             patch_client_for_module("source") as mock_client_cls,
-            patch.object(source_module, "import_with_retry", new_callable=AsyncMock) as mock_import,
+            patch.object(
+                helpers_module, "import_with_retry", new_callable=AsyncMock
+            ) as mock_import,
         ):
             mock_client = create_mock_client()
             mock_client.research.start = AsyncMock(return_value={"task_id": "task_123"})
@@ -773,7 +776,9 @@ class TestSourceAddResearch:
     def test_add_research_with_import_all_cited_only(self, runner, mock_auth):
         with (
             patch_client_for_module("source") as mock_client_cls,
-            patch.object(source_module, "import_with_retry", new_callable=AsyncMock) as mock_import,
+            patch.object(
+                helpers_module, "import_with_retry", new_callable=AsyncMock
+            ) as mock_import,
         ):
             mock_client = create_mock_client()
             mock_client.research.start = AsyncMock(return_value={"task_id": "task_123"})
@@ -832,7 +837,9 @@ class TestSourceAddResearch:
     def test_add_research_timeout_flag_threaded_to_import_with_retry(self, runner, mock_auth):
         with (
             patch_client_for_module("source") as mock_client_cls,
-            patch.object(source_module, "import_with_retry", new_callable=AsyncMock) as mock_import,
+            patch.object(
+                helpers_module, "import_with_retry", new_callable=AsyncMock
+            ) as mock_import,
         ):
             mock_client = create_mock_client()
             mock_client.research.start = AsyncMock(return_value={"task_id": "task_t1"})

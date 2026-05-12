@@ -22,7 +22,6 @@ from pathlib import Path
 import click
 from rich.table import Table
 
-from .._research import ResearchAPI
 from .._url_utils import is_youtube_url
 from ..client import NotebookLMClient
 from ..types import source_status_to_str
@@ -31,7 +30,7 @@ from .helpers import (
     display_report,
     display_research_sources,
     get_source_type_display,
-    import_with_retry,
+    import_research_sources,
     json_output_response,
     require_notebook,
     resolve_notebook_id,
@@ -643,33 +642,16 @@ def source_add_research(
                 display_report(status.get("report", ""), json_hint=False)
 
                 if import_all and sources and task_id:
-                    sources_to_import = sources
-                    cited_selection = None
-                    if cited_only:
-                        cited_selection = ResearchAPI.select_cited_sources(
-                            sources,
-                            status.get("report", ""),
-                        )
-                        sources_to_import = cited_selection.sources
-                    if cited_selection is not None:
-                        if cited_selection.used_fallback:
-                            console.print(
-                                "[yellow]Could not resolve cited sources; "
-                                "importing all sources.[/yellow]"
-                            )
-                        else:
-                            console.print(
-                                f"[dim]Importing {cited_selection.matched_url_source_count} "
-                                "cited source(s)[/dim]"
-                            )
-                    imported = await import_with_retry(
+                    import_result = await import_research_sources(
                         client,
                         nb_id_resolved,
                         task_id,
-                        sources_to_import,
+                        sources,
+                        report=status.get("report", ""),
+                        cited_only=cited_only,
                         max_elapsed=timeout,
                     )
-                    console.print(f"[green]Imported {len(imported)} sources[/green]")
+                    console.print(f"[green]Imported {len(import_result.imported)} sources[/green]")
             else:
                 console.print(f"[yellow]Status: {status.get('status', 'unknown')}[/yellow]")
 
