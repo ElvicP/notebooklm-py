@@ -282,7 +282,7 @@ By default, opens a Chromium browser with a persistent profile. Log in to your G
 **Options:**
 - `--storage PATH` - Where to save storage_state.json (default: `$NOTEBOOKLM_HOME/profiles/<profile>/storage_state.json`)
 - `--browser [chromium|msedge]` - Browser to use for login (default: `chromium`). Use `msedge` for Microsoft Edge.
-- `--browser-cookies <auto|chrome|edge|firefox|safari|brave|arc|...>` - Read cookies from an installed browser instead of launching Playwright. Pass an explicit browser name, or `auto` to let rookiepy auto-detect. Requires `pip install "notebooklm-py[cookies]"`.
+- `--browser-cookies <auto|chrome|edge|firefox|safari|brave|arc|...>` - Read cookies from an installed browser instead of launching Playwright. Pass an explicit browser name, or `auto` to let rookiepy auto-detect. For Firefox Multi-Account Containers, use `firefox::<container-name>` to extract from a single container, or `firefox::none` for the no-container default — unscoped `firefox` merges every container's cookies (and emits a warning when that's happening). Requires `pip install "notebooklm-py[cookies]"`.
 - `--account EMAIL` - Pick a signed-in Google account by email when several are present in the browser. Only valid with `--browser-cookies`.
 - `--all-accounts` - Extract every Google account signed in to the browser into separate profiles named from each account email. Only valid with `--browser-cookies`.
 - `--profile-name NAME` - Name the profile created by a targeted `--account` import. Defaults to the account email's local part. Only valid with `--browser-cookies`.
@@ -301,6 +301,10 @@ notebooklm login --browser-cookies chrome
 
 # Auto-detect any supported browser via rookiepy
 notebooklm login --browser-cookies auto
+
+# Firefox Multi-Account Containers: target one container
+notebooklm login --browser-cookies 'firefox::Work'
+notebooklm login --browser-cookies 'firefox::none'  # no-container default
 
 # Populate a named profile via cookie import
 notebooklm --profile work login --browser-cookies chrome
