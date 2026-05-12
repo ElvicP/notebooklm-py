@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -273,6 +274,18 @@ class TestJsonErrorResponse:
         assert "🚫" in captured.out
         assert "中文" in captured.out
         assert "\\u" not in captured.out
+
+    def test_json_error_response_serializes_path_in_extra(self, capsys):
+        """Non-primitive values like pathlib.Path must not crash the error reporter."""
+        with pytest.raises(SystemExit):
+            json_error_response("ERROR", "Bad path", extra={"path": Path("/tmp/x")})
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["error"] is True
+        assert data["code"] == "ERROR"
+        assert data["message"] == "Bad path"
+        assert "/tmp/x" in data["path"]
 
 
 # =============================================================================

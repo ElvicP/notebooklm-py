@@ -804,7 +804,7 @@ def json_error_response(code: str, message: str, extra: dict | None = None) -> N
     response = {"error": True, "code": code, "message": message}
     if extra:
         response.update(extra)
-    click.echo(json.dumps(response, indent=2, ensure_ascii=False))
+    click.echo(json.dumps(response, indent=2, default=str, ensure_ascii=False))
     raise SystemExit(1)
 
 
