@@ -127,7 +127,7 @@ def list_cmd(json_output):
         auth_status = (
             "[green]authenticated[/green]" if p["authenticated"] else "[dim]not authenticated[/dim]"
         )
-        account = p["account"] or "-"
+        account = str(p["account"] or "-")
         if p["authuser"] is not None:
             account = f"{account} (authuser={p['authuser']})"
         table.add_row(marker, str(p["name"]), account, auth_status)
