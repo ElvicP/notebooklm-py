@@ -429,7 +429,7 @@ def artifact_suggestions(ctx, notebook_id, json_output, client_auth):
                     {"title": s.title, "description": s.description, "prompt": s.prompt}
                     for s in suggestions
                 ]
-                console.print(json.dumps(data, indent=2))
+                console.print(json.dumps(data, indent=2, ensure_ascii=False))
                 return
 
             table = Table(title="Suggested Reports")

@@ -141,6 +141,19 @@ class TestHandleErrorsJsonOutput:
         assert data["code"] == "UNEXPECTED_ERROR"
         assert "Something broke" in data["message"]
 
+    def test_error_handler_json_output_preserves_unicode(self, capsys):
+        """CJK / emoji in error messages should be emitted as real UTF-8."""
+        with pytest.raises(SystemExit), handle_errors(json_output=True):
+            raise ValidationError("笔记本未找到 🔍")
+
+        output = capsys.readouterr().out
+        data = json.loads(output)
+        assert "笔记本未找到 🔍" in data["message"]
+        # Raw output must contain real CJK/emoji, not escaped sequences.
+        assert "笔记本未找到" in output
+        assert "🔍" in output
+        assert "\\u" not in output
+
 
 class TestHandleErrorsTextOutput:
     """Test text error output with hints."""

@@ -660,7 +660,7 @@ def _run_artifact_download(ctx, artifact_type: str, **kwargs) -> None:
         )
 
         if json_output:
-            console.print(json.dumps(result, indent=2))
+            console.print(json.dumps(result, indent=2, ensure_ascii=False))
             return
 
         _display_download_result(result, artifact_type)

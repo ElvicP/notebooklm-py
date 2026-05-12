@@ -232,6 +232,20 @@ class TestJsonOutputResponse:
         assert data["nested"]["key"] == "value"
         assert data["list"] == [1, 2, 3]
 
+    def test_json_output_response_preserves_unicode(self, capsys):
+        """CJK / emoji characters should be emitted as real UTF-8, not \\uXXXX."""
+        json_output_response({"title": "中文笔记本", "emoji": "🚀"})
+
+        captured = capsys.readouterr()
+        # Round-trip must still parse.
+        data = json.loads(captured.out)
+        assert data["title"] == "中文笔记本"
+        assert data["emoji"] == "🚀"
+        # Raw output must contain real CJK chars, not escaped sequences.
+        assert "中文笔记本" in captured.out
+        assert "🚀" in captured.out
+        assert "\\u" not in captured.out
+
 
 class TestJsonErrorResponse:
     def test_outputs_error_json_and_exits(self, capsys):
@@ -245,6 +259,20 @@ class TestJsonErrorResponse:
         assert data["error"] is True
         assert data["code"] == "TEST_ERROR"
         assert data["message"] == "Test error message"
+
+    def test_json_error_response_preserves_unicode(self, capsys):
+        """Error messages with CJK / emoji should be emitted as real UTF-8."""
+        with pytest.raises(SystemExit):
+            json_error_response("ERROR", "笔记本不存在 🚫", extra={"title": "中文"})
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["message"] == "笔记本不存在 🚫"
+        assert data["title"] == "中文"
+        assert "笔记本不存在" in captured.out
+        assert "🚫" in captured.out
+        assert "中文" in captured.out
+        assert "\\u" not in captured.out
 
 
 # =============================================================================
