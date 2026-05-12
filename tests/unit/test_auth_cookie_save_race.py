@@ -1517,10 +1517,13 @@ class TestCASVariantAware:
                 "divergence through the leading-dot variant"
             )
             assert core._loaded_cookie_snapshot is not None
-            assert core._loaded_cookie_snapshot.get(bare_key) is not None, (
-                "After the second save the variant-aware baseline preservation "
-                "must keep the bare-host entry so subsequent rotations can "
-                "still be CAS-checked against the original snapshot variant"
+            assert core._loaded_cookie_snapshot[bare_key].value == "OLD", (
+                "After the second save (which also CAS-rejects, because disk "
+                "still diverges from baseline) the variant-aware baseline "
+                "preservation must keep the bare-host entry AT its original "
+                "value — a regression that absorbed the rejected dotted "
+                "delta's value into the baseline would silently disable CAS "
+                "protection for the next rotation"
             )
         finally:
             await core.close()
