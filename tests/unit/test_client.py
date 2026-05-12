@@ -18,7 +18,7 @@ from notebooklm.rpc import AuthError, RPCError, RPCMethod
 def mock_auth():
     """Create a mock AuthTokens object."""
     return AuthTokens(
-        cookies={"SID": "test_sid", "HSID": "test_hsid"},
+        cookies={"SID": "test_sid", "__Secure-1PSIDTS": "test_1psidts", "HSID": "test_hsid"},
         csrf_token="test_csrf",
         session_id="test_session",
     )
@@ -98,6 +98,7 @@ class TestFromStorage:
         storage_state = {
             "cookies": [
                 {"name": "SID", "value": "test_sid", "domain": ".google.com"},
+                {"name": "__Secure-1PSIDTS", "value": "test_1psidts", "domain": ".google.com"},
                 {"name": "HSID", "value": "test_hsid", "domain": ".google.com"},
             ]
         }
@@ -112,7 +113,7 @@ class TestFromStorage:
 
         client = await NotebookLMClient.from_storage(str(storage_file))
 
-        assert client.auth.cookies["SID"] == "test_sid"
+        assert client.auth.cookies[("SID", ".google.com")] == "test_sid"
         assert client.auth.csrf_token == "csrf_token_abc"
         assert client.auth.session_id == "session_id_xyz"
 
@@ -123,44 +124,51 @@ class TestFromStorage:
             await NotebookLMClient.from_storage(str(tmp_path / "nonexistent.json"))
 
     @pytest.mark.asyncio
-    async def test_from_storage_with_default_path(self, httpx_mock: HTTPXMock):
+    async def test_from_storage_with_default_path(
+        self, tmp_path, monkeypatch, request, httpx_mock: HTTPXMock
+    ):
         """Test from_storage uses default path when none specified."""
-        from notebooklm.auth import DEFAULT_STORAGE_PATH
+        import notebooklm.paths as paths_mod
 
-        # Create storage file at default location
-        if not DEFAULT_STORAGE_PATH.parent.exists():
-            DEFAULT_STORAGE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        real_storage_path = paths_mod.get_storage_path()
+        real_storage_mtime = (
+            real_storage_path.stat().st_mtime_ns if real_storage_path.exists() else None
+        )
 
-        # IMPORTANT: Back up existing auth file if it exists
-        backup_path = DEFAULT_STORAGE_PATH.with_suffix(".json.bak")
-        had_existing_file = DEFAULT_STORAGE_PATH.exists()
-        if had_existing_file:
-            backup_path.write_text(DEFAULT_STORAGE_PATH.read_text())
+        active_profile = paths_mod.get_active_profile()
+        request.addfinalizer(lambda: paths_mod.set_active_profile(active_profile))
+        paths_mod.set_active_profile(None)
+        monkeypatch.setenv("NOTEBOOKLM_HOME", str(tmp_path))
+        monkeypatch.setenv("NOTEBOOKLM_PROFILE", "default")
+        monkeypatch.delenv("NOTEBOOKLM_AUTH_JSON", raising=False)
+
+        default_storage_path = paths_mod.get_storage_path()
+        assert tmp_path in default_storage_path.parents
 
         storage_state = {
             "cookies": [
                 {"name": "SID", "value": "default_sid", "domain": ".google.com"},
+                {"name": "__Secure-1PSIDTS", "value": "test_1psidts", "domain": ".google.com"},
             ]
         }
 
-        # Only run if we can write to default location
+        default_storage_path.parent.mkdir(parents=True, exist_ok=True)
+        default_storage_path.write_text(json.dumps(storage_state))
+
+        html = '"SNlM0e":"csrf" "FdrFJe":"sess"'
+        httpx_mock.add_response(
+            url="https://notebooklm.google.com/",
+            content=html.encode(),
+        )
+
         try:
-            DEFAULT_STORAGE_PATH.write_text(json.dumps(storage_state))
-
-            html = '"SNlM0e":"csrf" "FdrFJe":"sess"'
-            httpx_mock.add_response(content=html.encode())
-
             client = await NotebookLMClient.from_storage()
-            assert client.auth.cookies["SID"] == "default_sid"
-        except PermissionError:
-            pytest.skip("Cannot write to default storage path")
+            assert client.auth.cookies[("SID", ".google.com")] == "default_sid"
         finally:
-            # Restore original file or clean up test file
-            if had_existing_file:
-                DEFAULT_STORAGE_PATH.write_text(backup_path.read_text())
-                backup_path.unlink()
-            elif DEFAULT_STORAGE_PATH.exists():
-                DEFAULT_STORAGE_PATH.unlink()
+            if real_storage_mtime is None:
+                assert not real_storage_path.exists()
+            else:
+                assert real_storage_path.stat().st_mtime_ns == real_storage_mtime
 
 
 # =============================================================================
@@ -386,7 +394,7 @@ class TestClientCoreRefreshCallback:
         """ClientCore should store refresh callback."""
 
         auth = AuthTokens(
-            cookies={"SID": "test"},
+            cookies={"SID": "test", "__Secure-1PSIDTS": "test_1psidts"},
             csrf_token="csrf",
             session_id="sid",
         )
@@ -401,7 +409,7 @@ class TestClientCoreRefreshCallback:
         """ClientCore should default refresh_callback to None."""
 
         auth = AuthTokens(
-            cookies={"SID": "test"},
+            cookies={"SID": "test", "__Secure-1PSIDTS": "test_1psidts"},
             csrf_token="csrf",
             session_id="sid",
         )
@@ -412,7 +420,7 @@ class TestClientCoreRefreshCallback:
     def test_refresh_lock_created_when_callback_provided(self):
         """ClientCore should create refresh lock when callback provided."""
         auth = AuthTokens(
-            cookies={"SID": "test"},
+            cookies={"SID": "test", "__Secure-1PSIDTS": "test_1psidts"},
             csrf_token="csrf",
             session_id="sid",
         )
@@ -428,7 +436,7 @@ class TestClientCoreRefreshCallback:
         """ClientCore should NOT create refresh lock when no callback."""
 
         auth = AuthTokens(
-            cookies={"SID": "test"},
+            cookies={"SID": "test", "__Secure-1PSIDTS": "test_1psidts"},
             csrf_token="csrf",
             session_id="sid",
         )
@@ -447,7 +455,7 @@ class TestRpcCallAutoRetry:
     async def test_retries_on_http_401_error(self):
         """rpc_call should retry once after HTTP 401 if callback provided."""
         auth = AuthTokens(
-            cookies={"SID": "test"},
+            cookies={"SID": "test", "__Secure-1PSIDTS": "test_1psidts"},
             csrf_token="csrf",
             session_id="sid",
         )
@@ -490,7 +498,7 @@ class TestRpcCallAutoRetry:
     async def test_retries_on_rpc_auth_error(self):
         """rpc_call should retry once after RPC auth error if callback provided."""
         auth = AuthTokens(
-            cookies={"SID": "test"},
+            cookies={"SID": "test", "__Secure-1PSIDTS": "test_1psidts"},
             csrf_token="csrf",
             session_id="sid",
         )
@@ -534,7 +542,7 @@ class TestRpcCallAutoRetry:
     async def test_no_retry_without_callback(self):
         """rpc_call should NOT retry if no refresh_callback provided."""
         auth = AuthTokens(
-            cookies={"SID": "test"},
+            cookies={"SID": "test", "__Secure-1PSIDTS": "test_1psidts"},
             csrf_token="csrf",
             session_id="sid",
         )
@@ -561,7 +569,7 @@ class TestRpcCallAutoRetry:
     async def test_no_infinite_retry(self):
         """rpc_call should only retry once, not infinitely."""
         auth = AuthTokens(
-            cookies={"SID": "test"},
+            cookies={"SID": "test", "__Secure-1PSIDTS": "test_1psidts"},
             csrf_token="csrf",
             session_id="sid",
         )
@@ -597,7 +605,7 @@ class TestRpcCallAutoRetry:
     async def test_no_retry_on_non_auth_error(self):
         """rpc_call should NOT retry on non-auth errors (HTTP 500)."""
         auth = AuthTokens(
-            cookies={"SID": "test"},
+            cookies={"SID": "test", "__Secure-1PSIDTS": "test_1psidts"},
             csrf_token="csrf",
             session_id="sid",
         )
@@ -631,7 +639,7 @@ class TestRpcCallAutoRetry:
     async def test_refresh_failure_raises_original_error(self):
         """If refresh fails, should raise original error with chained exception."""
         auth = AuthTokens(
-            cookies={"SID": "test"},
+            cookies={"SID": "test", "__Secure-1PSIDTS": "test_1psidts"},
             csrf_token="csrf",
             session_id="sid",
         )
@@ -660,7 +668,7 @@ class TestRpcCallAutoRetry:
     async def test_concurrent_refresh_uses_shared_task(self):
         """Concurrent auth errors should share a single refresh task."""
         auth = AuthTokens(
-            cookies={"SID": "test"},
+            cookies={"SID": "test", "__Secure-1PSIDTS": "test_1psidts"},
             csrf_token="csrf",
             session_id="sid",
         )
@@ -703,6 +711,6 @@ class TestRpcCallAutoRetry:
 
         # With shared task pattern, refresh should be called exactly once
         # (second caller waits on the same task instead of starting a new refresh)
-        assert refresh_count[0] == 1, (
-            f"Refresh should be called exactly once, got {refresh_count[0]}"
-        )
+        assert (
+            refresh_count[0] == 1
+        ), f"Refresh should be called exactly once, got {refresh_count[0]}"

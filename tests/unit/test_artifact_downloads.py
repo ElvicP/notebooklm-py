@@ -9,10 +9,16 @@ import pytest
 from notebooklm._artifacts import ArtifactsAPI
 from notebooklm.auth import AuthTokens
 from notebooklm.types import (
+    ArtifactDownloadError,
     ArtifactNotFoundError,
     ArtifactNotReadyError,
     ArtifactParseError,
 )
+
+
+async def _async_chunks(chunks):
+    for chunk in chunks:
+        yield chunk
 
 
 @pytest.fixture
@@ -224,6 +230,45 @@ class TestDownloadInfographic:
             with pytest.raises(ArtifactNotReadyError):
                 await api.download_infographic("nb_123", "/tmp/info.png")
 
+    @pytest.mark.asyncio
+    async def test_download_infographic_prefers_first_matching_url(self, mock_artifacts_api):
+        """When multiple URL fields exist, the first (lowest-index) one is used."""
+        api, _mock_core = mock_artifacts_api
+        canonical_url = "https://example.com/canonical.png"
+        later_url = "https://example.com/later.png"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, "infographic.png")
+
+            with patch.object(api._downloader, "_list_raw", new_callable=AsyncMock) as mock_list:
+                # Artifact with two URL-bearing metadata entries at different indices
+                mock_list.return_value = [
+                    [
+                        "infographic_001",
+                        "Infographic Title",
+                        7,
+                        None,
+                        3,
+                        None,
+                        None,
+                        None,
+                        None,
+                        [[], [], [[None, [canonical_url]]]],
+                        [[], [], [[None, [later_url]]]],
+                    ]
+                ]
+
+                with patch.object(
+                    api._downloader,
+                    "_download_url",
+                    new_callable=AsyncMock,
+                    return_value=output_path,
+                ) as mock_dl:
+                    result = await api.download_infographic("nb_123", output_path)
+
+            assert result == output_path
+            mock_dl.assert_awaited_once_with(canonical_url, output_path)
+
 
 class TestDownloadSlideDeck:
     """Test download_slide_deck method."""
@@ -384,11 +429,15 @@ class TestDownloadUrl:
 
             mock_response = MagicMock()
             mock_response.headers = {"content-type": "video/mp4"}
-            mock_response.content = b"fake video content"
             mock_response.raise_for_status = MagicMock()
+            mock_response.aiter_bytes = lambda chunk_size=8192: _async_chunks(
+                [b"fake video content"]
+            )
+            mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+            mock_response.__aexit__ = AsyncMock(return_value=None)
 
             mock_client = AsyncMock()
-            mock_client.get = AsyncMock(return_value=mock_response)
+            mock_client.stream = MagicMock(return_value=mock_response)
             mock_client.__aenter__ = AsyncMock(return_value=mock_client)
             mock_client.__aexit__ = AsyncMock(return_value=None)
 
@@ -396,15 +445,51 @@ class TestDownloadUrl:
             mock_cookies = MagicMock()
             with (
                 patch.object(real_httpx, "AsyncClient", return_value=mock_client),
-                patch(
-                    "notebooklm._artifact_download.load_httpx_cookies", return_value=mock_cookies
-                ),
+                patch("notebooklm._artifacts.load_httpx_cookies", return_value=mock_cookies),
             ):
-                result = await api._downloader._download_url(
+                result = await api._download_url(
                     "https://storage.googleapis.com/file.mp4", output_path
                 )
 
             assert result == output_path
+
+    @pytest.mark.asyncio
+    async def test_download_url_empty_response_raises(self, mock_artifacts_api):
+        """Test that a 0-byte download raises ArtifactDownloadError."""
+        api, mock_core = mock_artifacts_api
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_path = os.path.join(tmpdir, "file.mp4")
+
+            import httpx as real_httpx
+
+            # Mock streaming response that yields no bytes
+            async def mock_aiter_bytes(chunk_size=8192):
+                if False:
+                    yield  # pragma: no cover -- makes this an async generator
+
+            mock_response = MagicMock()
+            mock_response.headers = {"content-type": "video/mp4"}
+            mock_response.raise_for_status = MagicMock()
+            mock_response.aiter_bytes = mock_aiter_bytes
+            mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+            mock_response.__aexit__ = AsyncMock(return_value=None)
+
+            mock_client = AsyncMock()
+            mock_client.stream = MagicMock(return_value=mock_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=None)
+
+            mock_cookies = MagicMock()
+            with (
+                patch.object(real_httpx, "AsyncClient", return_value=mock_client),
+                patch("notebooklm._artifacts.load_httpx_cookies", return_value=mock_cookies),
+                pytest.raises(ArtifactDownloadError, match="0 bytes"),
+            ):
+                await api._download_url("https://storage.googleapis.com/file.mp4", output_path)
+
+            # Verify no file was left behind
+            assert not os.path.exists(output_path)
 
 
 class TestDownloadReport:

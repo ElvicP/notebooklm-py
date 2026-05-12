@@ -1,23 +1,26 @@
 # CLI Reference
 
 **Status:** Active
-**Last Updated:** 2026-03-02
+**Last Updated:** 2026-05-11
 
 Complete command reference for the `notebooklm` CLI—providing full programmatic access to all NotebookLM features, including capabilities not exposed in the web UI.
 
 ## Command Structure
 
 ```
-notebooklm [--storage PATH] [--version] <command> [OPTIONS] [ARGS]
+notebooklm [-p PROFILE] [--storage PATH] [--version] [-v] <command> [OPTIONS] [ARGS]
 ```
 
 **Global Options:**
-- `--storage PATH` - Override the default storage location (`~/.notebooklm/storage_state.json`)
+- `-p, --profile NAME` - Use a named profile (overrides `NOTEBOOKLM_PROFILE` env var)
+- `--storage PATH` - Override the default storage location
+- `-v, --verbose` - Enable verbose output
 - `--version` - Show version and exit
 - `--help` - Show help message
 
 **Environment Variables:**
 - `NOTEBOOKLM_HOME` - Base directory for all config files (default: `~/.notebooklm`)
+- `NOTEBOOKLM_PROFILE` - Active profile name (default: `default`)
 - `NOTEBOOKLM_AUTH_JSON` - Inline authentication JSON (for CI/CD, no file writes needed)
 - `NOTEBOOKLM_DEBUG_RPC` - Enable RPC debug logging (`1` to enable)
 
@@ -27,7 +30,8 @@ See [Configuration](configuration.md) for details on environment variables and C
 - **Session commands** - Authentication and context management
 - **Notebook commands** - CRUD operations on notebooks
 - **Chat commands** - Querying and conversation management
-- **Grouped commands** - `source`, `artifact`, `generate`, `download`, `note`
+- **Grouped commands** - `source`, `artifact`, `agent`, `generate`, `download`, `note`, `share`, `research`, `language`, `skill`, `auth`, `profile`
+- **Utility commands** - `metadata`, `doctor`
 
 ---
 
@@ -37,7 +41,7 @@ See [Configuration](configuration.md) for details on environment variables and C
 
 | Command | Description | Example |
 |---------|-------------|---------|
-| `login` | Authenticate via browser | `notebooklm login` |
+| `login` | Authenticate via browser | `notebooklm login` / `notebooklm login --browser msedge` |
 | `use <id>` | Set active notebook | `notebooklm use abc123` |
 | `status` | Show current context | `notebooklm status` |
 | `status --paths` | Show configuration paths | `notebooklm status --paths` |
@@ -46,6 +50,21 @@ See [Configuration](configuration.md) for details on environment variables and C
 | `auth check` | Diagnose authentication issues | `notebooklm auth check` |
 | `auth check --test` | Validate with network test | `notebooklm auth check --test` |
 | `auth check --json` | Output as JSON | `notebooklm auth check --json` |
+| `auth refresh` | One-shot SIDTS rotation poke (for OS schedulers) | `notebooklm auth refresh` |
+| `auth refresh --quiet` | Refresh; suppress success output | `notebooklm auth refresh --quiet` |
+| `doctor` | Check environment health | `notebooklm doctor` |
+| `doctor --fix` | Auto-fix detected issues | `notebooklm doctor --fix` |
+| `doctor --json` | Output diagnostics as JSON | `notebooklm doctor --json` |
+
+### Profile Commands (`notebooklm profile <cmd>`)
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `list` | List all profiles | `notebooklm profile list` |
+| `create <name>` | Create a new profile | `notebooklm profile create work` |
+| `switch <name>` | Set the active profile | `notebooklm profile switch work` |
+| `delete <name>` | Delete a profile | `notebooklm profile delete old` |
+| `rename <old> <new>` | Rename a profile | `notebooklm profile rename old new` |
 
 ### Language Commands (`notebooklm language <cmd>`)
 
@@ -65,9 +84,8 @@ See [Configuration](configuration.md) for details on environment variables and C
 |---------|-------------|---------|
 | `list` | List all notebooks | `notebooklm list` |
 | `create <title>` | Create notebook | `notebooklm create "Research"` |
-| `delete <id>` | Delete notebook | `notebooklm delete abc123` |
+| `delete -n <id>` | Delete notebook (uses current notebook if `-n` omitted) | `notebooklm delete -n abc123` |
 | `rename <title>` | Rename current notebook | `notebooklm rename "New Title"` |
-| `share` | Toggle notebook sharing | `notebooklm share` or `notebooklm share --revoke` |
 | `summary` | Get AI summary | `notebooklm summary` |
 
 ### Chat Commands
@@ -93,16 +111,19 @@ Supported source types: URLs, YouTube videos, files (PDF, text, Markdown, Word, 
 | Command | Arguments | Options | Example |
 |---------|-----------|---------|---------|
 | `list` | - | - | `source list` |
-| `add <content>` | URL/file/text | - | `source add "https://..."` |
+| `add <content>` | URL/file/text | `--title`, `--type`, `--mime-type`, `--timeout`, `--json` | `source add "https://..." --timeout 90` |
 | `add-drive <id> <title>` | Drive file ID | - | `source add-drive abc123 "Doc"` |
-| `add-research <query>` | Search query | `--mode [fast|deep]`, `--from [web|drive]`, `--import-all`, `--no-wait` | `source add-research "AI" --mode deep --no-wait` |
+| `add-research <query>` | Search query | `--mode [fast|deep]`, `--from [web|drive]`, `--import-all`, `--no-wait`, `--timeout` | `source add-research "AI" --mode deep --no-wait` |
 | `get <id>` | Source ID | - | `source get src123` |
 | `fulltext <id>` | Source ID | `--json`, `-o FILE` | `source fulltext src123 -o content.txt` |
 | `guide <id>` | Source ID | `--json` | `source guide src123` |
 | `rename <id> <title>` | Source ID, new title | - | `source rename src123 "New Name"` |
 | `refresh <id>` | Source ID | - | `source refresh src123` |
 | `delete <id>` | Source ID | - | `source delete src123` |
+| `delete-by-title <title>` | Exact source title | - | `source delete-by-title "My Source"` |
 | `wait <id>` | Source ID | `--timeout`, `--interval` | `source wait src123` |
+
+`source delete <id>` accepts only full source IDs or unique partial-ID prefixes. To delete by exact source title, use `source delete-by-title "<title>"`.
 
 ### Research Commands (`notebooklm research <cmd>`)
 
@@ -122,12 +143,13 @@ All generate commands support:
 | Command | Options | Example |
 |---------|---------|---------|
 | `audio [description]` | `--format [deep-dive\|brief\|critique\|debate]`, `--length [short\|default\|long]`, `--wait` | `generate audio "Focus on history"` |
-| `video [description]` | `--format [explainer\|brief]`, `--style [auto\|classic\|whiteboard\|kawaii\|anime\|watercolor\|retro-print\|heritage\|paper-craft]`, `--wait` | `generate video "Explainer for kids"` |
+| `video [description]` | `--format [explainer\|brief\|cinematic]`, `--style [auto\|classic\|whiteboard\|kawaii\|anime\|watercolor\|retro-print\|heritage\|paper-craft]`, `--wait` | `generate video "Explainer for kids"` |
+| `cinematic-video [description]` | Alias for `video --format cinematic`; supports the same options | `generate cinematic-video "Documentary about quantum physics"` |
 | `slide-deck [description]` | `--format [detailed\|presenter]`, `--length [default\|short]`, `--wait` | `generate slide-deck` |
 | `revise-slide <description>` | `-a/--artifact <id>` (required), `--slide N` (required), `--wait` | `generate revise-slide "Move title up" --artifact <id> --slide 0` |
 | `quiz [description]` | `--difficulty [easy\|medium\|hard]`, `--quantity [fewer\|standard\|more]`, `--wait` | `generate quiz --difficulty hard` |
 | `flashcards [description]` | `--difficulty [easy\|medium\|hard]`, `--quantity [fewer\|standard\|more]`, `--wait` | `generate flashcards` |
-| `infographic [description]` | `--orientation [landscape\|portrait\|square]`, `--detail [concise\|standard\|detailed]`, `--wait` | `generate infographic` |
+| `infographic [description]` | `--orientation [landscape\|portrait\|square]`, `--detail [concise\|standard\|detailed]`, `--style [auto\|sketch-note\|professional\|bento-grid\|editorial\|instructional\|bricks\|clay\|anime\|kawaii\|scientific]`, `--wait` | `generate infographic` |
 | `data-table <description>` | `--wait` | `generate data-table "compare concepts"` |
 | `mind-map` | *(sync, no wait needed)* | `generate mind-map` |
 | `report [description]` | `--format [briefing-doc\|study-guide\|blog-post\|custom]`, `--append "extra instructions"`, `--wait` | `generate report --format study-guide` |
@@ -179,6 +201,7 @@ notebooklm download abc12 --force                  # Partial ID + overwrite exis
 |---------|-----------|---------|---------|
 | `audio [path]` | Output path | `-a/--artifact`, `--all`, `--latest`, `--name`, `--force`, `--dry-run` | `download audio --all` |
 | `video [path]` | Output path | `-a/--artifact`, `--all`, `--latest`, `--name`, `--force`, `--dry-run` | `download video --latest` |
+| `cinematic-video [path]` | Output path | Alias for `download video`; same options as `video` | `download cinematic-video ./documentary.mp4` |
 | `slide-deck [path]` | Output path      | `-a/--artifact`, `--all`, `--latest`, `--name`, `--force`, `--dry-run`, `--format [pdf\|pptx]` | `download slide-deck ./slides.pdf` |
 | `infographic [path]` | Output path | `-a/--artifact`, `--all`, `--latest`, `--name`, `--force`, `--dry-run` | `download infographic ./info.png` |
 | `report [path]` | Output path | `-a/--artifact`, `--all`, `--latest`, `--name`, `--force`, `--dry-run` | `download report ./report.md` |
@@ -194,22 +217,60 @@ notebooklm download abc12 --force                  # Partial ID + overwrite exis
 | `list` | - | - | `note list` |
 | `create <content>` | Note content | - | `note create "My notes..."` |
 | `get <id>` | Note ID | - | `note get note123` |
-| `save <id>` | Note ID | - | `note save note123` |
+| `save <id>` | Note ID | `--title`, `--content` | `note save note123 --title "Updated title"` |
 | `rename <id> <title>` | Note ID, title | - | `note rename note123 "Title"` |
 | `delete <id>` | Note ID | - | `note delete note123` |
 
+### Metadata Command
+
+Export notebook metadata and a simplified source list.
+
+```bash
+notebooklm metadata [OPTIONS]
+```
+
+**Options:**
+- `-n, --notebook ID` - Specify notebook (uses current if not set)
+- `--json` - Output as JSON for scripts
+
+**Examples:**
+```bash
+notebooklm metadata
+notebooklm metadata -n abc123 --json
+```
+
 ### Skill Commands (`notebooklm skill <cmd>`)
 
-Manage Claude Code skill integration.
+Manage NotebookLM agent skill integration.
 
 | Command | Description | Example |
 |---------|-------------|---------|
-| `install` | Install/update skill to ~/.claude/skills/ | `skill install` |
-| `status` | Check installation and version | `skill status` |
-| `uninstall` | Remove skill | `skill uninstall` |
-| `show` | Display skill content | `skill show` |
+| `install` | Install/update the skill for `claude`, `.agents`, or both | `skill install --target all` |
+| `status` | Check installed targets and version info | `skill status --scope project` |
+| `uninstall` | Remove one or more installed targets | `skill uninstall --target agents` |
+| `show` | Display the packaged skill or an installed target | `skill show --target source` |
 
-After installation, Claude Code recognizes NotebookLM commands via `/notebooklm` or natural language like "create a podcast about X".
+Defaults:
+
+- `skill install` uses `--scope user --target all`
+- `claude` maps to `.claude/skills/notebooklm/SKILL.md`
+- `agents` maps to `.agents/skills/notebooklm/SKILL.md`
+- `show --target source` prints the canonical packaged skill file
+
+The packaged wheel includes the repo-root `SKILL.md`, so the same skill content powers `notebooklm skill install`, GitHub discovery, and `npx skills add teng-lin/notebooklm-py`.
+
+Codex does not use the `skill` subcommand. In this repository it reads the root [`AGENTS.md`](../AGENTS.md) file and invokes the `notebooklm` CLI or Python API directly.
+
+### Agent Commands (`notebooklm agent <cmd>`)
+
+Show bundled instructions for supported agent environments.
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `show codex` | Print the Codex repository guidance | `agent show codex` |
+| `show claude` | Print the bundled Claude Code skill template | `agent show claude` |
+
+`agent show codex` prefers the root [`AGENTS.md`](../AGENTS.md) file when running from a source checkout, so the CLI mirrors the same instructions Codex sees in the repository.
 
 ### Features Beyond the Web UI
 
@@ -237,10 +298,41 @@ These CLI capabilities are not available in NotebookLM's web interface:
 Authenticate with Google NotebookLM via browser.
 
 ```bash
-notebooklm login
+notebooklm login [OPTIONS]
 ```
 
-Opens a Chromium browser with a persistent profile. Log in to your Google account, then press Enter in the terminal to save the session.
+By default, opens a Chromium browser with a persistent profile. Log in to your Google account, then press Enter in the terminal to save the session. Use `--browser msedge` for Microsoft Edge, or `--browser-cookies <browser>` to import cookies from an already-logged-in browser without launching Playwright.
+
+**Options:**
+- `--storage PATH` - Where to save storage_state.json (default: `$NOTEBOOKLM_HOME/profiles/<profile>/storage_state.json`)
+- `--browser [chromium|msedge]` - Browser to use for login (default: `chromium`). Use `msedge` for Microsoft Edge.
+- `--browser-cookies <auto|chrome|edge|firefox|safari|brave|arc|...>` - Read cookies from an installed browser instead of launching Playwright. Pass an explicit browser name, or `auto` to let rookiepy auto-detect. Requires `pip install "notebooklm-py[cookies]"`.
+- `--fresh` - Start with a clean browser session (deletes the cached browser profile). Use to switch Google accounts. Has no effect with `--browser-cookies`.
+
+**Examples:**
+```bash
+# Default (Chromium)
+notebooklm login
+
+# Use Microsoft Edge (for orgs that require Edge for SSO)
+notebooklm login --browser msedge
+
+# Reuse cookies from your already-logged-in Chrome session
+notebooklm login --browser-cookies chrome
+
+# Auto-detect any supported browser via rookiepy
+notebooklm login --browser-cookies auto
+
+# Populate a named profile via cookie import
+notebooklm --profile work login --browser-cookies chrome
+
+# Force a clean browser session before logging in
+notebooklm login --fresh
+```
+
+**Notes on `--browser-cookies`:**
+- Honors `--profile` / `NOTEBOOKLM_PROFILE` and writes to that profile's `storage_state.json`.
+- Always extracts cookies for the source browser's currently-active Google account on `google.com` / `notebooklm.google.com`. To populate multiple profiles from one browser, switch the active Google account in the browser between runs (or use a different browser per profile).
 
 ### Session: `use`
 
@@ -427,6 +519,43 @@ notebooklm auth check --json
 - Check if cookies are from correct domain (regional vs .google.com)
 - Diagnose NOTEBOOKLM_AUTH_JSON environment variable issues
 
+### Session: `auth refresh`
+
+One-shot keepalive: open a session, trigger the layer-1 SIDTS rotation poke against `accounts.google.com`, persist the rotated cookies to `storage_state.json`, and exit. Designed to be invoked by the OS scheduler (launchd / systemd / cron / Task Scheduler / k8s CronJob) so an otherwise-idle profile does not stale out between user-driven calls.
+
+```bash
+notebooklm auth refresh [OPTIONS]
+```
+
+**Options:**
+- `--quiet`, `-q` - Suppress success output; print only on error (cron-friendly)
+
+**Cadence:** 15-20 minutes is the recommended interval. Tighter is wasteful (the 60 s mtime guard would skip it anyway); significantly looser may cross the `__Secure-1PSIDTS` server-side validity window for your account/region.
+
+**Requires file-backed authentication.** `auth refresh` refuses to run when `NOTEBOOKLM_AUTH_JSON` is set, because the inline-JSON auth mode has no writable backing store to persist rotated cookies into. Use a profile-backed `storage_state.json` (the default) or set `NOTEBOOKLM_HOME` / `--profile` to point at one.
+
+**Exit codes:**
+- `0` - the auth path completed without raising. The rotation POST is **best-effort**: exit 0 also covers (a) the 60 s mtime guard skipping the POST, (b) `NOTEBOOKLM_DISABLE_KEEPALIVE_POKE=1` being set, (c) another process holding the cross-process rotate lock, and (d) a transient `httpx` error during the POST being caught and logged at DEBUG. Treat exit 0 as "no error" rather than "rotation occurred." For verification, enable `NOTEBOOKLM_LOG_LEVEL=DEBUG` and check for the `RotateCookies` log line.
+- `1` - a fatal error reached the CLI layer (e.g. `NOTEBOOKLM_AUTH_JSON` set, missing `storage_state.json`, invalid profile, `httpx.RequestError` not swallowed by the rotate guard). The OS scheduler's next firing is the retry mechanism; this command does not retry in-process.
+
+**Examples:**
+```bash
+# One-shot refresh against the default profile
+notebooklm auth refresh
+
+# Refresh a named profile (works with --profile / NOTEBOOKLM_PROFILE)
+notebooklm --profile work auth refresh
+
+# Quiet variant for cron / systemd
+notebooklm --profile work auth refresh --quiet
+```
+
+**Pairs with:**
+- `NOTEBOOKLM_REFRESH_CMD` for in-process auth-expiry recovery (covers the case where `auth refresh` itself fails because cookies have already expired beyond rotation)
+- `keepalive=<seconds>` on `NotebookLMClient` for in-process long-lived workers (no OS scheduler needed)
+
+See [Troubleshooting](troubleshooting.md) for full per-OS scheduler recipes (launchd plist, systemd user timer, cron, Task Scheduler, k8s CronJob).
+
 ### Source: `add-research`
 
 Perform AI-powered research and add discovered sources to the notebook.
@@ -440,6 +569,7 @@ notebooklm source add-research <query> [OPTIONS]
 - `--from [web|drive]` - Search source (default: web)
 - `--import-all` - Automatically import all found sources (works with blocking mode)
 - `--no-wait` - Start research and return immediately (non-blocking)
+- `--timeout SECONDS` - Retry budget for `--import-all` when the IMPORT_RESEARCH RPC times out (default: 1800). Mirrors `research wait --timeout`. Has no effect without `--import-all`.
 
 **Examples:**
 ```bash
@@ -451,6 +581,9 @@ notebooklm source add-research "Project Alpha" --from drive --mode deep
 
 # Non-blocking deep research for agent workflows
 notebooklm source add-research "AI safety papers" --mode deep --no-wait
+
+# Bounded import-retry budget for large result sets
+notebooklm source add-research "AI papers" --mode deep --import-all --timeout 3600
 ```
 
 ### Research: `status`
@@ -806,7 +939,7 @@ notebooklm summary
 # 4. Generate study materials
 notebooklm generate quiz --difficulty hard --wait
 notebooklm generate flashcards --wait
-notebooklm generate report --type study-guide --wait
+notebooklm generate report --format study-guide --wait
 
 # 5. Ask specific questions
 notebooklm ask "Explain the key concepts in chapter 3"
@@ -831,7 +964,7 @@ notebooklm ask "What are the main points?"
 notebooklm ask "Create bullet point notes"
 
 # 4. Generate a quick briefing doc
-notebooklm generate report --type briefing-doc --wait
+notebooklm generate report --format briefing-doc --wait
 ```
 
 ### Bulk Import

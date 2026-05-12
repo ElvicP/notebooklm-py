@@ -41,7 +41,7 @@ except PackageNotFoundError:
     )
 
 # Public API: Authentication
-from .auth import DEFAULT_STORAGE_PATH, AuthTokens
+from .auth import AuthTokens
 
 # Public API: Client
 from .client import NotebookLMClient
@@ -66,6 +66,7 @@ from .exceptions import (
     NetworkError,
     # Domain: Notebooks
     NotebookError,
+    NotebookLimitError,
     # Base
     NotebookLMError,
     NotebookNotFoundError,
@@ -85,6 +86,8 @@ from .exceptions import (
 
 # Public API: Types and dataclasses
 from .types import (
+    AccountLimits,
+    AccountTier,
     Artifact,
     ArtifactType,
     AskResult,
@@ -100,9 +103,11 @@ from .types import (
     GenerationStatus,
     InfographicDetail,
     InfographicOrientation,
+    InfographicStyle,
     Note,
     Notebook,
     NotebookDescription,
+    NotebookMetadata,
     QuizDifficulty,
     QuizQuantity,
     ReportFormat,
@@ -117,6 +122,7 @@ from .types import (
     Source,
     SourceFulltext,
     SourceStatus,
+    SourceSummary,
     SourceType,
     # Enums for configuration
     SuggestedTopic,
@@ -132,13 +138,16 @@ __all__ = [
     "NotebookLMClient",
     # Auth
     "AuthTokens",
-    "DEFAULT_STORAGE_PATH",
     # Types
+    "AccountLimits",
+    "AccountTier",
     "Notebook",
     "NotebookDescription",
+    "NotebookMetadata",
     "SuggestedTopic",
     "Source",
     "SourceFulltext",
+    "SourceSummary",
     "Artifact",
     "GenerationStatus",
     "ReportSuggestion",
@@ -166,6 +175,7 @@ __all__ = [
     # Domain Exceptions: Notebooks
     "NotebookError",
     "NotebookNotFoundError",
+    "NotebookLimitError",
     # Domain Exceptions: Chat
     "ChatError",
     # Domain Exceptions: Sources
@@ -194,6 +204,7 @@ __all__ = [
     "QuizDifficulty",
     "InfographicOrientation",
     "InfographicDetail",
+    "InfographicStyle",
     "SlideDeckFormat",
     "SlideDeckLength",
     "ReportFormat",
@@ -205,4 +216,42 @@ __all__ = [
     "ShareAccess",
     "ShareViewLevel",
     "SharePermission",
+    # Deprecated (will be removed in v0.5.0)
+    "StudioContentType",
 ]
+
+
+def __getattr__(name: str):
+    """Emit deprecation warnings for deprecated module-level names.
+
+    This allows us to provide backward-compatible imports with warnings.
+    Uses globals() caching to avoid duplicate warnings on repeated access.
+    """
+    import warnings
+
+    if name == "DEFAULT_STORAGE_PATH":
+        from .paths import get_storage_path
+
+        warnings.warn(
+            "DEFAULT_STORAGE_PATH is deprecated, use notebooklm.paths.get_storage_path() instead. "
+            "Will be removed in v0.5.0.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        val = get_storage_path()
+        globals()[name] = val
+        return val
+
+    if name == "StudioContentType":
+        from .rpc.types import ArtifactTypeCode
+
+        warnings.warn(
+            "StudioContentType is deprecated, use ArtifactType instead. Will be removed in v0.5.0.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        # Cache to prevent duplicate warnings on repeated access
+        globals()[name] = ArtifactTypeCode
+        return ArtifactTypeCode
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

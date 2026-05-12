@@ -73,7 +73,7 @@ def note():
     default=None,
     help="Notebook ID (uses current if not set)",
 )
-@json_option
+@click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 @with_client
 def note_list(ctx, notebook_id, json_output, client_auth):
     """List all notes in a notebook."""

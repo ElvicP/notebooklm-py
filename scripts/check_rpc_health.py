@@ -148,7 +148,7 @@ def extract_id_recursive(data: Any) -> str | None:
     """
     if data is None:
         return None
-    if isinstance(data, (str, int)):
+    if isinstance(data, str | int):
         return str(data)
     if isinstance(data, list) and len(data) > 0:
         return extract_id_recursive(data[0])
@@ -434,11 +434,14 @@ def get_test_params(method: RPCMethod, notebook_id: str | None) -> list[Any] | N
 
     # Methods that take [[notebook_id]] as the only param
     if method in (
-        RPCMethod.LIST_CONVERSATIONS,
         RPCMethod.GET_NOTES_AND_MIND_MAPS,
         RPCMethod.DISCOVER_SOURCES,
     ):
         return [[notebook_id]]
+
+    # GET_LAST_CONVERSATION_ID: returns most recent conversation ID
+    if method == RPCMethod.GET_LAST_CONVERSATION_ID:
+        return [[], None, notebook_id, 1]
 
     # GET_CONVERSATION_TURNS: placeholder conv ID - API echoes RPC ID even in error response
     if method == RPCMethod.GET_CONVERSATION_TURNS:

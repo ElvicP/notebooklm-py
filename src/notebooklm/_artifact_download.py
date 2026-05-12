@@ -33,6 +33,7 @@ from .types import (
     ArtifactNotFoundError,
     ArtifactNotReadyError,
     ArtifactParseError,
+    _extract_artifact_url,
 )
 
 if TYPE_CHECKING:
@@ -121,6 +122,8 @@ class ArtifactDownloader:
         list_raw_fn: Callable[[str], Awaitable[builtins.list[Any]]],
         list_quizzes_fn: Callable[[str], Awaitable[builtins.list[Artifact]]],
         list_flashcards_fn: Callable[[str], Awaitable[builtins.list[Artifact]]],
+        get_artifact_content_fn: Callable[[str, str], Awaitable[str | None]] | None = None,
+        storage_path: Path | None = None,
     ):
         """Initialize the artifact downloader.
 
@@ -130,12 +133,16 @@ class ArtifactDownloader:
             list_raw_fn: Callback to get raw artifact list data.
             list_quizzes_fn: Callback to list quiz artifacts.
             list_flashcards_fn: Callback to list flashcard artifacts.
+            get_artifact_content_fn: Optional callback for fetching interactive HTML.
+            storage_path: Optional storage state path for loading download cookies.
         """
         self._core = core
         self._notes = notes_api
         self._list_raw = list_raw_fn
         self._list_quizzes = list_quizzes_fn
         self._list_flashcards = list_flashcards_fn
+        self._get_artifact_content_fn = get_artifact_content_fn
+        self._storage_path = storage_path
 
     # =========================================================================
     # Media Downloads (Audio, Video, Infographic, Slides)
@@ -161,11 +168,13 @@ class ArtifactDownloader:
         # Extract URL from metadata[6][5]
         try:
             metadata = audio_art[6]
-            if not isinstance(metadata, list) or len(metadata) <= 5:
+            if not isinstance(metadata, list):
+                raise TypeError("Invalid audio metadata structure")
+            if len(metadata) <= 5:
                 raise ArtifactParseError(
                     "audio",
                     artifact_id=artifact_id,
-                    details="Invalid audio metadata structure",
+                    details="Could not extract download URL from artifact metadata",
                 )
 
             media_list = metadata[5]
@@ -173,7 +182,7 @@ class ArtifactDownloader:
                 raise ArtifactParseError(
                     "audio",
                     artifact_id=artifact_id,
-                    details="No media URLs found",
+                    details="Could not extract download URL from artifact metadata",
                 )
 
             url = None
@@ -281,28 +290,12 @@ class ArtifactDownloader:
         candidates = _filter_completed_artifacts(artifacts_data, ArtifactTypeCode.INFOGRAPHIC)
         info_art = _select_by_id_or_first(candidates, artifact_id, "infographic")
 
-        # Extract URL from metadata
+        # Route through the shared extractor so readiness checks, Artifact.url,
+        # GenerationStatus.url, and downloads all agree on the same URL.
         try:
-            metadata = None
-            for item in reversed(info_art):
-                if isinstance(item, list) and len(item) > 0 and isinstance(item[0], list):
-                    if len(item) > 2 and isinstance(item[2], list) and len(item[2]) > 0:
-                        content_list = item[2]
-                        if isinstance(content_list[0], list) and len(content_list[0]) > 1:
-                            img_data = content_list[0][1]
-                            if (
-                                isinstance(img_data, list)
-                                and len(img_data) > 0
-                                and isinstance(img_data[0], str)
-                                and img_data[0].startswith("http")
-                            ):
-                                metadata = item
-                                break
-
-            if not metadata:
+            url = _extract_artifact_url(info_art, ArtifactTypeCode.INFOGRAPHIC.value)
+            if not url:
                 raise ArtifactParseError("infographic", details="Could not find metadata")
-
-            url = metadata[2][0][1][0]
             return await self._download_url(url, output_path)
 
         except (IndexError, TypeError) as e:
@@ -632,7 +625,8 @@ class ArtifactDownloader:
             artifact = completed[0]
 
         # Fetch and parse HTML content
-        html_content = await self._get_artifact_content(notebook_id, artifact.id)
+        get_content = self._get_artifact_content_fn or self._get_artifact_content
+        html_content = await get_content(notebook_id, artifact.id)
         if not html_content:
             raise ArtifactDownloadError(artifact_type, details="Failed to fetch content")
 
@@ -722,27 +716,47 @@ class ArtifactDownloader:
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
         # Load cookies with domain info for cross-domain redirect handling
-        cookies = load_httpx_cookies()
+        cookies = load_httpx_cookies(path=self._storage_path)
 
-        async with httpx.AsyncClient(
-            cookies=cookies,
-            follow_redirects=True,
-            timeout=httpx.Timeout(10.0, read=60.0),
-        ) as client:
-            response = await client.get(url)
-            response.raise_for_status()
+        # Use temp file to avoid leaving corrupted partial files on failure.
+        temp_file = output_file.with_suffix(output_file.suffix + ".tmp")
+        timeout = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=30.0)
 
-            content_type = response.headers.get("content-type", "")
-            if "text/html" in content_type:
-                raise ArtifactDownloadError(
-                    "media",
-                    details="Download failed: received HTML instead of media file. "
-                    "Authentication may have expired. Run 'notebooklm login'.",
-                )
+        try:
+            async with httpx.AsyncClient(  # noqa: SIM117
+                cookies=cookies,
+                follow_redirects=True,
+                timeout=timeout,
+            ) as client:
+                async with client.stream("GET", url) as response:
+                    response.raise_for_status()
 
-            output_file.write_bytes(response.content)
-            logger.debug("Downloaded %s (%d bytes)", url[:60], len(response.content))
-            return output_path
+                    content_type = response.headers.get("content-type", "")
+                    if "text/html" in content_type:
+                        raise ArtifactDownloadError(
+                            "media",
+                            details="Download failed: received HTML instead of media file. "
+                            "Authentication may have expired. Run 'notebooklm login'.",
+                        )
+
+                    total_bytes = 0
+                    with open(temp_file, "wb") as f:
+                        async for chunk in response.aiter_bytes(chunk_size=65536):
+                            f.write(chunk)
+                            total_bytes += len(chunk)
+
+                    if total_bytes == 0:
+                        raise ArtifactDownloadError(
+                            "media",
+                            details="Download produced 0 bytes -- the remote file may be missing or empty",
+                        )
+
+                    temp_file.rename(output_file)
+                    logger.debug("Downloaded %s (%d bytes)", url[:60], total_bytes)
+                    return output_path
+        except Exception:
+            temp_file.unlink(missing_ok=True)
+            raise
 
     async def _download_urls_batch(
         self, urls_and_paths: builtins.list[tuple[str, str]]
@@ -755,13 +769,26 @@ class ArtifactDownloader:
         Returns:
             List of successfully downloaded output paths.
         """
-        cookies = load_httpx_cookies()
+        cookies = load_httpx_cookies(path=self._storage_path)
 
         async def _download_one(
             client: httpx.AsyncClient, url: str, output_path: str
         ) -> str | None:
             """Helper to download a single file and handle errors."""
             try:
+                parsed = urlparse(url)
+                if parsed.scheme != "https":
+                    raise ArtifactDownloadError(
+                        "media", details=f"Download URL must use HTTPS: {url[:80]}"
+                    )
+                trusted = (".google.com", ".googleusercontent.com", ".googleapis.com")
+                if not any(
+                    parsed.netloc == d.lstrip(".") or parsed.netloc.endswith(d) for d in trusted
+                ):
+                    raise ArtifactDownloadError(
+                        "media", details=f"Untrusted download domain: {parsed.netloc}"
+                    )
+
                 response = await client.get(url)
                 response.raise_for_status()
 

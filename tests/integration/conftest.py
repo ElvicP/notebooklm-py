@@ -5,14 +5,15 @@ for integration tests. Fixtures like build_rpc_response and mock_list_notebooks_
 are inherited from tests/conftest.py.
 """
 
+import json
 import os
 from pathlib import Path
-from unittest.mock import patch
 
 import httpx
 import pytest
 
 from notebooklm.auth import AuthTokens
+from notebooklm.rpc import RPCMethod
 
 # =============================================================================
 # VCR Cassette Availability Check
@@ -98,24 +99,31 @@ def _mock_httpx_cookies() -> httpx.Cookies:
     return cookies
 
 
-@pytest.fixture(autouse=True)
-def mock_httpx_cookies_for_vcr():
-    """Automatically mock load_httpx_cookies() during VCR replay mode.
-
-    Binary download tests use _download_url() which calls load_httpx_cookies()
-    directly. In VCR replay mode, we need to mock this to avoid trying to
-    load auth from storage (which doesn't exist in CI).
-
-    In record mode, we use real cookies so downloads are authenticated.
-    """
-    if _vcr_record_mode:
-        # In record mode, use real auth
-        yield
-    else:
-        # In replay mode, mock the cookies
-        # After refactoring, load_httpx_cookies is imported in _artifact_download
-        with patch(
-            "notebooklm._artifact_download.load_httpx_cookies",
-            return_value=_mock_httpx_cookies(),
-        ):
-            yield
+@pytest.fixture
+def mock_list_notebooks_response():
+    """Mock response for listing notebooks."""
+    inner_data = json.dumps(
+        [
+            [
+                [
+                    "My First Notebook",
+                    [["src_001"], ["src_002"]],
+                    "nb_001",
+                    "📘",
+                    None,
+                    [None, None, None, None, None, [1704067200, 0]],
+                ],
+                [
+                    "Research Notes",
+                    None,
+                    "nb_002",
+                    "📚",
+                    None,
+                    [None, None, None, None, None, [1704153600, 0]],
+                ],
+            ]
+        ]
+    )
+    rpc_id = RPCMethod.LIST_NOTEBOOKS.value
+    chunk = json.dumps([["wrb.fr", rpc_id, inner_data, None, None]])
+    return f")]}}'\n{len(chunk)}\n{chunk}\n"

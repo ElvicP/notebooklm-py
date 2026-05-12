@@ -8,6 +8,7 @@ Commands:
     guide        Get AI-generated source summary and keywords
     stale        Check if a URL/Drive source needs refresh
     delete       Delete a source
+    delete-by-title Delete a source by exact title
     rename       Rename a source
     refresh      Refresh a URL/Drive source
     add-drive    Add a Google Drive document
@@ -15,6 +16,7 @@ Commands:
 """
 
 import asyncio
+import re
 from pathlib import Path
 
 import click
@@ -25,8 +27,10 @@ from ..client import NotebookLMClient
 from ..types import Source, source_status_to_str
 from .helpers import (
     console,
+    display_report,
     display_research_sources,
     get_source_type_display,
+    import_with_retry,
     json_output_response,
     output_result,
     require_notebook,
@@ -34,6 +38,7 @@ from .helpers import (
     resolve_notebook_id_with_title,
     resolve_source_id,
     should_confirm,
+    validate_id,
     with_client,
 )
 from .options import json_option
@@ -52,6 +57,7 @@ def source():
       guide        Get AI-generated source summary and keywords
       stale        Check if source needs refresh
       delete       Delete a source
+      delete-by-title Delete a source by exact title
       rename       Rename a source
       refresh      Refresh a URL/Drive source
 
@@ -61,6 +67,91 @@ def source():
       UUID, you can use a prefix (e.g., 'abc' matches 'abc123def456...').
     """
     pass
+
+
+def _build_id_ambiguity_error(source_id: str, matches) -> click.ClickException:
+    """Build a consistent ambiguity error for source ID prefix matches."""
+    lines = [f"Ambiguous ID '{source_id}' matches {len(matches)} sources:"]
+    for item in matches[:5]:
+        title = item.title or "(untitled)"
+        lines.append(f"  {item.id[:12]}... {title}")
+    if len(matches) > 5:
+        lines.append(f"  ... and {len(matches) - 5} more")
+    lines.append("Specify more characters to narrow down.")
+    return click.ClickException("\n".join(lines))
+
+
+def _looks_like_full_source_id(source_id: str) -> bool:
+    """Return True for UUID-shaped source IDs that can skip list-based resolution."""
+    return bool(
+        re.fullmatch(
+            r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+            source_id,
+        )
+    )
+
+
+async def _resolve_source_for_delete(client, notebook_id: str, source_id: str) -> str:
+    """Resolve a source ID for delete, returning the full source ID string.
+
+    Canonical UUIDs take a fast path and skip the live source list lookup.
+    Partial IDs are resolved against the live list.
+    """
+    source_id = validate_id(source_id, "source")
+    if _looks_like_full_source_id(source_id):
+        return source_id
+
+    sources = await client.sources.list(notebook_id)
+    matches = [item for item in sources if item.id.lower().startswith(source_id.lower())]
+
+    if len(matches) == 1:
+        if matches[0].id != source_id:
+            title = matches[0].title or "(untitled)"
+            console.print(f"[dim]Matched: {matches[0].id[:12]}... ({title})[/dim]")
+        return matches[0].id
+
+    if len(matches) > 1:
+        raise _build_id_ambiguity_error(source_id, matches)
+
+    title_matches = [item for item in sources if item.title == source_id]
+    if title_matches:
+        lines = [
+            f"'{source_id}' matches {len(title_matches)} source title(s), not source IDs.",
+            f"Use 'notebooklm source delete-by-title \"{source_id}\"' or delete by ID:",
+        ]
+        for item in title_matches[:5]:
+            lines.append(f"  {item.id[:12]}... {item.title}")
+        if len(title_matches) > 5:
+            lines.append(f"  ... and {len(title_matches) - 5} more")
+        raise click.ClickException("\n".join(lines))
+
+    raise click.ClickException(
+        f"No source found starting with '{source_id}'. "
+        "Run 'notebooklm source list' to see available sources."
+    )
+
+
+async def _resolve_source_by_exact_title(client, notebook_id: str, title: str):
+    """Resolve a source by exact title for the explicit delete-by-title flow."""
+    title = validate_id(title, "source title")
+    sources = await client.sources.list(notebook_id)
+    matches = [item for item in sources if item.title == title]
+
+    if len(matches) == 1:
+        return matches[0]
+
+    if len(matches) > 1:
+        lines = [f"Title '{title}' matches {len(matches)} sources. Delete by ID instead:"]
+        for item in matches[:5]:
+            lines.append(f"  {item.id[:12]}... {item.title}")
+        if len(matches) > 5:
+            lines.append(f"  ... and {len(matches) - 5} more")
+        raise click.ClickException("\n".join(lines))
+
+    raise click.ClickException(
+        f"No source found with title '{title}'. "
+        "Run 'notebooklm source list' to see available sources."
+    )
 
 
 @source.command("list")
@@ -141,17 +232,28 @@ def source_list(ctx, notebook_id, json_output, client_auth):
     default=None,
     help="Source type (auto-detected if not specified)",
 )
-@click.option("--title", help="Title for text sources")
+@click.option("--title", help="Custom title for text and uploaded-file sources")
 @click.option("--mime-type", help="MIME type for file sources")
-@json_option
+@click.option(
+    "--timeout",
+    default=None,
+    type=float,
+    help=(
+        "HTTP request timeout in seconds (default: 30, from the library). "
+        "Increase when adding slow URLs or large files that exceed the default."
+    ),
+)
+@click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 @with_client
-def source_add(ctx, content, notebook_id, source_type, title, mime_type, json_output, client_auth):
+def source_add(
+    ctx, content, notebook_id, source_type, title, mime_type, timeout, json_output, client_auth
+):
     """Add a source to a notebook.
 
     \b
     Source type is auto-detected:
       - URLs (http/https) -> url or youtube
-      - Existing files (.txt, .md) -> text
+      - Existing files (.txt, .md, etc.) -> file
       - Other content -> text (inline)
       - Use --type to override
 
@@ -184,16 +286,23 @@ def source_add(ctx, content, notebook_id, source_type, title, mime_type, json_ou
             detected_type = "text"
             file_title = title or "Pasted Text"
 
+    client_kwargs: dict = {}
+    if timeout is not None:
+        client_kwargs["timeout"] = timeout
+
     async def _run():
-        async with NotebookLMClient(client_auth) as client:
-            if detected_type in ("url", "youtube"):
-                src = await client.sources.add_url(nb_id, content)
+        async with NotebookLMClient(client_auth, **client_kwargs) as client:
+            nb_id_resolved = await resolve_notebook_id(client, nb_id)
+            if detected_type == "url" or detected_type == "youtube":
+                src = await client.sources.add_url(nb_id_resolved, content)
             elif detected_type == "text":
                 text_content = file_content if file_content is not None else content
                 text_title = file_title or "Untitled"
                 src = await client.sources.add_text(nb_id, text_title, text_content)
             elif detected_type == "file":
-                src = await client.sources.add_file(nb_id, content, mime_type)
+                src = await client.sources.add_file(
+                    nb_id_resolved, content, mime_type, title=file_title
+                )
 
             output_result(
                 json_output,
@@ -273,15 +382,15 @@ def source_delete(ctx, source_id, notebook_id, yes, json_output, client_auth):
 
     async def _run():
         async with NotebookLMClient(client_auth) as client:
-            resolved_nb_id = await resolve_notebook_id(client, nb_id)
-            resolved_id = await resolve_source_id(client, resolved_nb_id, source_id)
+            nb_id_resolved = await resolve_notebook_id(client, nb_id)
+            resolved_id = await _resolve_source_for_delete(client, nb_id_resolved, source_id)
 
             if should_confirm(yes, json_output) and not click.confirm(
                 f"Delete source {resolved_id}?"
             ):
                 return
 
-            success = await client.sources.delete(resolved_nb_id, resolved_id)
+            success = await client.sources.delete(nb_id_resolved, resolved_id)
 
             def render():
                 if success:
@@ -291,9 +400,41 @@ def source_delete(ctx, source_id, notebook_id, yes, json_output, client_auth):
 
             output_result(
                 json_output,
-                {"notebook_id": resolved_nb_id, "source_id": resolved_id, "deleted": success},
+                {"notebook_id": nb_id_resolved, "source_id": resolved_id, "deleted": success},
                 render,
             )
+
+    return _run()
+
+
+@source.command("delete-by-title")
+@click.argument("title")
+@click.option(
+    "-n",
+    "--notebook",
+    "notebook_id",
+    default=None,
+    help="Notebook ID (uses current if not set)",
+)
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@with_client
+def source_delete_by_title(ctx, title, notebook_id, yes, client_auth):
+    """Delete a source by exact title."""
+    nb_id = require_notebook(notebook_id)
+
+    async def _run():
+        async with NotebookLMClient(client_auth) as client:
+            nb_id_resolved = await resolve_notebook_id(client, nb_id)
+            source = await _resolve_source_by_exact_title(client, nb_id_resolved, title)
+
+            if not yes and not click.confirm(f"Delete source '{source.title}' ({source.id})?"):
+                return
+
+            success = await client.sources.delete(nb_id_resolved, source.id)
+            if success:
+                console.print(f"[green]Deleted source:[/green] {source.id}")
+            else:
+                console.print("[yellow]Delete may have failed[/yellow]")
 
     return _run()
 
@@ -455,9 +596,19 @@ def source_add_drive(ctx, file_id, title, notebook_id, mime_type, client_auth):
     is_flag=True,
     help="Start research and return immediately (use 'research status/wait' to monitor)",
 )
+@click.option(
+    "--timeout",
+    default=1800,
+    type=int,
+    help=(
+        "Retry budget in seconds for --import-all when the IMPORT_RESEARCH RPC "
+        "times out (default: 1800). Mirrors 'research wait --timeout'. "
+        "Has no effect without --import-all."
+    ),
+)
 @with_client
 def source_add_research(
-    ctx, query, notebook_id, search_source, mode, import_all, no_wait, client_auth
+    ctx, query, notebook_id, search_source, mode, import_all, no_wait, timeout, client_auth
 ):
     """Search web or drive and add sources from results.
 
@@ -473,8 +624,9 @@ def source_add_research(
 
     async def _run():
         async with NotebookLMClient(client_auth) as client:
+            nb_id_resolved = await resolve_notebook_id(client, nb_id)
             console.print(f"[yellow]Starting {mode} research on {search_source}...[/yellow]")
-            result = await client.research.start(nb_id, query, search_source, mode)
+            result = await client.research.start(nb_id_resolved, query, search_source, mode)
             if not result:
                 console.print("[red]Research failed to start[/red]")
                 raise SystemExit(1)
@@ -492,7 +644,7 @@ def source_add_research(
 
             status = None
             for _ in range(60):
-                status = await client.research.poll(nb_id)
+                status = await client.research.poll(nb_id_resolved)
                 if status.get("status") == "completed":
                     break
                 elif status.get("status") == "no_research":
@@ -507,8 +659,16 @@ def source_add_research(
                 console.print()
                 display_research_sources(sources)
 
+                display_report(status.get("report", ""), json_hint=False)
+
                 if import_all and sources and task_id:
-                    imported = await client.research.import_sources(nb_id, task_id, sources)
+                    imported = await import_with_retry(
+                        client,
+                        nb_id_resolved,
+                        task_id,
+                        sources,
+                        max_elapsed=timeout,
+                    )
                     console.print(f"[green]Imported {len(imported)} sources[/green]")
             else:
                 console.print(f"[yellow]Status: {status.get('status', 'unknown')}[/yellow]")

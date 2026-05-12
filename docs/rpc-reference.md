@@ -1,7 +1,7 @@
 # RPC & UI Reference
 
 **Status:** Active
-**Last Updated:** 2026-03-02
+**Last Updated:** 2026-05-09
 **Source of Truth:** `src/notebooklm/rpc/types.py`
 **Purpose:** Complete reference for RPC methods, UI selectors, and payload structures
 
@@ -22,14 +22,15 @@
 | `s0tc2d` | RENAME_NOTEBOOK | Rename, chat config, share access | `_notebooks.py`, `_chat.py` |
 | `WWINqb` | DELETE_NOTEBOOK | Delete a notebook | `_notebooks.py` |
 | `izAoDd` | ADD_SOURCE | Add URL/text/YouTube source | `_sources.py` |
-| `o4cbdc` | ADD_SOURCE_FILE | Register uploaded file | `_sources.py` |
+| `o4cbdc` | ADD_SOURCE_FILE | Register uploaded file (PDF, DOCX, EPUB, etc.) | `_sources.py` |
 | `tGMBJ` | DELETE_SOURCE | Delete a source | `_sources.py` |
 | `b7Wfje` | UPDATE_SOURCE | Rename source | `_sources.py` |
 | `tr032e` | GET_SOURCE_GUIDE | Get source summary | `_sources.py` |
 | `R7cb6c` | CREATE_ARTIFACT | Unified artifact generation | `_artifacts.py` |
 | `gArtLc` | LIST_ARTIFACTS | List artifacts in a notebook | `_artifacts.py` |
 | `V5N4be` | DELETE_ARTIFACT | Delete artifact | `_artifacts.py` |
-| `hPTbtc` | GET_CONVERSATION_ID | Get most recent conversation ID | `_chat.py` |
+| `KmcKPe` | REVISE_SLIDE | Revise an individual slide via prompt | `_artifacts.py` |
+| `hPTbtc` | GET_LAST_CONVERSATION_ID | Get most recent conversation ID | `_chat.py` |
 | `khqZz` | GET_CONVERSATION_TURNS | Get Q&A turns for a conversation | `_chat.py` |
 | `CYK0Xb` | CREATE_NOTE | Create a note (placeholder) | `_notes.py` |
 | `cYAfTb` | UPDATE_NOTE | Update note content/title | `_notes.py` |
@@ -53,6 +54,7 @@
 | `fejl7e` | REMOVE_RECENTLY_VIEWED | Remove notebook from recent list | `_notebooks.py` |
 | `ZwVcOc` | GET_USER_SETTINGS | Get user settings including output language | `_settings.py` |
 | `hT54vc` | SET_USER_SETTINGS | Set user settings (e.g., output language) | `_settings.py` |
+| `ozz5Z` | GET_USER_TIER | Get current NotebookLM subscription tier | `_settings.py` |
 
 ### Content Type Codes (ArtifactTypeCode)
 
@@ -66,6 +68,28 @@
 | 7 | Infographic | Infographic |
 | 8 | Slide Deck | Slide Deck |
 | 9 | Data Table | Data Table |
+
+### Source Type Codes (file uploads & sources)
+
+Internal integer codes returned by `GET_NOTEBOOK` / `LIST_SOURCES` and consumed by `Source.from_api_response()` (mapped to `SourceType` in `src/notebooklm/types.py`).
+
+| Code | `SourceType` | Used By |
+|------|--------------|---------|
+| 1 | `GOOGLE_DOCS` | Google Docs source |
+| 2 | `GOOGLE_SLIDES` | Google Slides source |
+| 3 | `PDF` | PDF upload |
+| 4 | `PASTED_TEXT` | Inline pasted text |
+| 5 | `WEB_PAGE` | Web URL source |
+| 8 | `MARKDOWN` | Markdown file |
+| 9 | `YOUTUBE` | YouTube URL |
+| 10 | `MEDIA` | Audio / video upload |
+| 11 | `DOCX` | Word document |
+| 13 | `IMAGE` | Image upload |
+| 14 | `GOOGLE_SPREADSHEET` | Google Sheets source |
+| 16 | `CSV` | CSV upload |
+| 17 | `EPUB` | EPUB upload (added in v0.4.0) |
+
+> Codes outside this map are surfaced as `SourceType.UNKNOWN` and emit `UnknownTypeWarning` on first occurrence so unmapped types don't crash callers.
 
 ---
 
@@ -396,7 +420,7 @@ params = [
 ]
 ```
 
-### RPC: GET_CONVERSATION_ID (hPTbtc)
+### RPC: GET_LAST_CONVERSATION_ID (hPTbtc)
 
 **Source:** `_chat.py::get_conversation_id()`
 
@@ -719,13 +743,19 @@ params = [
 
 ```python
 # RPC: GENERATE_MIND_MAP (yyryJe), NOT CREATE_ARTIFACT
+# Python signature:
+#   generate_mind_map(notebook_id, source_ids=None, language="en", instructions=None)
 params = [
     source_ids_nested,                            # 0: [[[sid]] for sid in source_ids]
     None,                                         # 1
     None,                                         # 2
     None,                                         # 3
     None,                                         # 4
-    ["interactive_mindmap", [["[CONTEXT]", ""]], ""],  # 5: Mind map command
+    [
+        "interactive_mindmap",                    # 5[0]: command name
+        [["[CONTEXT]", instructions or ""]],      # 5[1]: instructions (added in v0.4.0)
+        language,                                 # 5[2]: language code, e.g. "en" (added in v0.4.0)
+    ],
     None,                                         # 6
     [2, None, [1]],                               # 7: Fixed config
 ]
@@ -928,11 +958,15 @@ await rpc_call(
 
 # Response structure:
 # [
-#     [summary_text],           # [0][0]: Summary string
-#     [[                        # [1][0]: Suggested topics array
-#         [question, prompt],   # Each topic has question and prompt
-#         ...
-#     ]],
+#     [                             # [0]: Outer container
+#         [summary_text],           # [0][0]: Summary wrapped in list; text at [0][0][0]
+#         [[                        # [0][1][0]: Suggested topics array
+#             [question, prompt],   # Each topic has question and prompt
+#             ...
+#         ]],
+#         null, null, null,
+#         [[question, score], ...], # [0][5]: Topics with relevance scores
+#     ]
 # ]
 ```
 
@@ -1214,6 +1248,14 @@ await rpc_call(
 # Response: [task_id, report_id, ...]
 ```
 
+Deep research is not complete after `QA9ei` alone. In the observed browser/client
+flow, the returned `report_id` later becomes important during polling and import:
+
+1. `QA9ei` starts the deep research job and returns `[task_id, report_id, ...]`
+2. `e3bVqc` polls the notebook for all research tasks and exposes the report content
+3. `LBwxtb` imports the report entry plus selected web sources using the later
+   polled deep-research task ID, which commonly matches the earlier `report_id`
+
 ### RPC: POLL_RESEARCH (e3bVqc)
 
 **Source:** `_research.py::poll()`
@@ -1234,17 +1276,35 @@ await rpc_call(
     source_path=f"/notebook/{notebook_id}",
 )
 
-# Response structure (per task):
+# Response structure:
 # [
 #     [task_id, [
 #         ...,
 #         query_info,           # [1]: [query_text, ...]
 #         ...,
 #         sources_and_summary,  # [3]: [[sources], summary_text]
-#         status_code,          # [4]: 2=completed, other=in_progress
+#         status_code,          # [4]: 2=completed, 6=completed (deep), other=in_progress
 #     ]],
 #     ...
 # ]
+#
+# sources_and_summary[0] can contain a mix of:
+#
+# Fast research web source:
+# [url, title, desc, type, ...]
+#
+# Deep research report source (current shape):
+# [None, [title, report_markdown], None, type, ...]
+#
+# Deep research report source (legacy shape):
+# [None, title, None, type, None, None, [chunk1, chunk2, ...]]
+#
+# Notes:
+# - The RPC returns all research tasks for the notebook, not just the latest one.
+# - The client exposes all parsed tasks via an additive `tasks` field and keeps the
+#   top-level return value backward-compatible as the latest task.
+# - For deep research, sources parsed from poll() carry `research_task_id`, which is
+#   later used by IMPORT_RESEARCH.
 ```
 
 ### RPC: IMPORT_RESEARCH (LBwxtb)
@@ -1255,27 +1315,43 @@ Import selected research sources into the notebook.
 
 ```python
 # Build source array from selected sources
+# Deep research imports prepend a special report entry before regular web sources.
 source_array = []
-for src in sources:
-    source_data = [
-        None,           # 0
-        None,           # 1
-        [url, title],   # 2: URL and title
-        None,           # 3
-        None,           # 4
-        None,           # 5
-        None,           # 6
-        None,           # 7
-        None,           # 8
-        None,           # 9
-        2,              # 10: Fixed value
-    ]
-    source_array.append(source_data)
+
+# Deep research report entry:
+source_array.append([
+    None,                 # 0
+    [title, markdown],    # 1: Report title and full markdown body
+    None,                 # 2
+    3,                    # 3: Special report marker
+    None,                 # 4
+    None,                 # 5
+    None,                 # 6
+    None,                 # 7
+    None,                 # 8
+    None,                 # 9
+    3,                    # 10: Special report marker
+])
+
+# Standard web source entry:
+source_array.append([
+    None,           # 0
+    None,           # 1
+    [url, title],   # 2: URL and title
+    None,           # 3
+    None,           # 4
+    None,           # 5
+    None,           # 6
+    None,           # 7
+    None,           # 8
+    None,           # 9
+    2,              # 10: Standard web-source marker
+])
 
 params = [
     None,           # 0
     [1],            # 1: Fixed flag
-    task_id,        # 2: Research task ID
+    task_id,        # 2: Research task ID (for deep research, use the polled task ID)
     notebook_id,    # 3: Notebook ID
     source_array,   # 4: Array of sources to import
 ]
@@ -1287,7 +1363,13 @@ await rpc_call(
     source_path=f"/notebook/{notebook_id}",
 )
 
-# Response: Imported sources with IDs
+# Response: Imported notebook sources with IDs
+#
+# Notes:
+# - Deep research report preservation depends on importing the special report entry,
+#   not just the URL sources.
+# - The browser/client flow uses the later polled deep-research task ID here rather
+#   than blindly reusing the original task ID returned by START_DEEP_RESEARCH.
 ```
 
 ---
@@ -1295,6 +1377,41 @@ await rpc_call(
 ## User Settings
 
 Global user settings that affect all notebooks in an account.
+
+### RPC: GET_USER_TIER (ozz5Z)
+
+**Source:** `_settings.py::get_account_tier()`
+
+Get the current NotebookLM subscription tier from the homepage context.
+
+```python
+params = [
+    [
+        [
+            [
+                [None, "1", 627],
+                [None, None, None, None, None, None, None, None, None, [None, None, 2]],
+                1,
+            ]
+        ]
+    ]
+]
+
+await rpc_call(
+    RPCMethod.GET_USER_TIER,
+    params,
+    source_path="/",
+)
+
+# Response includes a string like:
+# "NOTEBOOKLM_TIER_STANDARD"
+# "NOTEBOOKLM_TIER_PRO"
+# "NOTEBOOKLM_TIER_PRO_CONSUMER_USER"
+# "NOTEBOOKLM_TIER_PRO_DASHER_END_USER"
+#
+# Treat this as internal account metadata. Use GET_USER_SETTINGS limits for
+# notebook/source quota decisions.
+```
 
 ### RPC: GET_USER_SETTINGS (ZwVcOc)
 
@@ -1325,6 +1442,8 @@ await rpc_call(
 # ]]
 #
 # Language code at: result[0][2][4][0]
+# Notebook limit at: result[0][1][1]
+# Source limit at: result[0][1][2]
 ```
 
 ### RPC: SET_USER_SETTINGS (hT54vc)

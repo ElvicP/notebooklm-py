@@ -32,6 +32,7 @@ from .exceptions import (
 # Re-export enums from rpc/types.py for convenience
 from .rpc.types import (
     ArtifactStatus,
+    ArtifactTypeCode,
     AudioFormat,
     AudioLength,
     ChatGoal,
@@ -40,6 +41,7 @@ from .rpc.types import (
     ExportType,
     InfographicDetail,
     InfographicOrientation,
+    InfographicStyle,
     QuizDifficulty,
     QuizQuantity,
     ReportFormat,
@@ -70,6 +72,23 @@ class UnknownTypeWarning(UserWarning):
     pass
 
 
+@dataclass(frozen=True)
+class AccountLimits:
+    """Account-level limits returned by NotebookLM user settings."""
+
+    notebook_limit: int | None = None
+    source_limit: int | None = None
+    raw_limits: tuple[Any, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class AccountTier:
+    """Raw NotebookLM tier metadata returned by the homepage tier RPC."""
+
+    tier: str | None = None
+    plan_name: str | None = None
+
+
 class SourceType(str, Enum):
     """User-facing source types.
 
@@ -90,6 +109,7 @@ class SourceType(str, Enum):
     MARKDOWN = "markdown"
     DOCX = "docx"
     CSV = "csv"
+    EPUB = "epub"
     IMAGE = "image"
     MEDIA = "media"
     UNKNOWN = "unknown"
@@ -137,6 +157,7 @@ _SOURCE_TYPE_CODE_MAP: dict[int, SourceType] = {
     13: SourceType.IMAGE,
     14: SourceType.GOOGLE_SPREADSHEET,
     16: SourceType.CSV,
+    17: SourceType.EPUB,
 }
 
 # Mapping from internal int codes to ArtifactType enum
@@ -148,6 +169,27 @@ _ARTIFACT_TYPE_CODE_MAP: dict[int, ArtifactType] = {
     7: ArtifactType.INFOGRAPHIC,
     8: ArtifactType.SLIDE_DECK,
     9: ArtifactType.DATA_TABLE,
+}
+
+# Backward-compatible mapping from SourceType to old source_type strings
+# Used by deprecated Source.source_type property
+# Old values were heuristic: "text", "url", "youtube", "text_file"
+# Only includes types that _SOURCE_TYPE_CODE_MAP can produce
+_SOURCE_TYPE_COMPAT_MAP: dict[SourceType, str] = {
+    SourceType.GOOGLE_DOCS: "text",
+    SourceType.GOOGLE_SLIDES: "text",
+    SourceType.GOOGLE_SPREADSHEET: "text",
+    SourceType.PDF: "text_file",
+    SourceType.PASTED_TEXT: "text",
+    SourceType.WEB_PAGE: "url",
+    SourceType.YOUTUBE: "youtube",
+    SourceType.MARKDOWN: "text_file",
+    SourceType.DOCX: "text_file",
+    SourceType.CSV: "text",
+    SourceType.EPUB: "text_file",
+    SourceType.IMAGE: "text",
+    SourceType.MEDIA: "text",
+    SourceType.UNKNOWN: "text",
 }
 
 
@@ -220,13 +262,160 @@ def _map_artifact_kind(artifact_type: int, variant: int | None) -> ArtifactType:
     return result
 
 
+def _extract_source_url(metadata: Any, *, allow_bare_http: bool = True) -> str | None:
+    """Extract a source URL from a ``src[2]`` metadata array.
+
+    NotebookLM stores source URLs at different indices of the metadata array
+    depending on the source type:
+
+    - ``metadata[7]`` → ``[url]`` for web page / PDF sources
+    - ``metadata[5]`` → ``[url, video_id, channel_name]`` for YouTube sources
+    - ``metadata[0]`` → bare URL string for some older/alternate shapes
+
+    Precedence is ``[7] > [5] > [0]``. The ``[0]`` fallback is gated by
+    ``allow_bare_http`` because medium-nested ``from_api_response`` shapes
+    don't support it (``metadata[0]`` can pack unrelated data there).
+    Returns ``None`` if ``metadata`` is not a list or no probe matches.
+    """
+    if not isinstance(metadata, list):
+        return None
+    url: str | None = None
+    if len(metadata) > 7:
+        url_list = metadata[7]
+        if isinstance(url_list, list) and len(url_list) > 0:
+            url = url_list[0]
+    if not url and len(metadata) > 5:
+        yt_data = metadata[5]
+        if isinstance(yt_data, list) and len(yt_data) > 0 and isinstance(yt_data[0], str):
+            url = yt_data[0]
+    if not url and allow_bare_http and len(metadata) > 0:
+        candidate = metadata[0]
+        if isinstance(candidate, str) and candidate.startswith("http"):
+            url = candidate
+    return url
+
+
+def _datetime_from_timestamp(value: Any) -> datetime | None:
+    """Convert an API seconds timestamp to ``datetime``, returning ``None`` if invalid."""
+    try:
+        return datetime.fromtimestamp(value)
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
+
+
+def _extract_source_created_at(metadata: Any) -> datetime | None:
+    """Extract a source creation timestamp from a ``src[2]`` metadata array."""
+    if not isinstance(metadata, list) or len(metadata) <= 2:
+        return None
+
+    timestamp_list = metadata[2]
+    if not isinstance(timestamp_list, list) or not timestamp_list:
+        return None
+
+    return _datetime_from_timestamp(timestamp_list[0])
+
+
+def _is_valid_artifact_url(value: Any) -> bool:
+    """Return True when ``value`` looks like a downloadable artifact URL."""
+    return isinstance(value, str) and value.startswith(("http://", "https://"))
+
+
+def _extract_audio_artifact_url(data: list[Any]) -> str | None:
+    if len(data) <= 6 or not isinstance(data[6], list) or len(data[6]) <= 5:
+        return None
+
+    media_list = data[6][5]
+    if not isinstance(media_list, list):
+        return None
+
+    for item in media_list:
+        if (
+            isinstance(item, list)
+            and len(item) > 2
+            and item[2] == "audio/mp4"
+            and _is_valid_artifact_url(item[0])
+        ):
+            return item[0]
+
+    for item in media_list:
+        if isinstance(item, list) and item and _is_valid_artifact_url(item[0]):
+            return item[0]
+
+    return None
+
+
+def _extract_video_artifact_url(data: list[Any]) -> str | None:
+    if len(data) <= 8 or not isinstance(data[8], list):
+        return None
+
+    fallback_url = None
+    for media_list in data[8]:
+        if not isinstance(media_list, list):
+            continue
+        for item in media_list:
+            if not isinstance(item, list) or not item or not _is_valid_artifact_url(item[0]):
+                continue
+            if fallback_url is None:
+                fallback_url = item[0]
+            if len(item) > 2 and item[2] == "video/mp4":
+                if len(item) > 1 and item[1] == 4:
+                    return item[0]
+                fallback_url = item[0]
+
+    return fallback_url
+
+
+def _extract_infographic_artifact_url(data: list[Any]) -> str | None:
+    for item in data:
+        if not isinstance(item, list) or len(item) <= 2:
+            continue
+        content = item[2]
+        if not isinstance(content, list) or not content:
+            continue
+        first_content = content[0]
+        if not isinstance(first_content, list) or len(first_content) <= 1:
+            continue
+        img_data = first_content[1]
+        if isinstance(img_data, list) and img_data and _is_valid_artifact_url(img_data[0]):
+            return img_data[0]
+    return None
+
+
+def _extract_slide_deck_artifact_url(data: list[Any]) -> str | None:
+    """Extract the slide-deck PDF URL. The PPTX URL at ``data[16][4]`` is not
+    surfaced — callers wanting PPTX should use ``download_slide_deck(output_format="pptx")``."""
+    if (
+        len(data) > 16
+        and isinstance(data[16], list)
+        and len(data[16]) > 3
+        and _is_valid_artifact_url(data[16][3])
+    ):
+        return data[16][3]
+    return None
+
+
+def _extract_artifact_url(data: list[Any], artifact_type: int | None) -> str | None:
+    """Extract a public download URL from known artifact response shapes."""
+    if artifact_type == ArtifactTypeCode.AUDIO.value:
+        return _extract_audio_artifact_url(data)
+    if artifact_type == ArtifactTypeCode.VIDEO.value:
+        return _extract_video_artifact_url(data)
+    if artifact_type == ArtifactTypeCode.INFOGRAPHIC.value:
+        return _extract_infographic_artifact_url(data)
+    if artifact_type == ArtifactTypeCode.SLIDE_DECK.value:
+        return _extract_slide_deck_artifact_url(data)
+    return None
+
+
 __all__ = [
     # Dataclasses
     "Notebook",
     "NotebookDescription",
+    "NotebookMetadata",
     "SuggestedTopic",
     "Source",
     "SourceFulltext",
+    "SourceSummary",
     "Artifact",
     "GenerationStatus",
     "ReportSuggestion",
@@ -264,6 +453,7 @@ __all__ = [
     "QuizDifficulty",
     "InfographicOrientation",
     "InfographicDetail",
+    "InfographicStyle",
     "SlideDeckFormat",
     "SlideDeckLength",
     "ReportFormat",
@@ -301,6 +491,42 @@ class ChatMode(Enum):
 
 
 @dataclass
+class SourceSummary:
+    """Simplified source information for metadata export.
+
+    This type provides a minimal representation of a source for
+    notebook metadata export, focusing on the most commonly needed fields.
+
+    Attributes:
+        kind: Source type (e.g., "pdf", "web_page", "youtube").
+        title: Source title if available.
+        url: Source URL if applicable (web/YouTube sources).
+    """
+
+    kind: SourceType
+    title: str | None = None
+    url: str | None = None
+
+    def to_dict(self) -> dict[str, str | None]:
+        """Convert to dictionary for JSON serialization.
+
+        Always includes all keys with null for missing values
+        to ensure consistent schema across all source entries.
+        """
+        return {
+            "type": self.kind.value,
+            "title": self.title,
+            "url": self.url,
+        }
+
+
+def _extract_notebook_sources_count(data: list[Any]) -> int:
+    """Extract the embedded source count from a notebook API payload."""
+    sources = data[1] if len(data) > 1 else None
+    return len(sources) if isinstance(sources, list) else 0
+
+
+@dataclass
 class Notebook:
     """Represents a NotebookLM notebook."""
 
@@ -322,23 +548,27 @@ class Notebook:
         """
         raw_title = data[0] if len(data) > 0 and isinstance(data[0], str) else ""
         title = raw_title.replace("thought\n", "").strip()
+        sources_count = _extract_notebook_sources_count(data)
         notebook_id = data[2] if len(data) > 2 and isinstance(data[2], str) else ""
 
         created_at = None
         if len(data) > 5 and isinstance(data[5], list) and len(data[5]) > 5:
             ts_data = data[5][5]
             if isinstance(ts_data, list) and len(ts_data) > 0:
-                try:
-                    created_at = datetime.fromtimestamp(ts_data[0])
-                except (TypeError, ValueError):
-                    pass
+                created_at = _datetime_from_timestamp(ts_data[0])
 
         # Extract ownership - data[5][1] = False means owner, True means shared
         is_owner = True
         if len(data) > 5 and isinstance(data[5], list) and len(data[5]) > 1:
             is_owner = data[5][1] is False
 
-        return cls(id=notebook_id, title=title, created_at=created_at, is_owner=is_owner)
+        return cls(
+            id=notebook_id,
+            title=title,
+            created_at=created_at,
+            sources_count=sources_count,
+            is_owner=is_owner,
+        )
 
 
 @dataclass
@@ -367,6 +597,55 @@ class NotebookDescription:
             summary=data.get("summary", ""),
             suggested_topics=topics,
         )
+
+
+@dataclass
+class NotebookMetadata:
+    """Combined notebook metadata with sources list.
+
+    This composes a Notebook with a list of simplified source information
+    for export/overview purposes.
+
+    Attributes:
+        notebook: The notebook object with all its details.
+        sources: List of simplified source information.
+    """
+
+    notebook: Notebook
+    sources: list[SourceSummary] = field(default_factory=list)
+
+    @property
+    def id(self) -> str:
+        """Get notebook ID."""
+        return self.notebook.id
+
+    @property
+    def title(self) -> str:
+        """Get notebook title."""
+        return self.notebook.title
+
+    @property
+    def created_at(self) -> datetime | None:
+        """Get creation timestamp."""
+        return self.notebook.created_at
+
+    @property
+    def is_owner(self) -> bool:
+        """Get owner status."""
+        return self.notebook.is_owner
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for JSON serialization.
+
+        Flattens notebook fields for backward compatibility with issue spec.
+        """
+        return {
+            "id": self.id,
+            "title": self.title,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "is_owner": self.is_owner,
+            "sources": [s.to_dict() for s in self.sources],
+        }
 
 
 # =============================================================================
@@ -408,6 +687,24 @@ class Source:
             unrecognized type codes (with a warning on first occurrence).
         """
         return _safe_source_type(self._type_code)
+
+    @property
+    def source_type(self) -> str:
+        """Deprecated: Use .kind instead.
+
+        Returns the old-style source type string for backward compatibility.
+        Values: "text", "url", "youtube", "text_file"
+
+        .. deprecated:: 0.3.0
+            Use the ``.kind`` property which returns a ``SourceType`` enum.
+            Will be removed in v0.5.0.
+        """
+        warnings.warn(
+            "Source.source_type is deprecated, use .kind instead. Will be removed in v0.5.0.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return _SOURCE_TYPE_COMPAT_MAP.get(self.kind, "text")
 
     @property
     def is_ready(self) -> bool:
@@ -467,34 +764,46 @@ class Source:
                     source_id = entry[0][0] if isinstance(entry[0], list) else entry[0]
                     title = entry[1] if len(entry) > 1 else None
 
-                    # Try to extract URL if present
-                    url = None
-                    if len(entry) > 2 and isinstance(entry[2], list):
-                        if len(entry[2]) > 7 and isinstance(entry[2][7], list):
-                            url = entry[2][7][0] if entry[2][7] else None
+                    # Extract URL and type code from entry[2] via the shared
+                    # helper. Medium-nested shapes don't support the bare-http
+                    # [0] fallback, so precedence is restricted to [7] > [5].
+                    metadata = entry[2] if len(entry) > 2 and isinstance(entry[2], list) else None
+                    url = _extract_source_url(metadata, allow_bare_http=False)
+                    type_code = (
+                        metadata[4]
+                        if metadata is not None
+                        and len(metadata) > 4
+                        and isinstance(metadata[4], int)
+                        else None
+                    )
+                    created_at = _extract_source_created_at(metadata)
 
-                    return cls(id=str(source_id), title=title, url=url, _type_code=None)
+                    return cls(
+                        id=str(source_id),
+                        title=title,
+                        url=url,
+                        _type_code=type_code,
+                        created_at=created_at,
+                    )
 
-                # Deeply nested: continue with URL and type code extraction
-                url = None
-                type_code = None
-                if len(entry) > 2 and isinstance(entry[2], list):
-                    if len(entry[2]) > 7:
-                        url_list = entry[2][7]
-                        if isinstance(url_list, list) and len(url_list) > 0:
-                            url = url_list[0]
-                    if not url and len(entry[2]) > 0:
-                        if isinstance(entry[2][0], str) and entry[2][0].startswith("http"):
-                            url = entry[2][0]
-                    # Extract type code at entry[2][4] if available
-                    if len(entry[2]) > 4 and isinstance(entry[2][4], int):
-                        type_code = entry[2][4]
+                # Deeply-nested shape: extract URL (via shared helper) and
+                # type code from entry[2] if present. Full precedence applies:
+                # [7] > [5] > bare-http at [0].
+                metadata = entry[2] if len(entry) > 2 and isinstance(entry[2], list) else None
+                url = _extract_source_url(metadata)
+                type_code = (
+                    metadata[4]
+                    if metadata is not None and len(metadata) > 4 and isinstance(metadata[4], int)
+                    else None
+                )
+                created_at = _extract_source_created_at(metadata)
 
                 return cls(
                     id=str(source_id),
                     title=title,
                     url=url,
                     _type_code=type_code,
+                    created_at=created_at,
                 )
 
         # Simple flat format: [id, title] or [id, title, ...]
@@ -534,6 +843,25 @@ class SourceFulltext:
     def kind(self) -> SourceType:
         """Get source type as SourceType enum."""
         return _safe_source_type(self._type_code)
+
+    @property
+    def source_type(self) -> str:
+        """Deprecated: Use .kind instead.
+
+        Returns the old-style source type string for backward compatibility.
+        Values: "text", "url", "youtube", "text_file"
+
+        .. deprecated:: 0.3.0
+            Use the ``.kind`` property which returns a ``SourceType`` enum.
+            Will be removed in v0.5.0.
+        """
+        warnings.warn(
+            "SourceFulltext.source_type is deprecated, use .kind instead. "
+            "Will be removed in v0.5.0.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return _SOURCE_TYPE_COMPAT_MAP.get(self.kind, "text")
 
     def find_citation_context(
         self,
@@ -604,7 +932,8 @@ class Artifact:
         kind: Artifact type as ArtifactType enum (str enum, comparable to strings).
         status: Processing status (1=processing, 2=pending, 3=completed, 4=failed).
         created_at: When the artifact was created.
-        url: Download URL (if available).
+        url: Download URL (if available). For slide decks this is the PDF URL
+            only — PPTX is fetched separately via ``download_slide_deck(output_format="pptx")``.
 
     Example:
         artifact.kind == ArtifactType.AUDIO  # True
@@ -630,19 +959,40 @@ class Artifact:
         """
         return _map_artifact_kind(self._artifact_type, self._variant)
 
-    def __getattr__(self, name: str):
-        """Provide helpful error messages for removed attributes."""
-        if name == "artifact_type":
-            raise AttributeError(
-                "Artifact.artifact_type was removed in v0.4.0. "
-                "Use Artifact.kind instead (returns ArtifactType enum)."
-            )
-        if name == "variant":
-            raise AttributeError(
-                "Artifact.variant was removed in v0.4.0. "
-                "Use Artifact.kind, .is_quiz, or .is_flashcards instead."
-            )
-        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+    @property
+    def artifact_type(self) -> int:
+        """Deprecated: Use .kind instead.
+
+        Returns the raw integer type code for backward compatibility.
+
+        .. deprecated:: 0.3.0
+            Use the ``.kind`` property which returns an ``ArtifactType`` enum.
+            Will be removed in v0.5.0.
+        """
+        warnings.warn(
+            "Artifact.artifact_type is deprecated, use .kind instead. Will be removed in v0.5.0.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self._artifact_type
+
+    @property
+    def variant(self) -> int | None:
+        """Deprecated: Use .kind, .is_quiz, or .is_flashcards instead.
+
+        Returns the variant code for type 4 artifacts (1=flashcards, 2=quiz).
+
+        .. deprecated:: 0.3.0
+            Use ``.kind == ArtifactType.QUIZ`` or ``.is_quiz`` / ``.is_flashcards``.
+            Will be removed in v0.5.0.
+        """
+        warnings.warn(
+            "Artifact.variant is deprecated. Use .kind, .is_quiz, or .is_flashcards instead. "
+            "Will be removed in v0.5.0.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self._variant
 
     @classmethod
     def from_api_response(cls, data: list[Any]) -> "Artifact":
@@ -660,10 +1010,7 @@ class Artifact:
         # Extract timestamp from data[15][0]
         created_at = None
         if len(data) > 15 and isinstance(data[15], list) and len(data[15]) > 0:
-            try:
-                created_at = datetime.fromtimestamp(data[15][0])
-            except (TypeError, ValueError):
-                pass
+            created_at = _datetime_from_timestamp(data[15][0])
 
         # Extract variant code from data[9][1][0] for quiz/flashcard distinction
         variant = None
@@ -672,12 +1019,15 @@ class Artifact:
             if isinstance(options, list) and len(options) > 0:
                 variant = options[0]
 
+        url = _extract_artifact_url(data, artifact_type if isinstance(artifact_type, int) else None)
+
         return cls(
             id=str(artifact_id),
             title=str(title),
             _artifact_type=artifact_type,
             status=status,
             created_at=created_at,
+            url=url,
             _variant=variant,
         )
 
@@ -724,10 +1074,7 @@ class Artifact:
             if len(inner) > 2 and isinstance(inner[2], list) and len(inner[2]) > 2:
                 ts_data = inner[2][2]
                 if isinstance(ts_data, list) and len(ts_data) > 0:
-                    try:
-                        created_at = datetime.fromtimestamp(ts_data[0])
-                    except (TypeError, ValueError):
-                        pass
+                    created_at = _datetime_from_timestamp(ts_data[0])
 
         return cls(
             id=str(mind_map_id),
@@ -807,7 +1154,7 @@ class GenerationStatus:
     """
 
     task_id: str  # Same as artifact_id - used for polling and becomes Artifact.id
-    status: str  # "pending", "in_progress", "completed", "failed"
+    status: str  # "pending", "in_progress", "completed", "failed", "not_found"
     url: str | None = None
     error: str | None = None
     error_code: str | None = None  # e.g., "USER_DISPLAYABLE_ERROR" for rate limits
@@ -834,6 +1181,22 @@ class GenerationStatus:
         return self.status == "in_progress"
 
     @property
+    def is_not_found(self) -> bool:
+        """Check if the artifact was not found in the poll response.
+
+        This status is set by ``poll_status()`` when the artifact ID is
+        absent from the artifact list.  It differs from ``is_pending``:
+        a ``pending`` artifact exists in the list and is queued, while a
+        ``not_found`` artifact has either not yet appeared (brief lag after
+        creation) or was silently removed by the server (e.g. after a
+        daily-quota rejection).
+
+        ``wait_for_completion`` treats a sustained run of ``not_found``
+        responses as a failure — see its ``max_not_found`` parameter.
+        """
+        return self.status == "not_found"
+
+    @property
     def is_rate_limited(self) -> bool:
         """Check if generation failed due to rate limiting or quota exceeded.
 
@@ -850,7 +1213,11 @@ class GenerationStatus:
         # Fall back to string matching for backwards compatibility
         if self.error is not None:
             error_lower = self.error.lower()
-            return "rate limit" in error_lower or "quota" in error_lower
+            return (
+                "rate limit" in error_lower
+                or "quota" in error_lower
+                or "limit exceeded" in error_lower
+            )
 
         return False
 
@@ -912,10 +1279,7 @@ class Note:
 
         created_at = None
         if len(data) > 3 and isinstance(data[3], list) and len(data[3]) > 0:
-            try:
-                created_at = datetime.fromtimestamp(data[3][0])
-            except (TypeError, ValueError):
-                pass
+            created_at = _datetime_from_timestamp(data[3][0])
 
         return cls(
             id=str(note_id),

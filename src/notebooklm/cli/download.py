@@ -16,14 +16,14 @@ Also supports downloading by artifact UUID:
 """
 
 import json
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable
 from functools import partial
 from pathlib import Path
-from typing import Any, TypedDict, cast
+from typing import Any, TypedDict
 
 import click
 
-from ..auth import AuthTokens, fetch_tokens, load_auth_from_storage
+from ..auth import AuthTokens
 from ..client import NotebookLMClient
 from ..types import Artifact, ArtifactType
 from .download_helpers import (
@@ -45,9 +45,13 @@ from .options import json_option
 async def _get_auth_from_context(ctx) -> AuthTokens:
     """Get authentication tokens from CLI context."""
     storage_path = ctx.obj.get("storage_path") if ctx.obj else None
-    cookies = load_auth_from_storage(storage_path)
-    csrf, session_id = await fetch_tokens(cookies)
-    return AuthTokens(cookies=cookies, csrf_token=csrf, session_id=session_id)
+    profile = ctx.obj.get("profile") if ctx.obj else None
+    return await AuthTokens.from_storage(storage_path, profile=profile)
+
+
+# Common signature shared by all artifact download functions.
+# Each function accepts (notebook_id, output_path, *, artifact_id=None, **kwargs).
+_DownloadFn = Callable[..., Awaitable[str]]
 
 
 class ArtifactConfig(TypedDict):
@@ -197,6 +201,22 @@ def download(ctx, output, group_notebook, group_json, group_dry_run, group_force
         )
 
 
+async def _get_completed_artifacts_as_dicts(
+    client: NotebookLMClient, notebook_id: str, artifact_kind: ArtifactType
+) -> list[ArtifactDict]:
+    """Fetch all artifacts, filter by kind and completion, and return as dicts."""
+    all_artifacts = await client.artifacts.list(notebook_id)
+    return [
+        {
+            "id": a.id,
+            "title": a.title,
+            "created_at": int(a.created_at.timestamp()) if a.created_at else 0,
+        }
+        for a in all_artifacts
+        if isinstance(a, Artifact) and a.kind == artifact_kind and a.is_completed
+    ]
+
+
 async def _download_artifacts_generic(
     ctx,
     artifact_type_name: str,
@@ -257,14 +277,28 @@ async def _download_artifacts_generic(
 
     # Get notebook and auth
     nb_id = require_notebook(notebook)
-    auth = await _get_auth_from_context(ctx)
+    storage_path = ctx.obj.get("storage_path") if ctx.obj else None
+    profile = ctx.obj.get("profile") if ctx.obj else None
+    from ..auth import AuthTokens
+
+    auth = await AuthTokens.from_storage(storage_path, profile=profile)
+
+    # Adjust extension for PPTX format (must be outside _download() to avoid UnboundLocalError)
+    if artifact_type_name == "slide-deck" and slide_format == "pptx":
+        file_extension = ".pptx"
+        if output_path and not output_path.endswith(".pptx"):
+            click.echo(
+                f"Warning: output path '{output_path}' does not end with .pptx "
+                "but --format pptx was requested.",
+                err=True,
+            )
 
     async def _download() -> dict[str, Any]:
         async with NotebookLMClient(auth) as client:
             nb_id_resolved = await resolve_notebook_id(client, nb_id)
 
             # Setup download method dispatch
-            download_methods = {
+            download_methods: dict[str, _DownloadFn] = {
                 "audio": client.artifacts.download_audio,
                 "video": client.artifacts.download_video,
                 "infographic": client.artifacts.download_infographic,
@@ -273,41 +307,24 @@ async def _download_artifacts_generic(
                 "mind-map": client.artifacts.download_mind_map,
                 "data-table": client.artifacts.download_data_table,
             }
-            raw_fn = download_methods.get(artifact_type_name)
-            if not raw_fn:
+            download_fn: _DownloadFn | None = download_methods.get(artifact_type_name)
+            if not download_fn:
                 raise ValueError(f"Unknown artifact type: {artifact_type_name}")
 
-            # For slide-deck with PPTX format, bind output_format
-            _DownloadFn = Callable[..., Coroutine[Any, Any, str]]
-            download_fn: _DownloadFn = cast(_DownloadFn, raw_fn)
+            # For slide-deck with PPTX format, bind output_format="pptx"
             if artifact_type_name == "slide-deck" and slide_format == "pptx":
-                download_fn = partial(cast(_DownloadFn, raw_fn), output_format="pptx")
+                download_fn = partial(client.artifacts.download_slide_deck, output_format="pptx")
 
-            # Fetch artifacts
-            all_artifacts = await client.artifacts.list(nb_id_resolved)
+            # Fetch and filter artifacts by type and completed status
+            type_artifacts = await _get_completed_artifacts_as_dicts(
+                client, nb_id_resolved, artifact_kind
+            )
 
-            # Filter by type and completed status
-            completed_artifacts = [
-                a
-                for a in all_artifacts
-                if isinstance(a, Artifact) and a.kind == artifact_kind and a.is_completed
-            ]
-
-            if not completed_artifacts:
+            if not type_artifacts:
                 return {
                     "error": f"No completed {artifact_type_name} artifacts found",
                     "suggestion": f"Generate one with: notebooklm generate {artifact_type_name}",
                 }
-
-            # Convert to dict format for selection logic
-            type_artifacts: list[ArtifactDict] = [
-                {
-                    "id": a.id,
-                    "title": a.title,
-                    "created_at": int(a.created_at.timestamp()) if a.created_at else 0,
-                }
-                for a in completed_artifacts
-            ]
 
             # Helper for file conflict resolution
             def _resolve_conflict(path: Path) -> tuple[Path | None, dict | None]:
@@ -440,6 +457,11 @@ async def _download_artifacts_generic(
 
             # Single artifact selection
             try:
+                resolved_artifact_id = (
+                    resolve_partial_artifact_id(type_artifacts, artifact_id)
+                    if artifact_id
+                    else None
+                )
                 selected, reason = select_artifact(
                     type_artifacts,
                     latest=latest,
@@ -565,6 +587,178 @@ def _display_download_result(result: dict, artifact_type: str) -> None:
         console.print(
             f"[dim]Artifact: {result['artifact']['title']} ({result['artifact']['selection_reason']})[/dim]"
         )
+
+
+@download.command("audio")
+@click.argument("output_path", required=False, type=click.Path())
+@click.option("-n", "--notebook", help="Notebook ID (uses current context if not set)")
+@click.option("--latest", is_flag=True, help="Download latest (default behavior)")
+@click.option("--earliest", is_flag=True, help="Download earliest")
+@click.option("--all", "download_all", is_flag=True, help="Download all artifacts")
+@click.option("--name", help="Filter by artifact title (fuzzy match)")
+@click.option("-a", "--artifact", "artifact_id", help="Select by artifact ID")
+@click.option("--json", "json_output", is_flag=True, help="Output JSON instead of text")
+@click.option("--dry-run", is_flag=True, help="Preview without downloading")
+@click.option("--force", is_flag=True, help="Overwrite existing files")
+@click.option("--no-clobber", is_flag=True, help="Skip if file exists")
+@click.pass_context
+def download_audio(ctx, **kwargs):
+    """Download audio overview(s) to file.
+
+    \b
+    Examples:
+      # Download latest audio to default filename
+      notebooklm download audio
+
+      # Download to specific path
+      notebooklm download audio my-podcast.mp3
+
+      # Download all audio files to directory
+      notebooklm download audio --all ./audio/
+
+      # Download specific artifact by name
+      notebooklm download audio --name "chapter 3"
+
+      # Preview without downloading
+      notebooklm download audio --all --dry-run
+    """
+    _run_artifact_download(ctx, "audio", **kwargs)
+
+
+@download.command("video")
+@click.argument("output_path", required=False, type=click.Path())
+@click.option("-n", "--notebook", help="Notebook ID (uses current context if not set)")
+@click.option("--latest", is_flag=True, help="Download latest (default behavior)")
+@click.option("--earliest", is_flag=True, help="Download earliest")
+@click.option("--all", "download_all", is_flag=True, help="Download all artifacts")
+@click.option("--name", help="Filter by artifact title (fuzzy match)")
+@click.option("-a", "--artifact", "artifact_id", help="Select by artifact ID")
+@click.option("--json", "json_output", is_flag=True, help="Output JSON instead of text")
+@click.option("--dry-run", is_flag=True, help="Preview without downloading")
+@click.option("--force", is_flag=True, help="Overwrite existing files")
+@click.option("--no-clobber", is_flag=True, help="Skip if file exists")
+@click.pass_context
+def download_video(ctx, **kwargs):
+    """Download video overview(s) to file.
+
+    \b
+    Examples:
+      # Download latest video to default filename
+      notebooklm download video
+
+      # Download to specific path
+      notebooklm download video my-video.mp4
+
+      # Download all video files to directory
+      notebooklm download video --all ./video/
+
+      # Download specific artifact by name
+      notebooklm download video --name "chapter 3"
+
+      # Preview without downloading
+      notebooklm download video --all --dry-run
+    """
+    _run_artifact_download(ctx, "video", **kwargs)
+
+
+# Cinematic videos share ArtifactTypeCode.VIDEO with standard videos, so
+# 'download cinematic-video' is a thin alias reusing download_video's params.
+_cinematic_video_cmd = click.Command(
+    name="cinematic-video",
+    callback=download_video.callback,
+    params=list(download_video.params),
+    help=(
+        "Download cinematic video overview(s) to file.\n\n"
+        "Alias for 'download video' — cinematic and standard videos share\n"
+        "the same artifact type."
+    ),
+)
+download.add_command(_cinematic_video_cmd)
+
+
+@download.command("slide-deck")
+@click.argument("output_path", required=False, type=click.Path())
+@click.option("-n", "--notebook", help="Notebook ID (uses current context if not set)")
+@click.option("--latest", is_flag=True, help="Download latest (default behavior)")
+@click.option("--earliest", is_flag=True, help="Download earliest")
+@click.option("--all", "download_all", is_flag=True, help="Download all artifacts")
+@click.option("--name", help="Filter by artifact title (fuzzy match)")
+@click.option("-a", "--artifact", "artifact_id", help="Select by artifact ID")
+@click.option("--json", "json_output", is_flag=True, help="Output JSON instead of text")
+@click.option("--dry-run", is_flag=True, help="Preview without downloading")
+@click.option("--force", is_flag=True, help="Overwrite existing files")
+@click.option("--no-clobber", is_flag=True, help="Skip if file exists")
+@click.option(
+    "--format",
+    "slide_format",
+    type=click.Choice(["pdf", "pptx"]),
+    default="pdf",
+    help="Download format: pdf (default) or pptx",
+)
+@click.pass_context
+def download_slide_deck(ctx, **kwargs):
+    """Download slide deck(s) as PDF or PPTX.
+
+    \b
+    Examples:
+      # Download latest slide deck to default filename
+      notebooklm download slide-deck
+
+      # Download as PPTX
+      notebooklm download slide-deck --format pptx
+
+      # Download to specific path
+      notebooklm download slide-deck my-slides.pdf
+
+      # Download all slide decks to directory
+      notebooklm download slide-deck --all ./slides/
+
+      # Download specific artifact by name
+      notebooklm download slide-deck --name "chapter 3"
+
+      # Preview without downloading
+      notebooklm download slide-deck --all --dry-run
+    """
+    _run_artifact_download(ctx, "slide-deck", **kwargs)
+
+
+@download.command("infographic")
+@click.argument("output_path", required=False, type=click.Path())
+@click.option("-n", "--notebook", help="Notebook ID (uses current context if not set)")
+@click.option("--latest", is_flag=True, help="Download latest (default behavior)")
+@click.option("--earliest", is_flag=True, help="Download earliest")
+@click.option("--all", "download_all", is_flag=True, help="Download all artifacts")
+@click.option("--name", help="Filter by artifact title (fuzzy match)")
+@click.option("-a", "--artifact", "artifact_id", help="Select by artifact ID")
+@click.option("--json", "json_output", is_flag=True, help="Output JSON instead of text")
+@click.option("--dry-run", is_flag=True, help="Preview without downloading")
+@click.option("--force", is_flag=True, help="Overwrite existing files")
+@click.option("--no-clobber", is_flag=True, help="Skip if file exists")
+@click.pass_context
+def download_infographic(ctx, **kwargs):
+    """Download infographic(s) to file.
+
+    \b
+    Examples:
+      # Download latest infographic to default filename
+      notebooklm download infographic
+
+      # Download to specific path
+      notebooklm download infographic my-infographic.png
+
+      # Download all infographic files to directory
+      notebooklm download infographic --all ./infographic/
+
+      # Download specific artifact by name
+      notebooklm download infographic --name "chapter 3"
+
+      # Preview without downloading
+      notebooklm download infographic --all --dry-run
+    """
+    _run_artifact_download(ctx, "infographic", **kwargs)
+
+
+FORMAT_EXTENSIONS = {"json": ".json", "markdown": ".md", "html": ".html"}
 
 
 def _run_artifact_download(ctx, artifact_type: str, **kwargs) -> None:
@@ -971,19 +1165,29 @@ async def _download_interactive(
         Path to downloaded file.
     """
     nb_id = require_notebook(notebook)
-    auth = await _get_auth_from_context(ctx)
+    storage_path = ctx.obj.get("storage_path") if ctx.obj else None
+    profile = ctx.obj.get("profile") if ctx.obj else None
+    from ..auth import AuthTokens
+
+    auth = await AuthTokens.from_storage(storage_path, profile=profile)
 
     async with NotebookLMClient(auth) as client:
         nb_id_resolved = await resolve_notebook_id(client, nb_id)
         ext = FORMAT_EXTENSIONS[output_format]
         path = output_path or f"{artifact_type}{ext}"
 
+        resolved_artifact_id = artifact_id
+        if artifact_id:
+            kind = ArtifactType.QUIZ if artifact_type == "quiz" else ArtifactType.FLASHCARDS
+            type_artifacts = await _get_completed_artifacts_as_dicts(client, nb_id_resolved, kind)
+            resolved_artifact_id = resolve_partial_artifact_id(type_artifacts, artifact_id)
+
         if artifact_type == "quiz":
             return await client.artifacts.download_quiz(
-                nb_id_resolved, path, artifact_id=artifact_id, output_format=output_format
+                nb_id_resolved, path, artifact_id=resolved_artifact_id, output_format=output_format
             )
         return await client.artifacts.download_flashcards(
-            nb_id_resolved, path, artifact_id=artifact_id, output_format=output_format
+            nb_id_resolved, path, artifact_id=resolved_artifact_id, output_format=output_format
         )
 
 

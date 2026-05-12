@@ -17,6 +17,7 @@ import pytest
 from notebooklm._artifacts import ArtifactsAPI
 from notebooklm._chat import ChatAPI
 from notebooklm.auth import AuthTokens
+from notebooklm.rpc import InfographicStyle
 
 
 @pytest.fixture
@@ -419,6 +420,27 @@ class TestArtifactsSourceSelection:
         assert source_ids_triple == [[["src_info_1"]], [["src_info_2"]]]
 
     @pytest.mark.asyncio
+    async def test_generate_infographic_style_encoding(self, mock_core, mock_notes_api):
+        """Test generate_infographic encodes style in config slot 5."""
+        api = ArtifactsAPI(mock_core, mock_notes_api)
+
+        mock_core.rpc_call.return_value = [["artifact_info", "Infographic", 7, None, 1]]
+
+        await api.generate_infographic(
+            notebook_id="nb_123",
+            source_ids=["src_info_1"],
+            style=InfographicStyle.PROFESSIONAL,
+        )
+
+        call_args = mock_core.rpc_call.call_args
+        params = call_args.args[1]
+
+        inner_params = params[2]
+        infographic_config = inner_params[14][0]
+
+        assert infographic_config[5] == InfographicStyle.PROFESSIONAL.value
+
+    @pytest.mark.asyncio
     async def test_generate_slide_deck_source_encoding(self, mock_core, mock_notes_api):
         """Test generate_slide_deck has correct source encoding format."""
         api = ArtifactsAPI(mock_core, mock_notes_api)
@@ -486,6 +508,31 @@ class TestArtifactsSourceSelection:
         source_ids_nested = params[0]
 
         assert source_ids_nested == [[["src_mm_1"]], [["src_mm_2"]]]
+
+    @pytest.mark.asyncio
+    async def test_generate_mind_map_passes_language_and_instructions(
+        self, mock_core, mock_notes_api
+    ):
+        """Test generate_mind_map passes language and instructions to RPC payload."""
+        api = ArtifactsAPI(mock_core, mock_notes_api)
+
+        mock_core.get_source_ids.return_value = ["src_1"]
+        mock_core.rpc_call.return_value = [['{"name": "Mind Map", "children": []}']]
+
+        await api.generate_mind_map(
+            notebook_id="nb_123",
+            source_ids=["src_1"],
+            language="ja",
+            instructions="Focus on key themes",
+        )
+
+        call_args = mock_core.rpc_call.call_args
+        params = call_args.args[1]
+
+        # params[5] should contain the mind map config with language and instructions
+        mind_map_config = params[5]
+        assert mind_map_config[1][0][1] == "Focus on key themes"
+        assert mind_map_config[2] == "ja"
 
     @pytest.mark.asyncio
     async def test_suggest_reports_uses_get_suggested_reports(self, mock_core, mock_notes_api):

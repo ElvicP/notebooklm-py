@@ -23,7 +23,13 @@ pip install "git+https://github.com/teng-lin/notebooklm-py@${LATEST_TAG}"
 
 ⚠️ **DO NOT install from main branch** (`pip install git+https://github.com/teng-lin/notebooklm-py`). The main branch may contain unreleased/unstable changes. Always use PyPI or a specific release tag, unless you are testing unreleased features.
 
-After installation, install the Claude Code skill:
+**Skill install methods:**
+
+- `notebooklm skill install` installs this skill into the supported local agent directories managed by the CLI.
+- `npx skills add teng-lin/notebooklm-py` installs this skill from the GitHub repository into compatible agent skill directories.
+- If you are already reading this file inside an agent skill directory, the skill is already installed. You only need the Python package and authentication below.
+
+**CLI-managed install:**
 ```bash
 notebooklm skill install
 ```
@@ -46,18 +52,20 @@ For automated environments, multiple accounts, or parallel agent workflows:
 | Variable | Purpose |
 |----------|---------|
 | `NOTEBOOKLM_HOME` | Custom config directory (default: `~/.notebooklm`) |
+| `NOTEBOOKLM_PROFILE` | Active profile name (default: `default`) |
 | `NOTEBOOKLM_AUTH_JSON` | Inline auth JSON - no file writes needed |
 
 **CI/CD setup:** Set `NOTEBOOKLM_AUTH_JSON` from a secret containing your `storage_state.json` contents.
 
-**Multiple accounts:** Use different `NOTEBOOKLM_HOME` directories per account.
+**Multiple accounts:** Use named profiles (`notebooklm profile create work`, then `notebooklm -p work login`). Alternatively, use different `NOTEBOOKLM_HOME` directories per account.
 
-**Parallel agents:** The CLI stores notebook context in a shared file (`~/.notebooklm/context.json`). Multiple concurrent agents using `notebooklm use` can overwrite each other's context.
+**Parallel agents:** The CLI stores notebook context per profile (`~/.notebooklm/profiles/<profile>/context.json`, with a legacy fallback to `~/.notebooklm/context.json` for the implicit default profile). Multiple concurrent agents that share a profile and use `notebooklm use` can overwrite each other's context — use one of the isolation strategies below.
 
 **Solutions for parallel workflows:**
 1. **Always use explicit notebook ID** (recommended): Pass `-n <notebook_id>` (for `wait`/`download` commands) or `--notebook <notebook_id>` (for others) instead of relying on `use`
-2. **Per-agent isolation:** Set unique `NOTEBOOKLM_HOME` per agent: `export NOTEBOOKLM_HOME=/tmp/agent-$ID`
-3. **Use full UUIDs:** Avoid partial IDs in automation (they can become ambiguous)
+2. **Per-agent isolation via profiles:** `export NOTEBOOKLM_PROFILE=agent-$ID` (each profile gets its own context file)
+3. **Per-agent isolation via home:** Set unique `NOTEBOOKLM_HOME` per agent: `export NOTEBOOKLM_HOME=/tmp/agent-$ID`
+4. **Use full UUIDs:** Avoid partial IDs in automation (they can become ambiguous)
 
 ## Agent Setup Verification
 
@@ -103,6 +111,10 @@ Before starting workflows, verify the CLI is ready:
 - `notebooklm ask "..."` - chat queries (without `--save-as-note`)
 - `notebooklm history` - display conversation history (read-only)
 - `notebooklm source add` - add sources
+- `notebooklm profile list` - list profiles
+- `notebooklm profile create` - create profile
+- `notebooklm profile switch` - switch active profile
+- `notebooklm doctor` - check environment health
 
 **Ask before running:**
 - `notebooklm delete` - destructive
@@ -121,6 +133,7 @@ Before starting workflows, verify the CLI is ready:
 | Authenticate | `notebooklm login` |
 | Diagnose auth issues | `notebooklm auth check` |
 | Diagnose auth (full) | `notebooklm auth check --test` |
+| One-shot cookie keepalive (for cron) | `notebooklm auth refresh --quiet` |
 | List notebooks | `notebooklm list` |
 | Create notebook | `notebooklm create "Title"` |
 | Set context | `notebooklm use <notebook_id>` |
@@ -129,6 +142,8 @@ Before starting workflows, verify the CLI is ready:
 | Add file | `notebooklm source add ./file.pdf` |
 | Add YouTube | `notebooklm source add "https://youtube.com/..."` |
 | List sources | `notebooklm source list` |
+| Delete source by ID | `notebooklm source delete <source_id>` |
+| Delete source by exact title | `notebooklm source delete-by-title "Exact Title"` |
 | Wait for source processing | `notebooklm source wait <source_id>` |
 | Web research (fast) | `notebooklm source add-research "query"` |
 | Web research (deep) | `notebooklm source add-research "query" --mode deep --no-wait` |
@@ -166,49 +181,59 @@ Before starting workflows, verify the CLI is ready:
 | Download quiz (markdown) | `notebooklm download quiz --format markdown quiz.md` |
 | Download flashcards | `notebooklm download flashcards cards.json` |
 | Download flashcards (markdown) | `notebooklm download flashcards --format markdown cards.md` |
-| Download by UUID | `notebooklm download abc123 def456` |
-| Download by UUID (with options) | `notebooklm download abc123 -o ./downloads/ --dry-run` |
-| Delete notebook | `notebooklm notebook delete <id>` |
+| Delete notebook | `notebooklm delete -n <id>` |
 | List languages | `notebooklm language list` |
 | Get language | `notebooklm language get` |
 | Set language | `notebooklm language set zh_Hans` |
+| List profiles | `notebooklm profile list` |
+| Create profile | `notebooklm profile create work` |
+| Switch profile | `notebooklm profile switch work` |
+| Delete profile | `notebooklm profile delete old` |
+| Rename profile | `notebooklm profile rename old new` |
+| Use profile (one-off) | `notebooklm -p work list` |
+| Health check | `notebooklm doctor` |
+| Health check (auto-fix) | `notebooklm doctor --fix` |
 
 **Parallel safety:** Use explicit notebook IDs in parallel workflows. Commands supporting `-n` shorthand: `artifact wait`, `source wait`, `research wait/status`, `download *`. Download commands also support `-a/--artifact`. Other commands use `--notebook`. For chat, use `-c <conversation_id>` to target a specific conversation.
 
-**Partial IDs:** Use first 6+ characters of UUIDs. Must be unique prefix (fails if ambiguous). Works for: `use`, `delete`, `wait`, `download <uuid>` commands. For automation, prefer full UUIDs to avoid ambiguity.
+**Partial IDs:** Use first 6+ characters of UUIDs. Must be unique prefix (fails if ambiguous). Works for ID-based commands such as `use`, `source delete`, and `wait`. For exact source-title deletion, use `source delete-by-title "Title"`. For automation, prefer full UUIDs to avoid ambiguity.
 
 ## Command Output Formats
 
 Commands with `--json` return structured data for parsing:
 
 **Create notebook:**
-```
+```bash
 $ notebooklm create "Research" --json
-{"id": "abc123de-...", "title": "Research"}
+{"notebook": {"id": "abc123de-...", "title": "Research", "created_at": null}}
+# parse with: jq -r .notebook.id
 ```
 
 **Add source:**
-```
+```bash
 $ notebooklm source add "https://example.com" --json
-{"source_id": "def456...", "title": "Example", "status": "processing"}
+{"source": {"id": "def456...", "title": "Example", "type": "SourceType.WEB_PAGE", "url": "https://example.com"}}
+# parse with: jq -r .source.id
+# Note: no `status` field on add — use `source list --json` or `source wait` to check processing state.
 ```
 
 **Generate artifact:**
-```
+```bash
 $ notebooklm generate audio "Focus on key points" --json
 {"task_id": "xyz789...", "status": "pending"}
+# When run with --wait, completed status also includes a `url` field.
 ```
 
 **Chat with references:**
-```
+```bash
 $ notebooklm ask "What is X?" --json
 {"answer": "X is... [1] [2]", "conversation_id": "...", "turn_number": 1, "is_follow_up": false, "references": [{"source_id": "abc123...", "citation_number": 1, "cited_text": "Relevant passage from source..."}, {"source_id": "def456...", "citation_number": 2, "cited_text": "Another passage..."}]}
 ```
 
 **Source fulltext (get indexed content):**
-```
+```bash
 $ notebooklm source fulltext <source_id> --json
-{"source_id": "...", "title": "...", "char_count": 12345, "content": "Full indexed text..."}
+{"source_id": "...", "title": "...", "content": "Full indexed text...", "_type_code": null, "url": null, "char_count": 12345}
 ```
 
 **Understanding citations:** The `cited_text` in references is often a snippet or section header, not the full quoted passage. The `start_char`/`end_char` positions reference NotebookLM's internal chunked index, not the raw fulltext. Use `SourceFulltext.find_citation_context()` to locate citations:
@@ -219,7 +244,10 @@ if matches:
     context, pos = matches[0]  # First match; check len(matches) > 1 for duplicates
 ```
 
-**Extract IDs:** Parse the `id`, `source_id`, or `task_id` field from JSON output.
+**Extract IDs:** Singular endpoints wrap their result in an envelope —
+parse `.notebook.id` (from `create`), `.source.id` (from `source add`),
+or `.task_id` (from `generate *`). The chat `--json` references list uses
+`.references[].source_id`.
 
 ## Generation Types
 
@@ -235,12 +263,14 @@ All generate commands support:
 | Video | `generate video` | `--format [explainer\|brief]`, `--style [auto\|classic\|whiteboard\|kawaii\|anime\|watercolor\|retro-print\|heritage\|paper-craft]` | .mp4 |
 | Slide Deck | `generate slide-deck` | `--format [detailed\|presenter]`, `--length [default\|short]` | .pdf / .pptx |
 | Slide Revision | `generate revise-slide "prompt" --artifact <id> --slide N` | `--wait`, `--notebook` | *(re-downloads parent deck)* |
-| Infographic | `generate infographic` | `--orientation [landscape\|portrait\|square]`, `--detail [concise\|standard\|detailed]` | .png |
-| Report | `generate report` | `--format [briefing-doc\|study-guide\|blog-post\|custom]`, `--append "extra instructions"` | .md |
+| Infographic | `generate infographic` | `--orientation [landscape\|portrait\|square]`, `--detail [concise\|standard\|detailed]`, `--style [auto\|sketch-note\|professional\|bento-grid\|editorial\|instructional\|bricks\|clay\|anime\|kawaii\|scientific]` | .png |
+| Report | `generate report` | `--format [briefing-doc\|study-guide\|blog-post\|custom]`, `--append "extra instructions"` (¹) | .md |
 | Mind Map | `generate mind-map` | *(sync, instant)* | .json |
 | Data Table | `generate data-table` | description required | .csv |
 | Quiz | `generate quiz` | `--difficulty [easy\|medium\|hard]`, `--quantity [fewer\|standard\|more]` | .json/.md/.html |
 | Flashcards | `generate flashcards` | `--difficulty [easy\|medium\|hard]`, `--quantity [fewer\|standard\|more]` | .json/.md/.html |
+
+¹ `--append` only customizes the built-in templates. With `--format custom`, pass the prompt as the positional `DESCRIPTION` argument (`notebooklm generate report "PROMPT" --format custom`); `--append` is silently ignored in that mode (the CLI prints a warning).
 
 ## Features Beyond the Web UI
 
@@ -320,17 +350,17 @@ When user wants full automation (generate and download when ready):
 3. `notebooklm source list` to verify
 
 **Source limits:** Varies by plan—Standard: 50, Plus: 100, Pro: 300, Ultra: 600 sources per notebook. See [NotebookLM plans](https://support.google.com/notebooklm/answer/16213268) for details. The CLI does not enforce these limits; they are applied by your NotebookLM account.
-**Supported types:** PDFs, YouTube URLs, web URLs, Google Docs, text files, Markdown, Word docs, audio files, video files, images
+**Supported types:** PDFs, YouTube URLs, web URLs, Google Docs, text files, Markdown, Word docs, EPUB, audio files, video files, images
 
 ### Bulk Import with Source Waiting (Subagent Pattern)
 **Time:** Varies by source count
 
 When adding multiple sources and needing to wait for processing before chat/generation:
 
-1. Add sources with `--json` to capture IDs:
+1. Add sources with `--json` to capture IDs (parse with `jq -r .source.id`):
    ```bash
-   notebooklm source add "https://url1.com" --json  # → {"source_id": "abc..."}
-   notebooklm source add "https://url2.com" --json  # → {"source_id": "def..."}
+   notebooklm source add "https://url1.com" --json  # → {"source": {"id": "abc...", ...}}
+   notebooklm source add "https://url2.com" --json  # → {"source": {"id": "def...", ...}}
    ```
 2. **Spawn a background agent** to wait for all sources:
    ```
@@ -406,22 +436,22 @@ notebooklm artifact list --json
 
 `notebooklm list --json`:
 ```json
-{"notebooks": [{"id": "...", "title": "...", "created_at": "..."}]}
+{"notebooks": [{"index": 1, "id": "...", "title": "...", "is_owner": true, "created_at": "..."}], "count": 1}
 ```
 
 `notebooklm auth check --json`:
 ```json
-{"checks": {"storage_exists": true, "json_valid": true, "cookies_present": true, "sid_cookie": true, "token_fetch": true}, "details": {"storage_path": "...", "auth_source": "file", "cookies_found": ["SID", "HSID", "..."], "cookie_domains": [".google.com"]}}
+{"status": "ok", "checks": {"storage_exists": true, "json_valid": true, "cookies_present": true, "sid_cookie": true, "token_fetch": true}, "details": {"storage_path": "...", "auth_source": "file", "cookies_found": ["SID", "HSID", "..."], "cookie_domains": [".google.com"]}}
 ```
 
 `notebooklm source list --json`:
 ```json
-{"sources": [{"id": "...", "title": "...", "status": "ready|processing|error"}]}
+{"notebook_id": "...", "notebook_title": "...", "sources": [{"index": 1, "id": "...", "title": "...", "type": "SourceType.WEB_PAGE", "url": "...", "status": "ready|processing|error", "status_id": 1, "created_at": "..."}], "count": 1}
 ```
 
 `notebooklm artifact list --json`:
 ```json
-{"artifacts": [{"id": "...", "title": "...", "type": "Audio Overview", "status": "in_progress|pending|completed|unknown"}]}
+{"notebook_id": "...", "notebook_title": "...", "artifacts": [{"index": 1, "id": "...", "title": "...", "type": "Audio", "type_id": 1, "status": "in_progress|pending|completed|unknown", "status_id": 1, "created_at": "..."}], "count": 1}
 ```
 
 **Status values:**
@@ -549,7 +579,6 @@ notebooklm language get --local  # Read local config only
 notebooklm --help              # Main commands
 notebooklm auth check          # Diagnose auth issues
 notebooklm auth check --test   # Full auth validation with network test
-notebooklm notebook --help     # Notebook management
 notebooklm source --help       # Source management
 notebooklm research --help     # Research status/wait
 notebooklm generate --help     # Content generation
@@ -561,4 +590,4 @@ notebooklm language --help     # Language settings
 **Diagnose auth:** `notebooklm auth check` - shows cookie domains, storage path, validation status
 **Re-authenticate:** `notebooklm login`
 **Check version:** `notebooklm --version`
-**Update skill:** `notebooklm skill install`
+**Refresh a CLI-managed install:** `notebooklm skill install`

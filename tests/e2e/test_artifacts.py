@@ -297,9 +297,9 @@ class TestArtifactLifecycle:
             timeout=120.0,
         )
         assert final_status is not None, "Artifact status should not be None"
-        assert final_status.is_complete, (
-            f"{artifact_type} should complete, got status: {final_status.status}"
-        )
+        assert (
+            final_status.is_complete
+        ), f"{artifact_type} should complete, got status: {final_status.status}"
 
         # 3. Download and verify file exists
         output_path = tmp_path / f"{artifact_type.lower()}.json"

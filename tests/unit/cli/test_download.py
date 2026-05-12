@@ -30,18 +30,24 @@ def make_artifact(
 
 @pytest.fixture
 def mock_download_auth():
-    """Mock fetch_tokens and load_auth_from_storage at download module level.
+    """Mock AuthTokens.from_storage for download commands."""
+    from notebooklm.auth import AuthTokens
 
-    Download.py imports these functions directly, so we must patch at the module
-    level where they're imported (not at helpers where they're defined).
-    """
-    with (
-        patch.object(download_module, "fetch_tokens", new_callable=AsyncMock) as mock_fetch,
-        patch.object(download_module, "load_auth_from_storage") as mock_load,
-    ):
-        mock_load.return_value = {"SID": "test", "HSID": "test", "SSID": "test"}
-        mock_fetch.return_value = ("csrf", "session")
-        yield mock_fetch
+    auth = AuthTokens(
+        cookies={
+            "SID": "test",
+            "HSID": "test",
+            "SSID": "test",
+            "APISID": "test",
+            "SAPISID": "test",
+        },
+        csrf_token="csrf",
+        session_id="session",
+    )
+
+    with patch("notebooklm.auth.AuthTokens.from_storage", new_callable=AsyncMock) as mock_from:
+        mock_from.return_value = auth
+        yield mock_from
 
 
 # Legacy aliases for backward compatibility
@@ -79,7 +85,13 @@ class TestDownloadAudio:
             mock_client.artifacts.download_audio = mock_download_audio
             mock_client_cls.return_value = mock_client
 
-            result = runner.invoke(cli, ["download", "audio", str(output_file), "-n", "nb_123"])
+            with (
+                patch(
+                    "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+                ) as mock_fetch,
+            ):
+                mock_fetch.return_value = ("csrf", "session")
+                result = runner.invoke(cli, ["download", "audio", str(output_file), "-n", "nb_123"])
 
         assert result.exit_code == 0
         assert output_file.exists()
@@ -92,7 +104,13 @@ class TestDownloadAudio:
             )
             mock_client_cls.return_value = mock_client
 
-            result = runner.invoke(cli, ["download", "audio", "--dry-run", "-n", "nb_123"])
+            with (
+                patch(
+                    "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+                ) as mock_fetch,
+            ):
+                mock_fetch.return_value = ("csrf", "session")
+                result = runner.invoke(cli, ["download", "audio", "--dry-run", "-n", "nb_123"])
 
         assert result.exit_code == 0
         assert "DRY RUN" in result.output
@@ -103,7 +121,13 @@ class TestDownloadAudio:
             mock_client.artifacts.list = AsyncMock(return_value=[])
             mock_client_cls.return_value = mock_client
 
-            result = runner.invoke(cli, ["download", "audio", "-n", "nb_123"])
+            with (
+                patch(
+                    "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+                ) as mock_fetch,
+            ):
+                mock_fetch.return_value = ("csrf", "session")
+                result = runner.invoke(cli, ["download", "audio", "-n", "nb_123"])
 
         assert "No completed audio artifacts found" in result.output or result.exit_code != 0
 
@@ -130,7 +154,13 @@ class TestDownloadVideo:
             mock_client.artifacts.download_video = mock_download_video
             mock_client_cls.return_value = mock_client
 
-            result = runner.invoke(cli, ["download", "video", str(output_file), "-n", "nb_123"])
+            with (
+                patch(
+                    "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+                ) as mock_fetch,
+            ):
+                mock_fetch.return_value = ("csrf", "session")
+                result = runner.invoke(cli, ["download", "video", str(output_file), "-n", "nb_123"])
 
         assert result.exit_code == 0
         assert output_file.exists()
@@ -158,9 +188,15 @@ class TestDownloadInfographic:
             mock_client.artifacts.download_infographic = mock_download_infographic
             mock_client_cls.return_value = mock_client
 
-            result = runner.invoke(
-                cli, ["download", "infographic", str(output_file), "-n", "nb_123"]
-            )
+            with (
+                patch(
+                    "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+                ) as mock_fetch,
+            ):
+                mock_fetch.return_value = ("csrf", "session")
+                result = runner.invoke(
+                    cli, ["download", "infographic", str(output_file), "-n", "nb_123"]
+                )
 
         assert result.exit_code == 0
         assert output_file.exists()
@@ -189,7 +225,15 @@ class TestDownloadSlideDeck:
             mock_client.artifacts.download_slide_deck = mock_download_slide_deck
             mock_client_cls.return_value = mock_client
 
-            result = runner.invoke(cli, ["download", "slide-deck", str(output_dir), "-n", "nb_123"])
+            with (
+                patch(
+                    "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+                ) as mock_fetch,
+            ):
+                mock_fetch.return_value = ("csrf", "session")
+                result = runner.invoke(
+                    cli, ["download", "slide-deck", str(output_dir), "-n", "nb_123"]
+                )
 
         assert result.exit_code == 0
 
@@ -224,9 +268,15 @@ class TestDownloadFlags:
             mock_client.artifacts.download_audio = mock_download_audio
             mock_client_cls.return_value = mock_client
 
-            result = runner.invoke(
-                cli, ["download", "audio", str(output_file), "--latest", "-n", "nb_123"]
-            )
+            with (
+                patch(
+                    "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+                ) as mock_fetch,
+            ):
+                mock_fetch.return_value = ("csrf", "session")
+                result = runner.invoke(
+                    cli, ["download", "audio", str(output_file), "--latest", "-n", "nb_123"]
+                )
 
         assert result.exit_code == 0
 
@@ -254,9 +304,15 @@ class TestDownloadFlags:
             mock_client.artifacts.download_audio = mock_download_audio
             mock_client_cls.return_value = mock_client
 
-            result = runner.invoke(
-                cli, ["download", "audio", str(output_file), "--earliest", "-n", "nb_123"]
-            )
+            with (
+                patch(
+                    "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+                ) as mock_fetch,
+            ):
+                mock_fetch.return_value = ("csrf", "session")
+                result = runner.invoke(
+                    cli, ["download", "audio", str(output_file), "--earliest", "-n", "nb_123"]
+                )
 
         assert result.exit_code == 0
 
@@ -278,9 +334,15 @@ class TestDownloadFlags:
             mock_client.artifacts.download_audio = mock_download_audio
             mock_client_cls.return_value = mock_client
 
-            result = runner.invoke(
-                cli, ["download", "audio", str(output_file), "--force", "-n", "nb_123"]
-            )
+            with (
+                patch(
+                    "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+                ) as mock_fetch,
+            ):
+                mock_fetch.return_value = ("csrf", "session")
+                result = runner.invoke(
+                    cli, ["download", "audio", str(output_file), "--force", "-n", "nb_123"]
+                )
 
         assert result.exit_code == 0
         assert output_file.read_bytes() == b"new content"
@@ -298,9 +360,15 @@ class TestDownloadFlags:
 
             mock_client_cls.return_value = mock_client
 
-            runner.invoke(
-                cli, ["download", "audio", str(output_file), "--no-clobber", "-n", "nb_123"]
-            )
+            with (
+                patch(
+                    "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+                ) as mock_fetch,
+            ):
+                mock_fetch.return_value = ("csrf", "session")
+                runner.invoke(
+                    cli, ["download", "audio", str(output_file), "--no-clobber", "-n", "nb_123"]
+                )
 
         # File should remain unchanged
         assert output_file.read_bytes() == b"existing content"
@@ -323,6 +391,43 @@ class TestDownloadCommandsExist:
         assert result.exit_code == 0
         assert "OUTPUT_PATH" in result.output
         assert "--notebook" in result.output or "-n" in result.output
+
+    def test_download_cinematic_video_alias_exists(self, runner):
+        """Verify 'download cinematic-video' alias is registered and shows help."""
+        result = runner.invoke(cli, ["download", "cinematic-video", "--help"])
+        assert result.exit_code == 0
+        assert "cinematic" in result.output.lower()
+
+    def test_download_cinematic_video_alias_callable(self, runner, mock_auth, tmp_path):
+        """Verify 'download cinematic-video' alias invokes download video logic."""
+        with patch_client_for_module("download") as mock_client_cls:
+            mock_client = create_mock_client()
+
+            output_file = tmp_path / "cinematic.mp4"
+
+            async def mock_download_video(notebook_id, output_path, artifact_id=None):
+                Path(output_path).write_bytes(b"fake cinematic content")
+                return output_path
+
+            mock_client.artifacts.list = AsyncMock(
+                return_value=[make_artifact("cin_1", "My Cinematic Video", 3)]
+            )
+            mock_client.artifacts.download_video = mock_download_video
+            mock_client_cls.return_value = mock_client
+
+            with (
+                patch(
+                    "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+                ) as mock_fetch,
+            ):
+                mock_fetch.return_value = ("csrf", "session")
+                result = runner.invoke(
+                    cli,
+                    ["download", "cinematic-video", str(output_file), "-n", "nb_123"],
+                )
+
+            assert result.exit_code == 0, result.output
+            assert output_file.exists()
 
 
 # =============================================================================

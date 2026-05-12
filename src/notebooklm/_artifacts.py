@@ -12,13 +12,16 @@ This module serves as the public facade, delegating to:
 import asyncio
 import builtins
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 import httpx
 
 from ._artifact_download import ArtifactDownloader
 from ._artifact_generate import ArtifactGenerator
 from ._core import ClientCore
+from .auth import load_httpx_cookies
 from .exceptions import ValidationError
 from .rpc import (
     ArtifactStatus,
@@ -28,6 +31,7 @@ from .rpc import (
     ExportType,
     InfographicDetail,
     InfographicOrientation,
+    InfographicStyle,
     QuizDifficulty,
     QuizQuantity,
     ReportFormat,
@@ -41,9 +45,12 @@ from .rpc import (
 )
 from .types import (
     Artifact,
+    ArtifactDownloadError,
+    ArtifactNotReadyError,
     ArtifactType,
     GenerationStatus,
     ReportSuggestion,
+    _extract_artifact_url,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,15 +89,22 @@ class ArtifactsAPI:
             await client.artifacts.rename(notebook_id, artifact_id, "New Title")
     """
 
-    def __init__(self, core: ClientCore, notes_api: "NotesAPI"):
+    def __init__(
+        self,
+        core: ClientCore,
+        notes_api: "NotesAPI",
+        storage_path: Path | None = None,
+    ):
         """Initialize the artifacts API.
 
         Args:
             core: The core client infrastructure.
             notes_api: The notes API for accessing notes/mind maps.
+            storage_path: Path to storage state file for loading download cookies.
         """
         self._core = core
         self._notes = notes_api
+        self._storage_path = storage_path
 
         # Initialize sub-components with callback injection
         self._generator = ArtifactGenerator(core, notes_api)
@@ -100,6 +114,10 @@ class ArtifactsAPI:
             list_raw_fn=self._list_raw,
             list_quizzes_fn=self.list_quizzes,
             list_flashcards_fn=self.list_flashcards,
+            get_artifact_content_fn=lambda notebook_id, artifact_id: self._get_artifact_content(
+                notebook_id, artifact_id
+            ),
+            storage_path=self._storage_path,
         )
 
     # =========================================================================
@@ -268,6 +286,69 @@ class ArtifactsAPI:
             notebook_id, source_ids, language, instructions, video_format, video_style
         )
 
+    async def generate_cinematic_video(
+        self,
+        notebook_id: str,
+        source_ids: builtins.list[str] | None = None,
+        language: str = "en",
+        instructions: str | None = None,
+    ) -> GenerationStatus:
+        """Generate a Cinematic Video Overview.
+
+        Cinematic videos use AI-generated documentary-style footage (Veo 3)
+        instead of the slide-deck animations used by standard video overviews.
+        They do not accept VideoStyle options.
+
+        Requires a Google AI Ultra subscription. Uses the same CREATE_ARTIFACT
+        RPC as standard videos with VideoFormat.CINEMATIC (3). Parameter
+        structure verified against NotebookLM web UI network traffic
+        (March 2026).
+
+        Note: Generation takes significantly longer than standard videos
+        (~30-40 minutes) due to Veo 3 rendering.
+
+        Args:
+            notebook_id: The notebook ID.
+            source_ids: Source IDs to include. If None, uses all sources.
+            language: Language code (default: "en").
+            instructions: Custom instructions for video generation.
+
+        Returns:
+            GenerationStatus with task_id for polling.
+        """
+        if source_ids is None:
+            source_ids = await self._core.get_source_ids(notebook_id)
+
+        source_ids_triple = [[[sid]] for sid in source_ids] if source_ids else []
+        source_ids_double = [[sid] for sid in source_ids] if source_ids else []
+
+        params = [
+            [2],
+            notebook_id,
+            [
+                None,
+                None,
+                ArtifactTypeCode.VIDEO.value,
+                source_ids_triple,
+                None,
+                None,
+                None,
+                None,
+                [
+                    None,
+                    None,
+                    [
+                        source_ids_double,
+                        language,
+                        instructions,
+                        None,
+                        VideoFormat.CINEMATIC.value,
+                    ],
+                ],
+            ],
+        ]
+        return await self._call_generate(notebook_id, params)
+
     async def generate_report(
         self,
         notebook_id: str,
@@ -293,9 +374,78 @@ class ArtifactsAPI:
         Returns:
             GenerationStatus with task_id for polling.
         """
-        return await self._generator.generate_report(
-            notebook_id, report_format, source_ids, language, custom_prompt, extra_instructions
-        )
+        if source_ids is None:
+            source_ids = await self._core.get_source_ids(notebook_id)
+
+        format_configs = {
+            ReportFormat.BRIEFING_DOC: {
+                "title": "Briefing Doc",
+                "description": "Key insights and important quotes",
+                "prompt": (
+                    "Create a comprehensive briefing document that includes an "
+                    "Executive Summary, detailed analysis of key themes, important "
+                    "quotes with context, and actionable insights."
+                ),
+            },
+            ReportFormat.STUDY_GUIDE: {
+                "title": "Study Guide",
+                "description": "Short-answer quiz, essay questions, glossary",
+                "prompt": (
+                    "Create a comprehensive study guide that includes key concepts, "
+                    "short-answer practice questions, essay prompts for deeper "
+                    "exploration, and a glossary of important terms."
+                ),
+            },
+            ReportFormat.BLOG_POST: {
+                "title": "Blog Post",
+                "description": "Insightful takeaways in readable article format",
+                "prompt": (
+                    "Write an engaging blog post that presents the key insights "
+                    "in an accessible, reader-friendly format. Include an attention-"
+                    "grabbing introduction, well-organized sections, and a compelling "
+                    "conclusion with takeaways."
+                ),
+            },
+            ReportFormat.CUSTOM: {
+                "title": "Custom Report",
+                "description": "Custom format",
+                "prompt": custom_prompt or "Create a report based on the provided sources.",
+            },
+        }
+
+        config = format_configs[report_format]
+        if extra_instructions and report_format != ReportFormat.CUSTOM:
+            config = {**config, "prompt": f"{config['prompt']}\n\n{extra_instructions}"}
+        source_ids_triple = [[[sid]] for sid in source_ids] if source_ids else []
+        source_ids_double = [[sid] for sid in source_ids] if source_ids else []
+
+        params = [
+            [2],
+            notebook_id,
+            [
+                None,
+                None,
+                2,  # ArtifactTypeCode.REPORT
+                source_ids_triple,
+                None,
+                None,
+                None,
+                [
+                    None,
+                    [
+                        config["title"],
+                        config["description"],
+                        None,
+                        source_ids_double,
+                        language,
+                        config["prompt"],
+                        None,
+                        True,
+                    ],
+                ],
+            ],
+        ]
+        return await self._call_generate(notebook_id, params)
 
     async def generate_study_guide(
         self,
@@ -381,6 +531,7 @@ class ArtifactsAPI:
         instructions: str | None = None,
         orientation: InfographicOrientation | None = None,
         detail_level: InfographicDetail | None = None,
+        style: InfographicStyle | None = None,
     ) -> GenerationStatus:
         """Generate an infographic.
 
@@ -391,13 +542,41 @@ class ArtifactsAPI:
             instructions: Custom instructions for infographic generation.
             orientation: LANDSCAPE, PORTRAIT, or SQUARE.
             detail_level: CONCISE, STANDARD, or DETAILED.
+            style: Visual style preset for the infographic.
 
         Returns:
             GenerationStatus with task_id for polling.
         """
-        return await self._generator.generate_infographic(
-            notebook_id, source_ids, language, instructions, orientation, detail_level
-        )
+        if source_ids is None:
+            source_ids = await self._core.get_source_ids(notebook_id)
+
+        source_ids_triple = [[[sid]] for sid in source_ids] if source_ids else []
+        orientation_code = orientation.value if orientation else None
+        detail_code = detail_level.value if detail_level else None
+        style_code = style.value if style else None
+
+        params = [
+            [2],
+            notebook_id,
+            [
+                None,
+                None,
+                7,  # ArtifactTypeCode.INFOGRAPHIC
+                source_ids_triple,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                [[instructions, language, None, orientation_code, detail_code, style_code]],
+            ],
+        ]
+        return await self._call_generate(notebook_id, params)
 
     async def generate_slide_deck(
         self,
@@ -464,7 +643,7 @@ class ArtifactsAPI:
             )
             if result is None:
                 logger.warning("REVISE_SLIDE returned null result for artifact %s", artifact_id)
-            return self._generator._parse_generation_result(result)
+            return self._parse_generation_result(result)
         except RPCError as e:
             if e.rpc_code == "USER_DISPLAYABLE_ERROR":
                 return GenerationStatus(
@@ -501,6 +680,8 @@ class ArtifactsAPI:
         self,
         notebook_id: str,
         source_ids: builtins.list[str] | None = None,
+        language: str = "en",
+        instructions: str | None = None,
     ) -> dict[str, Any]:
         """Generate an interactive mind map.
 
@@ -510,11 +691,69 @@ class ArtifactsAPI:
         Args:
             notebook_id: The notebook ID.
             source_ids: Source IDs to include. If None, uses all sources.
+            language: Language code (default: "en").
+            instructions: Custom instructions for the mind map.
 
         Returns:
             Dictionary with 'mind_map' (JSON data) and 'note_id'.
         """
-        return await self._generator.generate_mind_map(notebook_id, source_ids)
+        import json as json_module
+
+        if source_ids is None:
+            source_ids = await self._core.get_source_ids(notebook_id)
+
+        source_ids_nested = [[[sid]] for sid in source_ids] if source_ids else []
+
+        params = [
+            source_ids_nested,
+            None,
+            None,
+            None,
+            None,
+            ["interactive_mindmap", [["[CONTEXT]", instructions or ""]], language],
+            None,
+            [2, None, [1]],
+        ]
+
+        result = await self._core.rpc_call(
+            RPCMethod.GENERATE_MIND_MAP,
+            params,
+            source_path=f"/notebook/{notebook_id}",
+            allow_null=True,
+        )
+
+        if result and isinstance(result, list) and len(result) > 0:
+            inner = result[0]
+            if isinstance(inner, list) and len(inner) > 0:
+                mind_map_json = inner[0]
+
+                # Parse the mind map JSON
+                if isinstance(mind_map_json, str):
+                    try:
+                        mind_map_data = json_module.loads(mind_map_json)
+                    except json_module.JSONDecodeError:
+                        mind_map_data = mind_map_json
+                        mind_map_json = str(mind_map_json)
+                else:
+                    mind_map_data = mind_map_json
+                    mind_map_json = json_module.dumps(mind_map_json)
+
+                # Extract title from mind map data
+                title = "Mind Map"
+                if isinstance(mind_map_data, dict) and "name" in mind_map_data:
+                    title = mind_map_data["name"]
+
+                # The GENERATE_MIND_MAP RPC generates content but does NOT persist it.
+                # We must explicitly create a note to save the mind map.
+                note = await self._notes.create(notebook_id, title=title, content=mind_map_json)
+                note_id = note.id if note else None
+
+                return {
+                    "mind_map": mind_map_data,
+                    "note_id": note_id,
+                }
+
+        return {"mind_map": None, "note_id": None}
 
     # =========================================================================
     # Download Operations (delegated to ArtifactDownloader)
@@ -586,6 +825,21 @@ class ArtifactsAPI:
         return await self._downloader.download_slide_deck(
             notebook_id, output_path, artifact_id, output_format
         )
+
+    async def _get_artifact_content(self, notebook_id: str, artifact_id: str) -> str | None:
+        """Fetch artifact HTML content for quiz/flashcard types."""
+        result = await self._core.rpc_call(
+            RPCMethod.GET_INTERACTIVE_HTML,
+            [artifact_id],
+            source_path=f"/notebook/{notebook_id}",
+            allow_null=True,
+        )
+        # Response is wrapped: result[0] contains the artifact data.
+        if result and isinstance(result, list) and len(result) > 0:
+            data = result[0]
+            if isinstance(data, list) and len(data) > 9 and data[9]:
+                return data[9][0]
+        return None
 
     async def download_report(
         self,
@@ -745,7 +999,16 @@ class ArtifactsAPI:
             task_id: The task/artifact ID to check.
 
         Returns:
-            GenerationStatus with current status.
+            GenerationStatus with current status.  When the artifact is not
+            found in the list, ``status`` is set to ``"not_found"`` so that
+            callers can distinguish "genuinely pending" from "removed by the
+            server" (e.g. after a quota rejection).
+
+        .. versionchanged:: 0.4.0
+            **Breaking change:** Previously returned ``status="pending"``
+            when an artifact was absent from the list.  Now returns
+            ``status="not_found"`` to allow callers to distinguish a
+            genuinely pending artifact from one that was removed.
         """
         # List all artifacts and find by ID (no poll-by-ID RPC exists)
         artifacts_data = await self._list_raw(notebook_id)
@@ -769,9 +1032,25 @@ class ArtifactsAPI:
                         status_code = ArtifactStatus.PROCESSING
 
                 status = artifact_status_to_str(status_code)
-                return GenerationStatus(task_id=task_id, status=status)
 
-        return GenerationStatus(task_id=task_id, status="pending")
+                # Extract error details from failed artifacts.
+                # The API may embed an error reason string at art[3] when
+                # the artifact fails (e.g. daily quota exceeded).
+                error_msg: str | None = None
+                if status == "failed":
+                    error_msg = self._extract_artifact_error(art)
+                url = _extract_artifact_url(art, artifact_type)
+
+                return GenerationStatus(
+                    task_id=task_id,
+                    status=status,
+                    url=url,
+                    error=error_msg,
+                )
+
+        # Artifact not found in the list.  Use a distinct status so
+        # wait_for_completion can differentiate from genuine "pending".
+        return GenerationStatus(task_id=task_id, status="not_found")
 
     async def wait_for_completion(
         self,
@@ -780,6 +1059,9 @@ class ArtifactsAPI:
         initial_interval: float = 2.0,
         max_interval: float = 10.0,
         timeout: float = 300.0,
+        poll_interval: float | None = None,  # Deprecated, use initial_interval
+        max_not_found: int = 5,
+        min_not_found_window: float = 10.0,
     ) -> GenerationStatus:
         """Wait for a generation task to complete.
 
@@ -791,6 +1073,16 @@ class ArtifactsAPI:
             initial_interval: Initial seconds between status checks.
             max_interval: Maximum seconds between status checks.
             timeout: Maximum seconds to wait.
+            poll_interval: Deprecated. Use initial_interval instead.
+            max_not_found: Consecutive "not found" polls before treating
+                the task as failed.  When the API removes an artifact
+                from the list (e.g. after a daily-quota rejection), the
+                poller would otherwise spin until *timeout*.  Defaults
+                to 5 to tolerate brief replication lag and slow networks.
+            min_not_found_window: Minimum seconds that must have elapsed
+                since the *first* not-found response before a consecutive
+                run triggers failure.  This avoids false positives on
+                slow or unreliable networks.  Defaults to 10.0.
 
         Returns:
             Final GenerationStatus.
@@ -798,18 +1090,86 @@ class ArtifactsAPI:
         Raises:
             TimeoutError: If task doesn't complete within timeout.
         """
+        # Backward compatibility: poll_interval overrides initial_interval.
+        if poll_interval is not None:
+            import warnings
+
+            warnings.warn(
+                "poll_interval is deprecated, use initial_interval instead",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            initial_interval = poll_interval
+
         start_time = asyncio.get_running_loop().time()
         current_interval = initial_interval
+        consecutive_not_found = 0
+        total_not_found = 0
+        first_not_found_time: float | None = None
+        last_status: str | None = None
 
         while True:
             status = await self.poll_status(notebook_id, task_id)
+            last_status = status.status
 
             if status.is_complete or status.is_failed:
                 return status
 
+            # Track consecutive and total "not found" responses.  The API
+            # may remove quota-rejected artifacts from the list entirely
+            # instead of setting them to FAILED.  We track both a
+            # consecutive run *and* a total count to handle "flickering"
+            # artifacts that alternate between found/not-found due to API
+            # replication lag.
+            if status.status == "not_found":
+                consecutive_not_found += 1
+                total_not_found += 1
+                now = asyncio.get_running_loop().time()
+                if first_not_found_time is None:
+                    first_not_found_time = now
+                not_found_elapsed = now - first_not_found_time
+
+                # Trigger failure when consecutive threshold is met AND
+                # enough wall-clock time has passed (avoids false positives
+                # on fast networks), OR when total not-found count is high
+                # enough to indicate flickering artifacts.
+                consecutive_trigger = (
+                    consecutive_not_found >= max_not_found
+                    and not_found_elapsed >= min_not_found_window
+                )
+                total_trigger = total_not_found >= max_not_found * 2
+
+                if consecutive_trigger or total_trigger:
+                    trigger = (
+                        f"consecutive={consecutive_not_found}"
+                        if consecutive_trigger
+                        else f"total={total_not_found}"
+                    )
+                    logger.warning(
+                        "Artifact %s disappeared from list (%s not-found polls, "
+                        "%s) — treating as failed",
+                        task_id,
+                        trigger,
+                        f"elapsed={not_found_elapsed:.1f}s",
+                    )
+                    return GenerationStatus(
+                        task_id=task_id,
+                        status="failed",
+                        error=(
+                            "Generation failed: artifact was removed by the server. "
+                            "This may indicate a daily quota/rate limit was exceeded, "
+                            "an invalid notebook ID, or a transient API issue. "
+                            "Try again later."
+                        ),
+                    )
+            else:
+                consecutive_not_found = 0
+
             elapsed = asyncio.get_running_loop().time() - start_time
             if elapsed > timeout:
-                raise TimeoutError(f"Task {task_id} timed out after {timeout}s")
+                raise TimeoutError(
+                    f"Task {task_id} timed out after {timeout}s (last status: {last_status})"
+                )
 
             # Clamp sleep duration to respect timeout
             remaining_time = timeout - elapsed
@@ -963,6 +1323,293 @@ class ArtifactsAPI:
             return result[0] if isinstance(result[0], list) else result
         return []
 
+    def _select_artifact(
+        self,
+        candidates: builtins.list[Any],
+        artifact_id: str | None,
+        type_name: str,
+        type_name_lower: str,
+    ) -> Any:
+        """Select an artifact from candidates by ID or return first available.
+
+        Args:
+            candidates: List of candidate artifacts.
+            artifact_id: Specific artifact ID to select, or None for first.
+            type_name: Display name for error messages (e.g., "Report").
+            type_name_lower: Lowercase name for error messages (e.g., "report").
+
+        Returns:
+            Selected artifact data.
+
+        Raises:
+            ValueError: If artifact not found or no candidates available.
+        """
+        if artifact_id:
+            artifact = next((a for a in candidates if a[0] == artifact_id), None)
+            if not artifact:
+                raise ArtifactNotReadyError(
+                    type_name.lower().replace(" ", "_"), artifact_id=artifact_id
+                )
+            return artifact
+
+        if not candidates:
+            raise ArtifactNotReadyError(type_name_lower)
+
+        # Sort by creation timestamp (descending) to get the latest.
+        # Timestamp is at index 15, position 0.
+        candidates.sort(
+            key=lambda a: a[15][0] if len(a) > 15 and isinstance(a[15], list) and a[15] else 0,
+            reverse=True,
+        )
+
+        return candidates[0]
+
+    async def _download_urls_batch(
+        self, urls_and_paths: builtins.list[tuple[str, str]]
+    ) -> builtins.list[str]:
+        """Download multiple files using httpx with proper cookie handling.
+
+        Args:
+            urls_and_paths: List of (url, output_path) tuples.
+
+        Returns:
+            List of successfully downloaded output paths.
+        """
+        downloaded: list[str] = []
+
+        # Load cookies with domain info for cross-domain redirect handling
+        cookies = load_httpx_cookies(path=self._storage_path)
+
+        async with httpx.AsyncClient(
+            cookies=cookies,
+            follow_redirects=True,
+            timeout=60.0,
+        ) as client:
+            for url, output_path in urls_and_paths:
+                try:
+                    # Validate URL scheme and domain before sending auth cookies
+                    parsed = urlparse(url)
+                    if parsed.scheme != "https":
+                        raise ArtifactDownloadError(
+                            "media", details=f"Download URL must use HTTPS: {url[:80]}"
+                        )
+                    trusted = (".google.com", ".googleusercontent.com", ".googleapis.com")
+                    if not any(
+                        parsed.netloc == d.lstrip(".") or parsed.netloc.endswith(d) for d in trusted
+                    ):
+                        raise ArtifactDownloadError(
+                            "media", details=f"Untrusted download domain: {parsed.netloc}"
+                        )
+
+                    response = await client.get(url)
+                    response.raise_for_status()
+
+                    content_type = response.headers.get("content-type", "")
+                    if "text/html" in content_type:
+                        raise ArtifactDownloadError(
+                            "media", details="Received HTML instead of media file"
+                        )
+
+                    output_file = Path(output_path)
+                    output_file.parent.mkdir(parents=True, exist_ok=True)
+                    output_file.write_bytes(response.content)
+                    downloaded.append(output_path)
+                    logger.debug("Downloaded %s (%d bytes)", url[:60], len(response.content))
+
+                except (httpx.HTTPError, ValueError) as e:
+                    logger.warning("Download failed for %s: %s", url[:60], e)
+
+        return downloaded
+
+    async def _download_url(self, url: str, output_path: str) -> str:
+        """Download a file from URL using streaming with proper cookie handling.
+
+        Uses streaming download to handle large files (audio/video) without
+        loading entire file into memory, and with per-chunk timeouts instead
+        of a single timeout for the entire download.
+
+        Args:
+            url: URL to download from.
+            output_path: Path to save the file.
+
+        Returns:
+            The output path on success.
+
+        Raises:
+            ArtifactDownloadError: If download fails or authentication expired.
+        """
+        # Validate URL scheme and domain before sending auth cookies.
+        # httpx sends cookies to every request made by the client regardless of
+        # domain, so we must ensure the URL belongs to a trusted Google domain.
+        parsed = urlparse(url)
+        if parsed.scheme != "https":
+            raise ArtifactDownloadError("media", details=f"Download URL must use HTTPS: {url[:80]}")
+        trusted = (".google.com", ".googleusercontent.com", ".googleapis.com")
+        if not any(parsed.netloc == d.lstrip(".") or parsed.netloc.endswith(d) for d in trusted):
+            raise ArtifactDownloadError(
+                "media", details=f"Untrusted download domain: {parsed.netloc}"
+            )
+
+        output_file = Path(output_path)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # Use temp file to avoid leaving corrupted partial files on failure
+        temp_file = output_file.with_suffix(output_file.suffix + ".tmp")
+
+        # Load cookies with domain info for cross-domain redirect handling
+        cookies = load_httpx_cookies(path=self._storage_path)
+
+        # Use granular timeouts: 10s to connect, 30s per chunk read/write
+        # This allows large files to download without timeout while still
+        # detecting network failures quickly
+        timeout = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=30.0)
+
+        try:
+            # Nested context managers required: client.stream() returns an async
+            # context manager that must run within the client's scope
+            async with httpx.AsyncClient(  # noqa: SIM117
+                cookies=cookies,
+                follow_redirects=True,
+                timeout=timeout,
+            ) as client:
+                async with client.stream("GET", url) as response:
+                    response.raise_for_status()
+
+                    content_type = response.headers.get("content-type", "")
+                    if "text/html" in content_type:
+                        raise ArtifactDownloadError(
+                            "media",
+                            details="Download failed: received HTML instead of media file. "
+                            "Authentication may have expired. Run 'notebooklm login'.",
+                        )
+
+                    # Stream to file in chunks to handle large files efficiently
+                    total_bytes = 0
+                    with open(temp_file, "wb") as f:
+                        async for chunk in response.aiter_bytes(chunk_size=65536):
+                            f.write(chunk)
+                            total_bytes += len(chunk)
+
+                    if total_bytes == 0:
+                        raise ArtifactDownloadError(
+                            "media",
+                            details="Download produced 0 bytes -- the remote file may be missing or empty",
+                        )
+
+                    # Only move to final location on success
+                    temp_file.rename(output_file)
+                    logger.debug("Downloaded %s (%d bytes)", url[:60], total_bytes)
+                    return output_path
+        except Exception:
+            # Clean up partial temp file on any failure
+            temp_file.unlink(missing_ok=True)
+            raise
+
+    async def _call_generate(
+        self, notebook_id: str, params: builtins.list[Any]
+    ) -> GenerationStatus:
+        """Make a generation RPC call with error handling."""
+        artifact_type = params[2][2] if len(params) > 2 and len(params[2]) > 2 else "unknown"
+        logger.debug("Generating artifact type=%s in notebook %s", artifact_type, notebook_id)
+        try:
+            result = await self._core.rpc_call(
+                RPCMethod.CREATE_ARTIFACT,
+                params,
+                source_path=f"/notebook/{notebook_id}",
+                allow_null=True,
+            )
+            return self._parse_generation_result(result)
+        except RPCError as e:
+            if e.rpc_code == "USER_DISPLAYABLE_ERROR":
+                return GenerationStatus(
+                    task_id="",
+                    status="failed",
+                    error=str(e),
+                    error_code=str(e.rpc_code) if e.rpc_code is not None else None,
+                )
+            raise
+
+    def _parse_generation_result(self, result: Any) -> GenerationStatus:
+        """Parse generation API result into GenerationStatus.
+
+        The API returns a single ID that serves as both the task_id (for polling
+        during generation) and the artifact_id (once complete). This ID is at
+        position [0][0] in the response and becomes Artifact.id in the list.
+        """
+        if result and isinstance(result, list) and len(result) > 0:
+            artifact_data = result[0]
+            artifact_id = (
+                artifact_data[0]
+                if isinstance(artifact_data, list) and len(artifact_data) > 0
+                else None
+            )
+            status_code = (
+                artifact_data[4]
+                if isinstance(artifact_data, list) and len(artifact_data) > 4
+                else None
+            )
+
+            if artifact_id:
+                status = (
+                    artifact_status_to_str(status_code) if status_code is not None else "pending"
+                )
+                return GenerationStatus(task_id=artifact_id, status=status)
+
+        return GenerationStatus(
+            task_id="", status="failed", error="Generation failed - no artifact_id returned"
+        )
+
+    @staticmethod
+    def _extract_artifact_error(art: builtins.list[Any]) -> str | None:
+        """Try to extract a human-readable error from a failed artifact.
+
+        Google's batchexecute responses embed error information in varying
+        positions depending on the artifact type.  This method walks through
+        known locations and returns the first non-empty string it finds.
+
+        Known error locations (reverse-engineered):
+        - art[3]: Sometimes contains an error reason string.
+        - art[5]: May contain a nested error payload similar to the
+          UserDisplayableError structure in RPC responses.
+
+        Args:
+            art: Raw artifact data from ``_list_raw()``.
+
+        Returns:
+            A human-readable error string, or ``None`` if no error detail
+            could be extracted.
+        """
+        try:
+            # art[3] — simple string error reason
+            if len(art) > 3 and isinstance(art[3], str) and art[3].strip():
+                return art[3].strip()
+
+            # art[5] — nested structure that may contain error text.
+            # NOTE: This position is protocol-dependent and was
+            # reverse-engineered; it may change without notice.
+            if len(art) > 5 and isinstance(art[5], list):
+                logger.debug(
+                    "Falling back to art[5] for error extraction (art[3]=%r)",
+                    art[3] if len(art) > 3 else "<missing>",
+                )
+                # Walk the list looking for the first non-empty string
+                for item in art[5]:
+                    if isinstance(item, str) and item.strip():
+                        return item.strip()
+                    if isinstance(item, list):
+                        for sub in item:
+                            if isinstance(sub, str) and sub.strip():
+                                return sub.strip()
+
+            return None
+        except Exception:
+            logger.warning(
+                "Failed to extract error from artifact data: %r",
+                art[:6] if len(art) > 6 else art,
+                exc_info=True,
+            )
+            return None
+
     def _get_artifact_type_name(self, artifact_type: int) -> str:
         """Get human-readable name for an artifact type."""
         try:
@@ -970,67 +1617,32 @@ class ArtifactsAPI:
         except ValueError:
             return str(artifact_type)
 
-    def _is_valid_media_url(self, value: Any) -> bool:
-        """Check if value is a valid HTTP(S) URL."""
-        return isinstance(value, str) and value.startswith(("http://", "https://"))
-
-    def _find_infographic_url(self, art: builtins.list[Any]) -> str | None:
-        """Extract infographic image URL from artifact data."""
-        for item in reversed(art):
-            if not isinstance(item, list) or len(item) <= 2:
-                continue
-            content = item[2]
-            if not isinstance(content, list) or len(content) == 0:
-                continue
-            first_content = content[0]
-            if not isinstance(first_content, list) or len(first_content) <= 1:
-                continue
-            img_data = first_content[1]
-            if isinstance(img_data, list) and len(img_data) > 0:
-                url = img_data[0]
-                if self._is_valid_media_url(url):
-                    return url
-        return None
-
     def _is_media_ready(self, art: builtins.list[Any], artifact_type: int) -> bool:
         """Check if media artifact has URLs populated.
 
         For media artifacts (audio, video, infographic, slide deck), the API may
         set status=COMPLETED before the actual media URLs are populated. This
         method verifies that URLs are available for download.
+
+        Artifact array structure (from BATCHEXECUTE responses):
+        - art[0]: artifact_id
+        - art[2]: artifact_type (ArtifactTypeCode enum value)
+        - art[4]: status_code (ArtifactStatus enum value)
+        - art[6][5]: audio media URL list
+        - art[8][i][0][0]: video media URL string (within nested variants and entries)
+        - art[16][3]: slide deck PDF URL
+
+        Args:
+            art: Raw artifact data from _list_raw().
+            artifact_type: The ArtifactTypeCode enum value.
+
+        Returns:
+            True if media URLs are available, or if artifact is non-media type.
+            Returns True on unexpected structure (defensive fallback).
         """
         try:
-            if artifact_type == ArtifactTypeCode.AUDIO.value:
-                # Audio URL is at art[6][5]
-                if len(art) > 6 and isinstance(art[6], list) and len(art[6]) > 5:
-                    media_list = art[6][5]
-                    if isinstance(media_list, list) and len(media_list) > 0:
-                        first_item = media_list[0]
-                        if isinstance(first_item, list) and len(first_item) > 0:
-                            return self._is_valid_media_url(first_item[0])
-                return False
-
-            elif artifact_type == ArtifactTypeCode.VIDEO.value:
-                # Video URLs are in art[8]
-                if len(art) > 8 and isinstance(art[8], list):
-                    return any(
-                        self._is_valid_media_url(item[0])
-                        for item in art[8]
-                        if isinstance(item, list) and len(item) > 0
-                    )
-                return False
-
-            elif artifact_type == ArtifactTypeCode.INFOGRAPHIC.value:
-                return self._find_infographic_url(art) is not None
-
-            elif artifact_type == ArtifactTypeCode.SLIDE_DECK.value:
-                # Slide deck PDF URL is at art[16][3]
-                return (
-                    len(art) > 16
-                    and isinstance(art[16], list)
-                    and len(art[16]) > 3
-                    and self._is_valid_media_url(art[16][3])
-                )
+            if artifact_type in _MEDIA_ARTIFACT_TYPES:
+                return _extract_artifact_url(art, artifact_type) is not None
 
             # Non-media artifacts: status code alone is sufficient
             return True

@@ -1,13 +1,21 @@
 """Notebook operations API."""
 
+import asyncio
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ._core import ClientCore
+from ._settings import build_get_user_settings_params, extract_account_limits
+from .exceptions import NotebookLimitError, RPCError
 from .rpc import RPCMethod
-from .types import Notebook, NotebookDescription, SuggestedTopic
+from .types import AccountLimits, Notebook, NotebookDescription, SuggestedTopic
+
+if TYPE_CHECKING:
+    from ._sources import SourcesAPI
 
 logger = logging.getLogger(__name__)
+
+CREATE_NOTEBOOK_QUOTA_RPC_CODE = 3
 
 
 class NotebooksAPI:
@@ -23,13 +31,19 @@ class NotebooksAPI:
             await client.notebooks.rename(new_nb.id, "Better Title")
     """
 
-    def __init__(self, core: ClientCore):
+    def __init__(self, core: ClientCore, sources_api: "SourcesAPI | None" = None):
         """Initialize the notebooks API.
 
         Args:
             core: The core client infrastructure.
+            sources_api: Optional sources API for cross-API calls. If None,
+                         creates a new instance (for backward compatibility).
         """
         self._core = core
+        # Lazy import to avoid circular dependency
+        from ._sources import SourcesAPI
+
+        self._sources = sources_api or SourcesAPI(core)
 
     async def list(self) -> list[Notebook]:
         """List all notebooks.
@@ -57,10 +71,70 @@ class NotebooksAPI:
         """
         logger.debug("Creating notebook: %s", title)
         params = [title, None, None, [2], [1]]
-        result = await self._core.rpc_call(RPCMethod.CREATE_NOTEBOOK, params)
+        try:
+            result = await self._core.rpc_call(RPCMethod.CREATE_NOTEBOOK, params)
+        except RPCError as exc:
+            await self._raise_quota_error_if_detected(exc)
+            raise
         notebook = Notebook.from_api_response(result)
         logger.debug("Created notebook: %s", notebook.id)
         return notebook
+
+    async def _raise_quota_error_if_detected(self, error: RPCError) -> None:
+        """Convert CREATE_NOTEBOOK invalid-argument failures into quota errors."""
+        if (
+            error.method_id != RPCMethod.CREATE_NOTEBOOK.value
+            or error.rpc_code != CREATE_NOTEBOOK_QUOTA_RPC_CODE
+        ):
+            return
+
+        # The backend reports quota exhaustion as code 3 rather than a typed
+        # limit error, so verify against the account's advertised limit before
+        # changing the exception type.
+        try:
+            account_limits = await self._get_account_limits()
+        except Exception:
+            logger.debug(
+                "Could not fetch account limits after CREATE_NOTEBOOK failure; "
+                "leaving original RPC error unchanged",
+                exc_info=True,
+            )
+            return
+
+        notebook_limit = account_limits.notebook_limit
+        if notebook_limit is None:
+            return
+
+        try:
+            notebooks = await self.list()
+        except Exception:
+            logger.debug(
+                "Could not list notebooks after CREATE_NOTEBOOK failure; "
+                "leaving original RPC error unchanged",
+                exc_info=True,
+            )
+            return
+
+        owned_count = sum(1 for notebook in notebooks if notebook.is_owner)
+        # Allow one notebook of slack because list results can lag a failed
+        # create or omit service-internal notebooks that still count.
+        if owned_count < max(notebook_limit - 1, 0):
+            return
+
+        raise NotebookLimitError(
+            owned_count,
+            limit=notebook_limit,
+            original_error=error,
+        ) from error
+
+    async def _get_account_limits(self) -> AccountLimits:
+        """Fetch NotebookLM account limits from user settings."""
+        result = await self._core.rpc_call(
+            RPCMethod.GET_USER_SETTINGS,
+            build_get_user_settings_params(),
+            source_path="/",
+        )
+        return extract_account_limits(result)
 
     async def get(self, notebook_id: str) -> Notebook:
         """Get notebook details.
@@ -135,8 +209,14 @@ class NotebooksAPI:
             params,
             source_path=f"/notebook/{notebook_id}",
         )
-        if result and isinstance(result, list) and len(result) > 0:
-            return str(result[0]) if result[0] else ""
+        # Response structure: [[[summary_string, ...], topics, ...]]
+        # Summary is at result[0][0][0]
+        try:
+            if result and isinstance(result, list):
+                summary = result[0][0][0]
+                return str(summary) if summary else ""
+        except (IndexError, TypeError):
+            pass
         return ""
 
     async def get_description(self, notebook_id: str) -> NotebookDescription:
@@ -168,22 +248,30 @@ class NotebooksAPI:
         summary = ""
         suggested_topics: list[SuggestedTopic] = []
 
+        # Response structure: [[[summary_string], [[topics]], ...]]
+        # Summary is at result[0][0][0], topics at result[0][1][0]
         if result and isinstance(result, list):
-            # Summary at [0][0]
-            if len(result) > 0 and isinstance(result[0], list) and len(result[0]) > 0:
-                summary = result[0][0] if isinstance(result[0][0], str) else ""
+            try:
+                outer = result[0]
 
-            # Suggested topics at [1][0]
-            if len(result) > 1 and isinstance(result[1], list) and len(result[1]) > 0:
-                topics_list = result[1][0] if isinstance(result[1][0], list) else []
-                for topic in topics_list:
-                    if isinstance(topic, list) and len(topic) >= 2:
-                        suggested_topics.append(
-                            SuggestedTopic(
-                                question=topic[0] if isinstance(topic[0], str) else "",
-                                prompt=topic[1] if isinstance(topic[1], str) else "",
+                # Summary at outer[0][0]
+                summary_val = outer[0][0]
+                summary = str(summary_val) if summary_val else ""
+
+                # Suggested topics at outer[1][0]
+                topics_list = outer[1][0]
+                if isinstance(topics_list, list):
+                    for topic in topics_list:
+                        if isinstance(topic, list) and len(topic) >= 2:
+                            suggested_topics.append(
+                                SuggestedTopic(
+                                    question=str(topic[0]) if topic[0] else "",
+                                    prompt=str(topic[1]) if topic[1] else "",
+                                )
                             )
-                        )
+            except (IndexError, TypeError):
+                # A partial result (e.g. summary but no topics) is possible.
+                pass
 
         return NotebookDescription(summary=summary, suggested_topics=suggested_topics)
 
@@ -286,3 +374,57 @@ class NotebooksAPI:
         if artifact_id:
             return f"{base_url}?artifactId={artifact_id}"
         return base_url
+
+    async def get_metadata(self, notebook_id: str):
+        """Get notebook metadata with sources list.
+
+        This combines notebook details with a simplified sources list,
+        useful for export/overview of notebook contents.
+
+        Uses asyncio.gather to fetch notebook and sources concurrently
+        for better performance.
+
+        Args:
+            notebook_id: The notebook ID.
+
+        Returns:
+            NotebookMetadata with notebook details and simplified sources list.
+
+        Example:
+            metadata = await client.notebooks.get_metadata(notebook_id)
+            print(f"Notebook: {metadata.title}")
+            print(f"Sources: {len(metadata.sources)}")
+            # Export to JSON
+            import json
+            print(json.dumps(metadata.to_dict(), indent=2))
+        """
+        # Get notebook details and sources list concurrently
+        notebook, sources = await asyncio.gather(
+            self.get(notebook_id),
+            self._sources.list(notebook_id),
+        )
+
+        # Warn on potential data loss
+        if notebook.sources_count > 0 and len(sources) == 0:
+            logger.warning(
+                "Notebook %s reports %d sources but listing returned empty",
+                notebook_id,
+                notebook.sources_count,
+            )
+
+        # Build simplified source info
+        from .types import NotebookMetadata, SourceSummary
+
+        simplified_sources = [
+            SourceSummary(
+                kind=source.kind,
+                title=source.title,
+                url=source.url,
+            )
+            for source in sources
+        ]
+
+        return NotebookMetadata(
+            notebook=notebook,
+            sources=simplified_sources,
+        )

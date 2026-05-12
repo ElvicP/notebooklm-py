@@ -26,6 +26,8 @@ class TestListNotebooks:
         assert all(isinstance(nb, Notebook) for nb in notebooks)
         assert notebooks[0].title == "My First Notebook"
         assert notebooks[0].id == "nb_001"
+        assert notebooks[0].sources_count == 2
+        assert notebooks[1].sources_count == 0
 
     @pytest.mark.asyncio
     async def test_list_notebooks_request_format(
@@ -155,6 +157,57 @@ class TestGetNotebook:
         assert isinstance(notebook, Notebook)
         assert notebook.id == "nb_123"
         assert notebook.title == "Test Notebook"
+        # data[1] holds the source list in the GET_NOTEBOOK shape, same as LIST.
+        assert notebook.sources_count == 2
+
+    @pytest.mark.asyncio
+    async def test_get_notebook_sources_count_matches_real_payload(
+        self,
+        auth_tokens,
+        httpx_mock: HTTPXMock,
+        build_rpc_response,
+    ):
+        """Regression: ``Notebook.sources_count`` is derived from ``data[1]``.
+
+        Pinned to the shape captured in ``tests/cassettes/notebooks_get.yaml``
+        (a real GET_NOTEBOOK response) — two PDF source entries at index 1.
+        If Google ever moves the source list, this test fails before any
+        downstream code that depends on ``sources_count`` (notably the
+        divergence warning in ``_notebooks.py``) silently produces a wrong
+        count.
+        """
+        response = build_rpc_response(
+            RPCMethod.GET_NOTEBOOK,
+            [
+                [
+                    "TypeScript Fundamentals",
+                    [
+                        [
+                            ["fdfc8ac4-3237-4f2a-8a79-3e24297a7040"],
+                            "Programming TypeScript.pdf",
+                            [None, 87289, [1767921640, 565022000], None, 3, None, 1],
+                            [None, 2],
+                        ],
+                        [
+                            ["ddd31154-74a0-484a-a24c-aff796acae2f"],
+                            "typescript-book.pdf",
+                            [None, 22183, [1767921620, 707149000], None, 3, None, 1],
+                            [None, 2],
+                        ],
+                    ],
+                    "c3f6285f-1709-44c4-9cd6-e95cf0ea4f5e",
+                    "📘",
+                    None,
+                    [None, None, None, None, None, [1768963937, 237838000]],
+                ]
+            ],
+        )
+        httpx_mock.add_response(content=response.encode())
+
+        async with NotebookLMClient(auth_tokens) as client:
+            notebook = await client.notebooks.get("c3f6285f-1709-44c4-9cd6-e95cf0ea4f5e")
+
+        assert notebook.sources_count == 2
 
     @pytest.mark.asyncio
     async def test_get_notebook_uses_source_path(
@@ -201,7 +254,9 @@ class TestSummary:
         httpx_mock: HTTPXMock,
         build_rpc_response,
     ):
-        response = build_rpc_response(RPCMethod.SUMMARIZE, ["Summary of the notebook content..."])
+        response = build_rpc_response(
+            RPCMethod.SUMMARIZE, [[["Summary of the notebook content..."]]]
+        )
         httpx_mock.add_response(content=response.encode())
 
         async with NotebookLMClient(auth_tokens) as client:
@@ -313,7 +368,7 @@ class TestNotebooksAPIAdditional:
         """Test getting notebook summary."""
         response = build_rpc_response(
             RPCMethod.SUMMARIZE,
-            ["This is a comprehensive summary of the notebook content..."],
+            [[["This is a comprehensive summary of the notebook content..."]]],
         )
         httpx_mock.add_response(content=response.encode())
 
@@ -372,13 +427,15 @@ class TestNotebooksAPIAdditional:
         response = build_rpc_response(
             RPCMethod.SUMMARIZE,
             [
-                ["This notebook covers AI research."],
                 [
+                    ["This notebook covers AI research."],
                     [
-                        ["What are the main findings?", "Explain the key findings"],
-                        ["How was the study conducted?", "Describe methodology"],
-                    ]
-                ],
+                        [
+                            ["What are the main findings?", "Explain the key findings"],
+                            ["How was the study conducted?", "Describe methodology"],
+                        ]
+                    ],
+                ]
             ],
         )
         httpx_mock.add_response(content=response.encode())
@@ -522,7 +579,7 @@ class TestNotebookEdgeCases:
         """Test getting description with no suggested topics."""
         response = build_rpc_response(
             RPCMethod.SUMMARIZE,
-            [["Summary text"], []],
+            [[["Summary text"], []]],
         )
         httpx_mock.add_response(content=response.encode())
 
@@ -543,14 +600,16 @@ class TestNotebookEdgeCases:
         response = build_rpc_response(
             RPCMethod.SUMMARIZE,
             [
-                ["Summary"],
                 [
+                    ["Summary"],
                     [
-                        ["Valid question", "Valid prompt"],
-                        ["Only question"],  # Missing prompt
-                        "not a list",  # Not a list
-                    ]
-                ],
+                        [
+                            ["Valid question", "Valid prompt"],
+                            ["Only question"],  # Missing prompt
+                            "not a list",  # Not a list
+                        ]
+                    ],
+                ]
             ],
         )
         httpx_mock.add_response(content=response.encode())
@@ -574,11 +633,11 @@ class TestDescribeEdgeCases:
         httpx_mock: HTTPXMock,
         build_rpc_response,
     ):
-        """Line 171->188: result has only [0] (no result[1]) so topics stay empty."""
-        # result = [["A summary"]] — len is 1, so result[1] branch is never entered
+        """result has only outer[0] (no outer[1]) so topics stay empty."""
+        # result = [[["A summary"]]] — outer[0] has summary, no outer[1] for topics
         response = build_rpc_response(
             RPCMethod.SUMMARIZE,
-            [["A summary"]],
+            [[["A summary"]]],
         )
         httpx_mock.add_response(content=response.encode())
 
@@ -595,11 +654,11 @@ class TestDescribeEdgeCases:
         httpx_mock: HTTPXMock,
         build_rpc_response,
     ):
-        """Line 173->177: result[1] exists but is an empty list, so inner block skipped."""
-        # result = [["A summary"], []] — result[1] has len 0, so the inner if is false
+        """outer[1] exists but is an empty list, so topics block is skipped."""
+        # result = [[["A summary"], []]] — outer[1] is empty, so topics are skipped
         response = build_rpc_response(
             RPCMethod.SUMMARIZE,
-            [["A summary"], []],
+            [[["A summary"], []]],
         )
         httpx_mock.add_response(content=response.encode())
 
@@ -616,11 +675,11 @@ class TestDescribeEdgeCases:
         httpx_mock: HTTPXMock,
         build_rpc_response,
     ):
-        """Line 173->177: result[1] is present but not a list, inner block skipped."""
-        # result = [["A summary"], "not-a-list"]
+        """outer[1] is present but not a list, so topics block is skipped."""
+        # result = [[["A summary"], "not-a-list"]] — outer[1] is not a list, topics skipped
         response = build_rpc_response(
             RPCMethod.SUMMARIZE,
-            [["A summary"], "not-a-list"],
+            [[["A summary"], "not-a-list"]],
         )
         httpx_mock.add_response(content=response.encode())
 

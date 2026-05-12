@@ -148,9 +148,9 @@ class TestExportArtifact:
 
         # Reports go to Docs, data tables go to Sheets
         url = result[0]
-        assert "docs.google.com" in url or "sheets.google.com" in url, (
-            f"Export URL should be Google Docs or Sheets, got: {url}"
-        )
+        assert (
+            "docs.google.com" in url or "sheets.google.com" in url
+        ), f"Export URL should be Google Docs or Sheets, got: {url}"
 
 
 def is_valid_markdown(path: str) -> bool:

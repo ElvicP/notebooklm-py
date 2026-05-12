@@ -1,7 +1,7 @@
 # Contributing Guide
 
 **Status:** Active
-**Last Updated:** 2026-01-21
+**Last Updated:** 2026-03-12
 
 This guide covers everything you need to contribute to `notebooklm-py`: architecture overview, testing, and releasing.
 
@@ -107,8 +107,11 @@ src/notebooklm/
 
 1. **Install dependencies:**
    ```bash
-   uv pip install -e ".[dev]"
+   uv sync --extra dev --extra browser
+   uv run pre-commit install
    ```
+
+   CI runs the same lint gate with `uv run pre-commit run --all-files`, so local hook results should match the `quality` job.
 
 2. **Authenticate:**
    ```bash
@@ -125,12 +128,46 @@ src/notebooklm/
 
 ```bash
 # Unit + integration tests (no auth needed)
-pytest
+uv run pytest
 
 # E2E tests (requires auth + test notebook)
-pytest tests/e2e -m readonly        # Read-only tests only
-pytest tests/e2e -m "not variants"  # Skip parameter variants
-pytest tests/e2e --include-variants # All tests including variants
+uv run pytest tests/e2e -m readonly        # Read-only tests only
+uv run pytest tests/e2e -m "not variants"  # Skip parameter variants
+uv run pytest tests/e2e --include-variants # All tests including variants
+
+# Select a profile for E2E tests
+uv run pytest tests/e2e -m e2e --profile work
+```
+
+### Selecting a profile for E2E tests
+
+The E2E suite picks up the active NotebookLM profile from (highest precedence first):
+
+1. `--profile <name>` pytest flag
+2. `NOTEBOOKLM_PROFILE` environment variable
+3. `default_profile` from `~/.notebooklm/config.json`
+4. `default`
+
+The auto-created notebook ID cache files
+(`generation_notebook_id`, `multi_source_notebook_id`) are written under the
+active profile directory (`~/.notebooklm/profiles/<name>/`), so each profile
+keeps its own cache and never reuses notebook IDs from another Google account.
+
+#### Notebook ID env vars are profile-agnostic
+
+The notebook ID env vars (`NOTEBOOKLM_READ_ONLY_NOTEBOOK_ID`,
+`NOTEBOOKLM_GENERATION_NOTEBOOK_ID`, `NOTEBOOKLM_MULTI_SOURCE_NOTEBOOK_ID`)
+are **not** profile-scoped — they're read as-is regardless of which profile
+is active. If you set them in `.env` and switch profiles, the test will try
+to access notebooks that don't exist in the other Google account.
+
+**Recommendation:** leave the generation/multi-source env vars unset and let
+the per-profile cache files handle it. Only `NOTEBOOKLM_READ_ONLY_NOTEBOOK_ID`
+needs to be set; if you switch profiles often, override it inline:
+
+```bash
+NOTEBOOKLM_READ_ONLY_NOTEBOOK_ID=<work-nb-id> \
+  uv run pytest tests/e2e -m e2e --profile work
 ```
 
 ### Test Structure
@@ -159,13 +196,13 @@ VCR tests record HTTP interactions for offline, deterministic replay. We have tw
 
 ```bash
 # Run all VCR tests
-pytest tests/integration/
+uv run pytest tests/integration/
 
 # Run only CLI VCR tests
-pytest tests/integration/cli_vcr/
+uv run pytest tests/integration/cli_vcr/
 
 # Record new cassettes (sensitive data auto-scrubbed)
-NOTEBOOKLM_VCR_RECORD=1 pytest tests/integration/test_vcr_*.py -v
+NOTEBOOKLM_VCR_RECORD=1 uv run pytest tests/integration/test_vcr_*.py -v
 ```
 
 Sensitive data (cookies, tokens, emails) is automatically scrubbed from cassettes.
@@ -181,7 +218,7 @@ Sensitive data (cookies, tokens, emails) is automatically scrubbed from cassette
 ### Rate Limiting
 
 NotebookLM has undocumented rate limits. Generation tests may be skipped when rate limited:
-- Use `pytest tests/e2e -m readonly` for quick validation
+- Use `uv run pytest tests/e2e -m readonly` for quick validation
 - Wait a few minutes between full test runs
 - `SKIPPED (Rate limited by API)` is expected behavior, not failure
 

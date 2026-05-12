@@ -9,7 +9,15 @@ from pytest_httpx import HTTPXMock
 
 from notebooklm import NotebookLMClient
 from notebooklm.exceptions import ValidationError
-from notebooklm.rpc import AudioFormat, AudioLength, RPCError, RPCMethod, VideoFormat, VideoStyle
+from notebooklm.rpc import (
+    AudioFormat,
+    AudioLength,
+    InfographicStyle,
+    RPCError,
+    RPCMethod,
+    VideoFormat,
+    VideoStyle,
+)
 from notebooklm.types import (
     ArtifactNotReadyError,
     ArtifactParseError,
@@ -126,6 +134,42 @@ class TestStudioContent:
 
         assert result is not None
         assert result.task_id == "artifact_456"
+
+    @pytest.mark.asyncio
+    async def test_generate_cinematic_video(
+        self,
+        auth_tokens,
+        httpx_mock: HTTPXMock,
+        build_rpc_response,
+    ):
+        notebook_response = build_rpc_response(
+            RPCMethod.GET_NOTEBOOK,
+            [
+                [
+                    "Test Notebook",
+                    [[["source_123"], "Source", [None, 0], [None, 2]]],
+                    "nb_123",
+                    "📘",
+                    None,
+                    [None, None, None, None, None, [1704067200, 0]],
+                ]
+            ],
+        )
+        cinematic_response = build_rpc_response(
+            RPCMethod.CREATE_ARTIFACT,
+            [["artifact_789", "Cinematic Video Overview", "2026-03-09", None, 1]],
+        )
+        httpx_mock.add_response(content=notebook_response.encode())
+        httpx_mock.add_response(content=cinematic_response.encode())
+
+        async with NotebookLMClient(auth_tokens) as client:
+            result = await client.artifacts.generate_cinematic_video(
+                notebook_id="nb_123",
+                instructions="documentary about quantum physics",
+            )
+
+        assert result is not None
+        assert result.task_id == "artifact_789"
 
     @pytest.mark.asyncio
     async def test_generate_slide_deck(
@@ -459,6 +503,42 @@ class TestArtifactsAPI:
 
         assert result is not None
         assert result.task_id == "ig_123"
+
+    @pytest.mark.asyncio
+    async def test_generate_infographic_with_style(
+        self,
+        auth_tokens,
+        httpx_mock: HTTPXMock,
+        build_rpc_response,
+    ):
+        """Test generating infographic with a specific visual style."""
+        notebook_response = build_rpc_response(
+            RPCMethod.GET_NOTEBOOK,
+            [
+                [
+                    "Test Notebook",
+                    [[["source_123"], "Source", [None, 0], [None, 2]]],
+                    "nb_123",
+                    "📘",
+                    None,
+                    [None, None, None, None, None, [1704067200, 0]],
+                ]
+            ],
+        )
+        infographic_response = build_rpc_response(
+            RPCMethod.CREATE_ARTIFACT, [["ig_456", "Infographic", "2024-01-05", None, 1]]
+        )
+        httpx_mock.add_response(content=notebook_response.encode())
+        httpx_mock.add_response(content=infographic_response.encode())
+
+        async with NotebookLMClient(auth_tokens) as client:
+            result = await client.artifacts.generate_infographic(
+                "nb_123",
+                style=InfographicStyle.PROFESSIONAL,
+            )
+
+        assert result is not None
+        assert result.task_id == "ig_456"
 
     @pytest.mark.asyncio
     async def test_generate_data_table(
@@ -804,7 +884,7 @@ class TestArtifactErrorPaths:
         httpx_mock.add_response(content=b"pptx-content")
 
         output = str(tmp_path / "slides.pptx")
-        with patch("notebooklm._artifact_download.load_httpx_cookies", return_value=MagicMock()):
+        with patch("notebooklm._artifacts.load_httpx_cookies", return_value=MagicMock()):
             async with NotebookLMClient(auth_tokens) as client:
                 result = await client.artifacts.download_slide_deck(
                     "nb_123", output, output_format="pptx"
@@ -1127,7 +1207,7 @@ class TestExtractAppData:
         output_path = str(tmp_path / "quiz.json")
         async with NotebookLMClient(auth_tokens) as client:
             with patch.object(
-                client.artifacts._downloader,
+                client.artifacts,
                 "_get_artifact_content",
                 AsyncMock(return_value=html_without_data),
             ):
@@ -1549,7 +1629,7 @@ class TestDownloadAudioErrorPaths:
         httpx_mock.add_response(content=response.encode())
 
         async with NotebookLMClient(auth_tokens) as client:
-            with pytest.raises(ArtifactParseError, match="Invalid audio metadata structure"):
+            with pytest.raises(ArtifactParseError, match="Could not extract download URL"):
                 await client.artifacts.download_audio("nb_123", "/tmp/audio.mp4")
 
     @pytest.mark.asyncio
@@ -1574,7 +1654,7 @@ class TestDownloadAudioErrorPaths:
         httpx_mock.add_response(content=response.encode())
 
         async with NotebookLMClient(auth_tokens) as client:
-            with pytest.raises(ArtifactParseError, match="No media URLs found"):
+            with pytest.raises(ArtifactParseError, match="Could not extract download URL"):
                 await client.artifacts.download_audio("nb_123", "/tmp/audio.mp4")
 
     @pytest.mark.asyncio
@@ -1675,13 +1755,13 @@ class TestPollStatusVariousPaths:
     """Tests for poll_status() various status paths (lines 1412-1518)."""
 
     @pytest.mark.asyncio
-    async def test_poll_status_pending_artifact_not_in_list(
+    async def test_poll_status_not_found_artifact_not_in_list(
         self,
         auth_tokens,
         httpx_mock: HTTPXMock,
         build_rpc_response,
     ):
-        """poll_status returns 'pending' when task_id not found in artifact list."""
+        """poll_status returns 'not_found' when task_id not found in artifact list."""
         # Return artifacts that don't include the task_id we're polling
         artifact = ["some_other_artifact", "Report", 2, None, 3]
         response = build_rpc_response(RPCMethod.LIST_ARTIFACTS, [[artifact]])
@@ -1690,7 +1770,7 @@ class TestPollStatusVariousPaths:
         async with NotebookLMClient(auth_tokens) as client:
             result = await client.artifacts.poll_status("nb_123", "unknown_task_id")
 
-        assert result.status == "pending"
+        assert result.status == "not_found"
         assert result.task_id == "unknown_task_id"
 
     @pytest.mark.asyncio
@@ -1777,20 +1857,20 @@ class TestPollStatusVariousPaths:
         assert result.status == "completed"
 
     @pytest.mark.asyncio
-    async def test_poll_status_empty_list_returns_pending(
+    async def test_poll_status_empty_list_returns_not_found(
         self,
         auth_tokens,
         httpx_mock: HTTPXMock,
         build_rpc_response,
     ):
-        """poll_status returns 'pending' when artifact list is empty."""
+        """poll_status returns 'not_found' when artifact list is empty."""
         response = build_rpc_response(RPCMethod.LIST_ARTIFACTS, [[]])
         httpx_mock.add_response(content=response.encode())
 
         async with NotebookLMClient(auth_tokens) as client:
             result = await client.artifacts.poll_status("nb_123", "some_task_id")
 
-        assert result.status == "pending"
+        assert result.status == "not_found"
 
 
 class TestCallGenerateErrorHandling:
@@ -2072,7 +2152,9 @@ class TestGetArtifactTypeNameAndIsMediaReady:
         build_rpc_response,
     ):
         """poll_status returns 'completed' for video when art[8] has valid URL."""
-        # Video artifact with art[8] containing a URL
+        # Video artifact with art[8] containing a URL.
+        # Real-API shape: art[8][i][0][0] holds the URL string (matches the
+        # structure parsed by download_video).
         video_artifact = [
             "video_task",
             "Video Overview",
@@ -2082,7 +2164,7 @@ class TestGetArtifactTypeNameAndIsMediaReady:
             None,
             None,
             None,
-            [["https://storage.googleapis.com/video.mp4"]],  # art[8]
+            [[["https://storage.googleapis.com/video.mp4"]]],  # art[8]
         ]
         response = build_rpc_response(RPCMethod.LIST_ARTIFACTS, [[video_artifact]])
         httpx_mock.add_response(content=response.encode())
@@ -2233,7 +2315,7 @@ class TestDownloadQuizFlashcardParsing:
 
         async with NotebookLMClient(auth_tokens) as client:
             with patch.object(
-                client.artifacts._downloader,
+                client.artifacts,
                 "_get_artifact_content",
                 AsyncMock(return_value=html_without_data),
             ):
@@ -2317,7 +2399,7 @@ class TestDownloadQuizFlashcardParsing:
         output_path = str(tmp_path / "quiz.html")
         async with NotebookLMClient(auth_tokens) as client:
             with patch.object(
-                client.artifacts._downloader,
+                client.artifacts,
                 "_get_artifact_content",
                 AsyncMock(return_value=raw_html),
             ):
@@ -2329,3 +2411,32 @@ class TestDownloadQuizFlashcardParsing:
         from pathlib import Path
 
         assert Path(output_path).read_text() == raw_html
+
+
+class TestWaitForCompletionDeprecated:
+    """Tests for wait_for_completion deprecated poll_interval parameter."""
+
+    @pytest.mark.asyncio
+    async def test_wait_for_completion_deprecated_poll_interval_warning(
+        self,
+        auth_tokens,
+        httpx_mock: HTTPXMock,
+        build_rpc_response,
+    ):
+        """wait_for_completion issues DeprecationWarning for poll_interval parameter."""
+        import warnings
+
+        # Return a completed artifact immediately so it doesn't loop
+        artifact = ["task_dep", "Report", 2, None, 3]
+        response = build_rpc_response(RPCMethod.LIST_ARTIFACTS, [[artifact]])
+        httpx_mock.add_response(content=response.encode())
+
+        async with NotebookLMClient(auth_tokens) as client:
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                result = await client.artifacts.wait_for_completion(
+                    "nb_123", "task_dep", poll_interval=1.0
+                )
+                assert any(issubclass(warning.category, DeprecationWarning) for warning in w)
+
+        assert result.status == "completed"
