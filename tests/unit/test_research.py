@@ -85,7 +85,8 @@ class TestCitedSourceSelection:
 
     def test_extract_report_urls_ignores_markdown_images(self):
         urls = ResearchAPI.extract_report_urls(
-            "![chart](https://example.com/chart.png) cites [Article](https://example.com/a)"
+            "![chart](https://example.com/chart.png) and ![](https://example.com/empty.png) "
+            "cite [Article](https://example.com/a)"
         )
 
         assert urls == {"https://example.com/a"}
