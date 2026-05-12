@@ -278,14 +278,14 @@ class TestJsonErrorResponse:
     def test_json_error_response_serializes_path_in_extra(self, capsys):
         """Non-primitive values like pathlib.Path must not crash the error reporter."""
         with pytest.raises(SystemExit):
-            json_error_response("ERROR", "Bad path", extra={"path": Path("/tmp/x")})
+            json_error_response("ERROR", "Bad path", extra={"path": Path("tmp_test_path")})
 
         captured = capsys.readouterr()
         data = json.loads(captured.out)
         assert data["error"] is True
         assert data["code"] == "ERROR"
         assert data["message"] == "Bad path"
-        assert data["path"] == str(Path("/tmp/x"))
+        assert data["path"] == str(Path("tmp_test_path"))
 
 
 # =============================================================================

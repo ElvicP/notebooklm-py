@@ -163,7 +163,7 @@ class TestHandleErrorsJsonOutput:
                 "PATH_ERROR",
                 json_output=True,
                 exit_code=1,
-                extra={"path": Path("/tmp/x")},
+                extra={"path": Path("tmp_test_path")},
             )
 
         assert exc_info.value.code == 1
@@ -172,7 +172,7 @@ class TestHandleErrorsJsonOutput:
         assert data["error"] is True
         assert data["code"] == "PATH_ERROR"
         assert data["message"] == "Bad path"
-        assert data["path"] == str(Path("/tmp/x"))
+        assert data["path"] == str(Path("tmp_test_path"))
 
 
 class TestHandleErrorsTextOutput:
