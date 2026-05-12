@@ -285,7 +285,7 @@ class TestJsonErrorResponse:
         assert data["error"] is True
         assert data["code"] == "ERROR"
         assert data["message"] == "Bad path"
-        assert "/tmp/x" in data["path"]
+        assert data["path"] == str(Path("/tmp/x"))
 
 
 # =============================================================================

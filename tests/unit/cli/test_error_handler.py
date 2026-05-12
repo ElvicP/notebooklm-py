@@ -172,7 +172,7 @@ class TestHandleErrorsJsonOutput:
         assert data["error"] is True
         assert data["code"] == "PATH_ERROR"
         assert data["message"] == "Bad path"
-        assert "/tmp/x" in data["path"]
+        assert data["path"] == str(Path("/tmp/x"))
 
 
 class TestHandleErrorsTextOutput:
