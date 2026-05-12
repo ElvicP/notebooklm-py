@@ -20,6 +20,7 @@ from notebooklm.types import (
 from .conftest import create_mock_client, patch_client_for_module
 
 source_module = importlib.import_module("notebooklm.cli.source")
+helpers_module = importlib.import_module("notebooklm.cli.helpers")
 
 
 @pytest.fixture
@@ -238,6 +239,53 @@ class TestSourceAdd:
             assert result.exit_code == 0
             data = json.loads(result.output)
             assert data["source"]["id"] == "src_new"
+
+    def test_source_add_timeout_flag_threaded_to_client(self, runner, mock_auth):
+        with patch_client_for_module("source") as mock_client_cls:
+            mock_client = create_mock_client()
+            mock_client.sources.add_url = AsyncMock(
+                return_value=Source(id="src_t", title="X", url="https://example.com")
+            )
+            mock_client_cls.return_value = mock_client
+
+            with patch(
+                "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+            ) as mock_fetch:
+                mock_fetch.return_value = ("csrf", "session")
+                result = runner.invoke(
+                    cli,
+                    [
+                        "source",
+                        "add",
+                        "https://example.com",
+                        "-n",
+                        "nb_123",
+                        "--timeout",
+                        "120",
+                    ],
+                )
+
+            assert result.exit_code == 0
+            assert mock_client_cls.call_args.kwargs["timeout"] == 120.0
+
+    def test_source_add_default_does_not_override_client_timeout(self, runner, mock_auth):
+        with patch_client_for_module("source") as mock_client_cls:
+            mock_client = create_mock_client()
+            mock_client.sources.add_url = AsyncMock(
+                return_value=Source(id="src_d", title="Y", url="https://example.com")
+            )
+            mock_client_cls.return_value = mock_client
+
+            with patch(
+                "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+            ) as mock_fetch:
+                mock_fetch.return_value = ("csrf", "session")
+                result = runner.invoke(
+                    cli, ["source", "add", "https://example.com", "-n", "nb_123"]
+                )
+
+            assert result.exit_code == 0
+            assert "timeout" not in mock_client_cls.call_args.kwargs
 
 
 # =============================================================================
@@ -680,7 +728,9 @@ class TestSourceAddResearch:
     def test_add_research_with_import_all_uses_retry_helper(self, runner, mock_auth):
         with (
             patch_client_for_module("source") as mock_client_cls,
-            patch.object(source_module, "import_with_retry", new_callable=AsyncMock) as mock_import,
+            patch.object(
+                helpers_module, "import_with_retry", new_callable=AsyncMock
+            ) as mock_import,
         ):
             mock_client = create_mock_client()
             mock_client.research.start = AsyncMock(return_value={"task_id": "task_123"})
@@ -720,7 +770,110 @@ class TestSourceAddResearch:
             "nb_123",
             "task_123",
             [{"title": "Source 1", "url": "http://example.com"}],
+            max_elapsed=1800,
         )
+
+    def test_add_research_with_import_all_cited_only(self, runner, mock_auth):
+        with (
+            patch_client_for_module("source") as mock_client_cls,
+            patch.object(
+                helpers_module, "import_with_retry", new_callable=AsyncMock
+            ) as mock_import,
+        ):
+            mock_client = create_mock_client()
+            mock_client.research.start = AsyncMock(return_value={"task_id": "task_123"})
+            mock_client.research.poll = AsyncMock(
+                return_value={
+                    "status": "completed",
+                    "task_id": "task_123",
+                    "sources": [
+                        {"title": "Cited", "url": "https://example.com/cited"},
+                        {"title": "Uncited", "url": "https://example.com/uncited"},
+                    ],
+                    "report": "Report cites https://example.com/cited",
+                }
+            )
+            mock_import.return_value = [{"id": "src_1", "title": "Cited"}]
+            mock_client_cls.return_value = mock_client
+
+            with patch(
+                "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+            ) as mock_fetch:
+                mock_fetch.return_value = ("csrf", "session")
+                result = runner.invoke(
+                    cli,
+                    [
+                        "source",
+                        "add-research",
+                        "AI papers",
+                        "--import-all",
+                        "--cited-only",
+                        "-n",
+                        "nb_123",
+                    ],
+                )
+
+        assert result.exit_code == 0
+        assert "Imported 1 sources" in result.output
+        mock_import.assert_awaited_once_with(
+            mock_client,
+            "nb_123",
+            "task_123",
+            [{"title": "Cited", "url": "https://example.com/cited"}],
+            max_elapsed=1800,
+        )
+
+    def test_add_research_cited_only_requires_import_all(
+        self, runner, mock_auth, mock_fetch_tokens
+    ):
+        result = runner.invoke(
+            cli,
+            ["source", "add-research", "AI papers", "--cited-only", "-n", "nb_123"],
+        )
+
+        assert result.exit_code == 1
+        assert "--cited-only requires --import-all" in result.output
+
+    def test_add_research_timeout_flag_threaded_to_import_with_retry(self, runner, mock_auth):
+        with (
+            patch_client_for_module("source") as mock_client_cls,
+            patch.object(
+                helpers_module, "import_with_retry", new_callable=AsyncMock
+            ) as mock_import,
+        ):
+            mock_client = create_mock_client()
+            mock_client.research.start = AsyncMock(return_value={"task_id": "task_t1"})
+            mock_client.research.poll = AsyncMock(
+                return_value={
+                    "status": "completed",
+                    "task_id": "task_t1",
+                    "sources": [{"title": "S", "url": "http://example.com"}],
+                    "report": "",
+                }
+            )
+            mock_import.return_value = [{"id": "src_t1", "title": "S"}]
+            mock_client_cls.return_value = mock_client
+
+            with patch(
+                "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+            ) as mock_fetch:
+                mock_fetch.return_value = ("csrf", "session")
+                result = runner.invoke(
+                    cli,
+                    [
+                        "source",
+                        "add-research",
+                        "topic",
+                        "--import-all",
+                        "--timeout",
+                        "600",
+                        "-n",
+                        "nb_123",
+                    ],
+                )
+
+        assert result.exit_code == 0
+        assert mock_import.await_args.kwargs["max_elapsed"] == 600
 
 
 # =============================================================================
@@ -1026,6 +1179,44 @@ class TestSourceAddAutoDetect:
             mock_client.sources.add_text.assert_called_once()
             call_args = mock_client.sources.add_text.call_args
             assert call_args[0][1] == "Custom Title"  # title arg
+
+    def test_source_add_file_with_custom_title_passes_title_through(
+        self, runner, mock_auth, tmp_path
+    ):
+        """Regression test for #313: ``--title`` must reach add_file when the
+        argument is an existing file path (auto-detected as 'file').
+        """
+        test_file = tmp_path / "boring-filename.md"
+        test_file.write_text("# content\n")
+
+        with patch_client_for_module("source") as mock_client_cls:
+            mock_client = create_mock_client()
+            mock_client.sources.add_file = AsyncMock(
+                return_value=Source(id="src_md", title="Real Intended Title")
+            )
+            mock_client_cls.return_value = mock_client
+
+            with patch(
+                "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+            ) as mock_fetch:
+                mock_fetch.return_value = ("csrf", "session")
+                result = runner.invoke(
+                    cli,
+                    [
+                        "source",
+                        "add",
+                        str(test_file),
+                        "--title",
+                        "Real Intended Title",
+                        "-n",
+                        "nb_123",
+                    ],
+                )
+
+            assert result.exit_code == 0
+            mock_client.sources.add_file.assert_called_once()
+            call_kwargs = mock_client.sources.add_file.call_args.kwargs
+            assert call_kwargs.get("title") == "Real Intended Title"
 
 
 # =============================================================================

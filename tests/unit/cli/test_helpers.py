@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -232,6 +233,20 @@ class TestJsonOutputResponse:
         assert data["nested"]["key"] == "value"
         assert data["list"] == [1, 2, 3]
 
+    def test_json_output_response_preserves_unicode(self, capsys):
+        """CJK / emoji characters should be emitted as real UTF-8, not \\uXXXX."""
+        json_output_response({"title": "中文笔记本", "emoji": "🚀"})
+
+        captured = capsys.readouterr()
+        # Round-trip must still parse.
+        data = json.loads(captured.out)
+        assert data["title"] == "中文笔记本"
+        assert data["emoji"] == "🚀"
+        # Raw output must contain real CJK chars, not escaped sequences.
+        assert "中文笔记本" in captured.out
+        assert "🚀" in captured.out
+        assert "\\u" not in captured.out
+
 
 class TestJsonErrorResponse:
     def test_outputs_error_json_and_exits(self, capsys):
@@ -245,6 +260,32 @@ class TestJsonErrorResponse:
         assert data["error"] is True
         assert data["code"] == "TEST_ERROR"
         assert data["message"] == "Test error message"
+
+    def test_json_error_response_preserves_unicode(self, capsys):
+        """Error messages with CJK / emoji should be emitted as real UTF-8."""
+        with pytest.raises(SystemExit):
+            json_error_response("ERROR", "笔记本不存在 🚫", extra={"title": "中文"})
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["message"] == "笔记本不存在 🚫"
+        assert data["title"] == "中文"
+        assert "笔记本不存在" in captured.out
+        assert "🚫" in captured.out
+        assert "中文" in captured.out
+        assert "\\u" not in captured.out
+
+    def test_json_error_response_serializes_path_in_extra(self, capsys):
+        """Non-primitive values like pathlib.Path must not crash the error reporter."""
+        with pytest.raises(SystemExit):
+            json_error_response("ERROR", "Bad path", extra={"path": Path("tmp_test_path")})
+
+        captured = capsys.readouterr()
+        data = json.loads(captured.out)
+        assert data["error"] is True
+        assert data["code"] == "ERROR"
+        assert data["message"] == "Bad path"
+        assert data["path"] == str(Path("tmp_test_path"))
 
 
 # =============================================================================
@@ -285,6 +326,34 @@ class TestContextManagement:
         with patch("notebooklm.cli.helpers.get_context_path", return_value=context_file):
             clear_context()
             assert not context_file.exists()
+
+    def test_clear_context_preserves_account_metadata(self, tmp_path):
+        context_file = tmp_path / "context.json"
+        context_file.write_text(
+            json.dumps(
+                {
+                    "notebook_id": "test",
+                    "conversation_id": "conv",
+                    "account": {"authuser": 1, "email": "bob@example.com"},
+                }
+            )
+        )
+        with patch("notebooklm.cli.helpers.get_context_path", return_value=context_file):
+            assert clear_context() is True
+
+        assert json.loads(context_file.read_text()) == {
+            "account": {"authuser": 1, "email": "bob@example.com"}
+        }
+
+    def test_clear_context_can_remove_account_metadata(self, tmp_path):
+        context_file = tmp_path / "context.json"
+        context_file.write_text(
+            json.dumps({"account": {"authuser": 1, "email": "bob@example.com"}})
+        )
+        with patch("notebooklm.cli.helpers.get_context_path", return_value=context_file):
+            assert clear_context(clear_account=True) is True
+
+        assert not context_file.exists()
 
     def test_clear_context_no_file(self, tmp_path):
         """clear_context should not raise if file doesn't exist"""
@@ -331,6 +400,18 @@ class TestContextManagement:
             data = json.loads(context_file.read_text())
             assert data["notebook_id"] == "nb_new"
             assert "conversation_id" not in data
+
+    def test_set_current_notebook_preserves_account_metadata(self, tmp_path):
+        context_file = tmp_path / "context.json"
+        context_file.write_text(
+            json.dumps({"account": {"authuser": 1, "email": "bob@example.com"}})
+        )
+        with patch("notebooklm.cli.helpers.get_context_path", return_value=context_file):
+            set_current_notebook("nb_new", title="New Notebook")
+
+        data = json.loads(context_file.read_text())
+        assert data["notebook_id"] == "nb_new"
+        assert data["account"] == {"authuser": 1, "email": "bob@example.com"}
 
 
 class TestRequireNotebook:
@@ -512,7 +593,7 @@ class TestWithClientDecorator:
 
         runner = CliRunner()
         with patch("notebooklm.cli.helpers.load_auth_from_storage") as mock_load:
-            mock_load.return_value = {"SID": "test"}
+            mock_load.return_value = {"SID": "test", "__Secure-1PSIDTS": "test_1psidts"}
             with patch(
                 "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
             ) as mock_fetch:
@@ -563,7 +644,7 @@ class TestWithClientDecorator:
 
         runner = CliRunner()
         with patch("notebooklm.cli.helpers.load_auth_from_storage") as mock_load:
-            mock_load.return_value = {"SID": "test"}
+            mock_load.return_value = {"SID": "test", "__Secure-1PSIDTS": "test_1psidts"}
             with patch(
                 "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
             ) as mock_fetch:
@@ -590,7 +671,7 @@ class TestWithClientDecorator:
 
         runner = CliRunner()
         with patch("notebooklm.cli.helpers.load_auth_from_storage") as mock_load:
-            mock_load.return_value = {"SID": "test"}
+            mock_load.return_value = {"SID": "test", "__Secure-1PSIDTS": "test_1psidts"}
             with patch(
                 "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
             ) as mock_fetch:
@@ -616,7 +697,7 @@ class TestWithClientDecorator:
 
         runner = CliRunner()
         with patch("notebooklm.cli.helpers.load_auth_from_storage") as mock_load:
-            mock_load.return_value = {"SID": "test"}
+            mock_load.return_value = {"SID": "test", "__Secure-1PSIDTS": "test_1psidts"}
             with patch(
                 "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
             ) as mock_fetch:
@@ -640,7 +721,7 @@ class TestGetClient:
         ctx.obj = None
 
         with patch("notebooklm.cli.helpers.load_auth_from_storage") as mock_load:
-            mock_load.return_value = {"SID": "test_sid"}
+            mock_load.return_value = {"SID": "test_sid", "__Secure-1PSIDTS": "test_1psidts"}
             with patch(
                 "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
             ) as mock_fetch:
@@ -648,7 +729,7 @@ class TestGetClient:
 
                 cookies, csrf, session = get_client(ctx)
 
-        assert cookies == {"SID": "test_sid"}
+        assert cookies == {"SID": "test_sid", "__Secure-1PSIDTS": "test_1psidts"}
         assert csrf == "csrf_token"
         assert session == "session_id"
 
@@ -657,7 +738,7 @@ class TestGetClient:
         ctx.obj = {"storage_path": "/custom/path"}
 
         with patch("notebooklm.cli.helpers.load_auth_from_storage") as mock_load:
-            mock_load.return_value = {"SID": "test"}
+            mock_load.return_value = {"SID": "test", "__Secure-1PSIDTS": "test_1psidts"}
             with patch(
                 "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
             ) as mock_fetch:
@@ -674,7 +755,7 @@ class TestGetAuthTokens:
         ctx.obj = None
 
         with patch("notebooklm.cli.helpers.load_auth_from_storage") as mock_load:
-            mock_load.return_value = {"SID": "test_sid"}
+            mock_load.return_value = {"SID": "test_sid", "__Secure-1PSIDTS": "test_1psidts"}
             with patch(
                 "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
             ) as mock_fetch:
@@ -682,8 +763,11 @@ class TestGetAuthTokens:
 
                 auth = get_auth_tokens(ctx)
 
-        assert auth.cookies == {("SID", ".google.com"): "test_sid"}
-        assert auth.flat_cookies == {"SID": "test_sid"}
+        assert auth.cookies == {
+            ("SID", ".google.com"): "test_sid",
+            ("__Secure-1PSIDTS", ".google.com"): "test_1psidts",
+        }
+        assert auth.flat_cookies == {"SID": "test_sid", "__Secure-1PSIDTS": "test_1psidts"}
         assert auth.csrf_token == "csrf_token"
         assert auth.session_id == "session_id"
 
@@ -693,7 +777,18 @@ class TestGetAuthTokens:
         ctx.obj = {"storage_path": storage_path, "profile": None}
         monkeypatch.setenv(
             "NOTEBOOKLM_AUTH_JSON",
-            json.dumps({"cookies": [{"name": "SID", "value": "env", "domain": ".google.com"}]}),
+            json.dumps(
+                {
+                    "cookies": [
+                        {"name": "SID", "value": "env", "domain": ".google.com"},
+                        {
+                            "name": "__Secure-1PSIDTS",
+                            "value": "test_1psidts",
+                            "domain": ".google.com",
+                        },
+                    ]
+                }
+            ),
         )
 
         with (
@@ -704,14 +799,16 @@ class TestGetAuthTokens:
             patch("notebooklm.auth.build_httpx_cookies_from_storage") as mock_env_jar,
             patch("notebooklm.cli.helpers.build_cookie_jar") as mock_build_jar,
         ):
-            mock_load.return_value = {"SID": "file"}
+            mock_load.return_value = {"SID": "file", "__Secure-1PSIDTS": "test_1psidts"}
             mock_fetch.return_value = ("csrf", "session")
             mock_build_jar.return_value = httpx.Cookies()
 
             auth = get_auth_tokens(ctx)
 
         mock_env_jar.assert_not_called()
-        mock_build_jar.assert_called_once_with(cookies={"SID": "file"}, storage_path=storage_path)
+        mock_build_jar.assert_called_once_with(
+            cookies={"SID": "file", "__Secure-1PSIDTS": "test_1psidts"}, storage_path=storage_path
+        )
         assert auth.storage_path == storage_path
 
 
@@ -1578,10 +1675,10 @@ class TestImportWithRetry:
 
 
 class TestGetAuthTokensAuthuser:
-    """Regression for #359: get_auth_tokens must read authuser from account.json
+    """Regression for #359: get_auth_tokens must read authuser from context.json
     so RPC URLs route to the right Google account."""
 
-    def test_authuser_from_account_json_propagates_to_authtokens(self, tmp_path):
+    def test_authuser_from_context_json_propagates_to_authtokens(self, tmp_path):
         storage = tmp_path / "storage_state.json"
         storage.write_text(
             json.dumps(
@@ -1592,27 +1689,33 @@ class TestGetAuthTokensAuthuser:
                         {"name": "SSID", "value": "x", "domain": ".google.com"},
                         {"name": "APISID", "value": "x", "domain": ".google.com"},
                         {"name": "SAPISID", "value": "x", "domain": ".google.com"},
+                        {"name": "__Secure-1PSIDTS", "value": "x", "domain": ".google.com"},
                     ]
                 }
             )
         )
-        (tmp_path / "account.json").write_text(
-            json.dumps({"authuser": 2, "email": "bob@example.com"}), encoding="utf-8"
+        (tmp_path / "context.json").write_text(
+            json.dumps({"account": {"authuser": 2, "email": "bob@example.com"}}),
+            encoding="utf-8",
         )
 
         ctx = MagicMock()
         ctx.obj = {"storage_path": storage, "profile": None}
 
-        with patch(
-            "notebooklm.cli.helpers.run_async",
-            return_value=("csrf_v2", "sess_v2"),
+        token_fetch = object()
+        with (
+            patch("notebooklm.auth.fetch_tokens_with_domains", new=lambda *_, **__: token_fetch),
+            patch(
+                "notebooklm.cli.helpers.run_async",
+                return_value=("csrf_v2", "sess_v2"),
+            ),
         ):
             tokens = get_auth_tokens(ctx)
 
         assert tokens.authuser == 2
         assert tokens.csrf_token == "csrf_v2"
 
-    def test_default_authuser_when_no_account_json(self, tmp_path):
+    def test_default_authuser_when_no_account_metadata(self, tmp_path):
         storage = tmp_path / "storage_state.json"
         storage.write_text(
             json.dumps(
@@ -1623,6 +1726,7 @@ class TestGetAuthTokensAuthuser:
                         {"name": "SSID", "value": "x", "domain": ".google.com"},
                         {"name": "APISID", "value": "x", "domain": ".google.com"},
                         {"name": "SAPISID", "value": "x", "domain": ".google.com"},
+                        {"name": "__Secure-1PSIDTS", "value": "x", "domain": ".google.com"},
                     ]
                 }
             )
@@ -1631,9 +1735,13 @@ class TestGetAuthTokensAuthuser:
         ctx = MagicMock()
         ctx.obj = {"storage_path": storage, "profile": None}
 
-        with patch(
-            "notebooklm.cli.helpers.run_async",
-            return_value=("csrf", "sess"),
+        token_fetch = object()
+        with (
+            patch("notebooklm.auth.fetch_tokens_with_domains", new=lambda *_, **__: token_fetch),
+            patch(
+                "notebooklm.cli.helpers.run_async",
+                return_value=("csrf", "sess"),
+            ),
         ):
             tokens = get_auth_tokens(ctx)
 

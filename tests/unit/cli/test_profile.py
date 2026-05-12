@@ -1,8 +1,13 @@
 """Tests for cli.profile helpers."""
 
+import json
+from unittest.mock import patch
+
 import pytest
+from click.testing import CliRunner
 
 from notebooklm.cli.profile import _PROFILE_NAME_RE, email_to_profile_name
+from notebooklm.notebooklm_cli import cli
 
 
 class TestEmailToProfileName:
@@ -41,3 +46,39 @@ class TestEmailToProfileName:
         ]:
             name = email_to_profile_name(email)
             assert _PROFILE_NAME_RE.match(name), name
+
+
+class TestProfileListAccountMetadata:
+    def test_json_includes_account_metadata(self, tmp_path):
+        profile_dir = tmp_path / "profiles" / "bob"
+        profile_dir.mkdir(parents=True)
+        storage_path = profile_dir / "storage_state.json"
+        storage_path.write_text("{}")
+        (profile_dir / "context.json").write_text(
+            json.dumps({"account": {"authuser": 1, "email": "bob@gmail.com"}}),
+            encoding="utf-8",
+        )
+
+        def fake_get_storage_path(profile=None):
+            assert profile == "bob"
+            return storage_path
+
+        runner = CliRunner()
+        with (
+            patch("notebooklm.cli.profile.list_profiles", return_value=["bob"]),
+            patch("notebooklm.cli.profile.resolve_profile", return_value="bob"),
+            patch("notebooklm.cli.profile.get_storage_path", side_effect=fake_get_storage_path),
+        ):
+            result = runner.invoke(cli, ["profile", "list", "--json"])
+
+        assert result.exit_code == 0, result.output
+        data = json.loads(result.output)
+        assert data["profiles"] == [
+            {
+                "name": "bob",
+                "active": True,
+                "authenticated": True,
+                "account": "bob@gmail.com",
+                "authuser": 1,
+            }
+        ]

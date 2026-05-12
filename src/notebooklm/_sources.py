@@ -4,6 +4,7 @@ import asyncio
 import builtins
 import logging
 import re
+from dataclasses import replace
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -12,9 +13,10 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 
 from ._core import ClientCore
+from ._env import get_base_url
 from ._url_utils import is_youtube_url
-from .exceptions import ValidationError
-from .rpc import UPLOAD_URL, RPCError, RPCMethod
+from .exceptions import NetworkError, ValidationError
+from .rpc import RPCError, RPCMethod, get_upload_url
 from .rpc.types import SourceStatus
 from .types import (
     Source,
@@ -28,6 +30,15 @@ from .types import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Source type codes where status=3 (ERROR) is transient rather than
+# terminal. Audio/media (10) and unclassified (None / 0) sources can
+# briefly report status=3 during transcription/classification before
+# settling at status=2. All other types (PDFs, web, YouTube, etc.) treat
+# status=3 as a terminal failure. New unknown types default to terminal
+# — fail fast rather than silently looping until timeout. See #391.
+_TRANSIENT_ERROR_TYPES: tuple[int | None, ...] = (10, 0, None)
 
 
 class SourcesAPI:
@@ -243,9 +254,83 @@ class SourcesAPI:
                 return source
 
             if source.is_error:
-                raise SourceProcessingError(source_id, source.status)
+                if source._type_code not in _TRANSIENT_ERROR_TYPES:
+                    raise SourceProcessingError(source_id, source.status)
+                # For audio (type 10) or unclassified (None / 0) sources,
+                # status=3 can be a transient state during transcription —
+                # keep polling instead of treating it as terminal. See #391.
 
             # Don't sleep longer than remaining time
+            remaining = timeout - (monotonic() - start)
+            if remaining <= 0:
+                raise SourceTimeoutError(source_id, timeout, last_status)
+
+            sleep_time = min(interval, remaining)
+            await asyncio.sleep(sleep_time)
+            interval = min(interval * backoff_factor, max_interval)
+
+    async def wait_until_registered(
+        self,
+        notebook_id: str,
+        source_id: str,
+        timeout: float = 30.0,
+        initial_interval: float = 0.5,
+        max_interval: float = 5.0,
+        backoff_factor: float = 1.5,
+    ) -> Source:
+        """Wait for a source to be registered server-side (status >= PROCESSING).
+
+        Polls until the source is visible in the notebook listing and has a
+        non-ERROR status (or, for audio/unclassified sources, a transient
+        ERROR — see ``_TRANSIENT_ERROR_TYPES``). Returns as soon as the
+        source exists, without waiting for full processing.
+
+        This is intended for narrow follow-up RPCs like UPDATE_SOURCE that
+        only require the source to be registered, not fully processed.
+        Registration is fast (seconds) even for long audio sources, so the
+        default timeout is much shorter than ``wait_until_ready``'s.
+
+        Args:
+            notebook_id: The notebook ID.
+            source_id: The source ID to wait for.
+            timeout: Maximum time to wait in seconds (default: 30).
+            initial_interval: Initial polling interval in seconds (default: 0.5).
+            max_interval: Maximum polling interval in seconds (default: 5).
+            backoff_factor: Multiplier for polling interval (default: 1.5).
+
+        Returns:
+            The registered Source object (status is PROCESSING, READY, or
+            PREPARING).
+
+        Raises:
+            SourceTimeoutError: If timeout is reached before source is registered.
+            SourceProcessingError: If source reports a terminal ERROR for a
+                non-transient source type.
+        """
+        start = monotonic()
+        interval = initial_interval
+        last_status: int | None = None
+
+        while True:
+            elapsed = monotonic() - start
+            if elapsed >= timeout:
+                raise SourceTimeoutError(source_id, timeout, last_status)
+
+            source = await self.get(notebook_id, source_id)
+
+            if source is not None:
+                last_status = source.status
+
+                if source.is_error:
+                    if source._type_code not in _TRANSIENT_ERROR_TYPES:
+                        raise SourceProcessingError(source_id, source.status)
+                    # Transient ERROR for audio (type 10) or unclassified
+                    # (None / 0) — keep polling. See #391.
+                else:
+                    # Any non-error status (PROCESSING, READY, PREPARING)
+                    # means the source is registered server-side; we're done.
+                    return source
+
             remaining = timeout - (monotonic() - start)
             if remaining <= 0:
                 raise SourceTimeoutError(source_id, timeout, last_status)
@@ -406,6 +491,8 @@ class SourcesAPI:
         mime_type: str | None = None,
         wait: bool = False,
         wait_timeout: float = 120.0,
+        *,
+        title: str | None = None,
     ) -> Source:
         """Add a file source to a notebook using resumable upload.
 
@@ -413,13 +500,38 @@ class SourcesAPI:
         1. Register source intent with RPC → get SOURCE_ID
         2. Start upload session with SOURCE_ID (get upload URL)
         3. Stream upload file content (memory-efficient for large files)
+        4. Optionally rename the source if a custom ``title`` was supplied
+           (the file-add RPC has no title slot, so a follow-up
+           ``UPDATE_SOURCE`` is the only way to set one).
 
         Args:
             notebook_id: The notebook ID.
             file_path: Path to the file to upload.
             mime_type: MIME type of the file (not used in current implementation).
-            wait: If True, wait for source to be ready before returning.
-            wait_timeout: Maximum seconds to wait if wait=True (default: 120).
+            title: Optional display title. When provided and different from the
+                source filename, a rename is issued after upload so the source
+                appears with this title in the UI and API responses. Leading and
+                trailing whitespace is stripped; empty titles are rejected. If
+                the post-upload rename fails, the upload is preserved, a warning
+                is logged, and the returned source keeps the filename title.
+
+                Important: supplying a non-default title forces a brief
+                registration wait (~seconds) for the source to become visible
+                server-side *before* the rename is issued, even when
+                ``wait=False``. The UPDATE_SOURCE RPC silently no-ops against
+                an unregistered source, so blocking here is the only way to
+                honor the caller's intent. This narrow wait completes once
+                the source's status is non-ERROR (or transient-ERROR for
+                audio); it does NOT wait for full processing. See #388.
+            wait: If True, wait for source to be fully ready before returning.
+                Note that supplying ``title`` also forces a narrow pre-rename
+                registration wait regardless of this flag — see the ``title``
+                parameter above.
+            wait_timeout: Maximum seconds to wait if ``wait=True``. Also bounds
+                the narrow registration wait triggered by a custom ``title``;
+                that wait returns on the first PROCESSING/READY poll so it
+                completes in seconds for typical sources regardless of this
+                value. Default: 120.
 
         Returns:
             The created Source object. If wait=False, status may be PROCESSING.
@@ -432,6 +544,11 @@ class SourcesAPI:
             - Word: application/vnd.openxmlformats-officedocument.wordprocessingml.document
         """
         logger.debug("Adding file source to notebook %s: %s", notebook_id, file_path)
+        if title is not None:
+            title = title.strip()
+            if not title:
+                raise ValidationError("Title cannot be empty or whitespace-only")
+
         file_path = Path(file_path).resolve()
 
         if not file_path.exists():
@@ -453,18 +570,61 @@ class SourcesAPI:
         # Step 3: Stream upload file content (memory-efficient)
         await self._upload_file_streaming(upload_url, file_path)
 
-        # Return source with the ID we got from registration
-        # Note: _type_code is None because the actual type is determined
-        # by the API after processing (PDF, TEXT, IMAGE, etc.)
-        # Use wait=True or get() to retrieve the actual type after processing
-        source = Source(
-            id=source_id,
-            title=filename,
-            _type_code=None,  # Placeholder until processed
-        )
-
+        # Step 4: Ensure the source is registered server-side BEFORE renaming.
+        # The UPDATE_SOURCE RPC silently no-ops against an unregistered source
+        # (returns success-shaped data, but the title change never propagates),
+        # so a custom-title request must force a brief registration wait even
+        # when the caller passed wait=False. See #388.
+        #
+        # When wait=True the caller asked for full processing; use
+        # wait_until_ready. When only a custom title was supplied, use the
+        # narrower wait_until_registered so wait=False callers don't pay the
+        # full processing latency just to get a rename through.
+        needs_title_rename = title is not None and title != filename
         if wait:
-            return await self.wait_until_ready(notebook_id, source.id, timeout=wait_timeout)
+            source = await self.wait_until_ready(notebook_id, source_id, timeout=wait_timeout)
+        elif needs_title_rename:
+            # Honor the caller's wait_timeout directly — wait_until_registered
+            # polls and returns on the first PROCESSING/READY status, so the
+            # narrow wait still completes fast for typical sources even when
+            # the upper bound is generous (e.g. long-audio callers passing 300s).
+            source = await self.wait_until_registered(notebook_id, source_id, timeout=wait_timeout)
+        else:
+            # Fire-and-forget placeholder. _type_code is None because the
+            # actual type is determined by the API after processing (PDF,
+            # TEXT, IMAGE, etc.). status=PROCESSING reflects that the source
+            # has been registered but not yet processed — callers can use
+            # wait=True or get() to retrieve the resolved state.
+            source = Source(
+                id=source_id,
+                title=filename,
+                status=SourceStatus.PROCESSING,
+                _type_code=None,  # Placeholder until processed
+            )
+
+        # Step 5: Apply custom title now that the source is registered. The
+        # file-add RPC ignores any title hint, so a separate UPDATE_SOURCE
+        # call is the only way to honor the caller's intent.
+        if title is not None and title != filename:
+            try:
+                renamed = await self.rename(notebook_id, source_id, title)
+                # Only merge the new title onto the waited source. rename()'s
+                # response shape can be sparse (UPDATE_SOURCE sometimes returns
+                # just an id + title) and would otherwise null out _type_code,
+                # url, and created_at that wait_until_ready() populated. Fall
+                # back to the requested title if rename's response omits it.
+                source = replace(source, title=renamed.title or title)
+            except (RPCError, NetworkError):
+                # Don't fail the whole upload if the rename fails — the file is
+                # already uploaded and registered. Surface a warning so the
+                # caller can retry. The registered source (from the forced wait
+                # above) is returned with its server-side title.
+                logger.warning(
+                    "Source %s uploaded but rename to %r failed",
+                    source_id,
+                    title,
+                    exc_info=True,
+                )
 
         return source
 
@@ -951,14 +1111,14 @@ class SourcesAPI:
         import json
 
         authuser = self._core.auth.authuser
-        url = f"{UPLOAD_URL}?authuser={authuser}"
+        base_url = get_base_url()
+        url = f"{get_upload_url()}?authuser={authuser}"
 
         headers = {
             "Accept": "*/*",
             "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
-            "Cookie": self._core.auth.cookie_header,
-            "Origin": "https://notebooklm.google.com",
-            "Referer": "https://notebooklm.google.com/",
+            "Origin": base_url,
+            "Referer": f"{base_url}/",
             "x-goog-authuser": str(authuser),
             "x-goog-upload-command": "start",
             "x-goog-upload-header-content-length": str(file_size),
@@ -973,7 +1133,19 @@ class SourcesAPI:
             }
         )
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        # Pass the live cookie jar (not a flat Cookie header) so httpx scopes
+        # cookies by Domain attribute, matching browser behavior. The /upload/_/
+        # endpoint is served by Scotty, which validates host-sensitive cookies
+        # (notably OSID) against the request host: an OSID issued for
+        # myaccount.google.com leaked to notebooklm.google.com is rejected with
+        # HTTP 500 and x-goog-upload-status: final. A real browser would never
+        # send the foreign-host OSID; Domain-scoping the jar enforces the same.
+        # Using get_http_client().cookies (instead of auth.cookie_jar) so we
+        # pick up SIDCC/SIDTS rotations applied during the live session. See #373.
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(10.0, read=60.0),
+            cookies=self._core.get_http_client().cookies,
+        ) as client:
             response = await client.post(url, headers=headers, content=body)
             response.raise_for_status()
 
@@ -995,13 +1167,13 @@ class SourcesAPI:
             upload_url: The resumable upload URL from _start_resumable_upload.
             file_path: Path to the file to upload.
         """
+        base_url = get_base_url()
         headers = {
             "Accept": "*/*",
             "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
-            "Cookie": self._core.auth.cookie_header,
-            "Origin": "https://notebooklm.google.com",
-            "Referer": "https://notebooklm.google.com/",
             "x-goog-authuser": str(self._core.auth.authuser),
+            "Origin": base_url,
+            "Referer": f"{base_url}/",
             "x-goog-upload-command": "upload, finalize",
             "x-goog-upload-offset": "0",
         }
@@ -1012,6 +1184,12 @@ class SourcesAPI:
                 while chunk := f.read(65536):  # 64KB chunks
                     yield chunk
 
-        async with httpx.AsyncClient(timeout=300.0) as client:
+        # See _start_resumable_upload: pass the live cookie jar so httpx scopes
+        # cookies per Domain attribute. Scotty validates OSID against host
+        # and rejects foreign-host cookies. (#373)
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(10.0, read=300.0),
+            cookies=self._core.get_http_client().cookies,
+        ) as client:
             response = await client.post(upload_url, headers=headers, content=file_stream())
             response.raise_for_status()

@@ -16,6 +16,7 @@ import shutil
 import click
 from rich.table import Table
 
+from ..auth import read_account_metadata
 from ..paths import (
     get_config_path,
     get_profile_dir,
@@ -97,12 +98,17 @@ def list_cmd(json_output):
         storage = get_storage_path(profile=name)
         is_active = name == active
         authenticated = storage.exists()
+        account_metadata = read_account_metadata(storage)
+        account_email = account_metadata.get("email")
+        account_authuser = account_metadata.get("authuser")
 
         profile_data.append(
             {
                 "name": name,
                 "active": is_active,
                 "authenticated": authenticated,
+                "account": account_email if isinstance(account_email, str) else None,
+                "authuser": account_authuser if isinstance(account_authuser, int) else None,
             }
         )
 
@@ -113,6 +119,7 @@ def list_cmd(json_output):
     table = Table(title="Profiles")
     table.add_column("", width=2)
     table.add_column("Name", style="cyan")
+    table.add_column("Account", style="dim")
     table.add_column("Auth Status")
 
     for p in profile_data:
@@ -120,7 +127,10 @@ def list_cmd(json_output):
         auth_status = (
             "[green]authenticated[/green]" if p["authenticated"] else "[dim]not authenticated[/dim]"
         )
-        table.add_row(marker, str(p["name"]), auth_status)
+        account = p["account"] or "-"
+        if p["authuser"] is not None:
+            account = f"{account} (authuser={p['authuser']})"
+        table.add_row(marker, str(p["name"]), account, auth_status)
 
     console.print(table)
     console.print(f"\n[dim]Active profile: {active}[/dim]")

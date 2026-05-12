@@ -15,8 +15,9 @@ from urllib.parse import quote, urlencode
 import httpx
 
 from ._core import ClientCore
+from ._env import get_default_language
 from .exceptions import ChatError, NetworkError, ValidationError
-from .rpc import QUERY_URL, RPCMethod
+from .rpc import RPCMethod, get_query_url
 from .types import AskResult, ChatReference, ConversationTurn
 
 logger = logging.getLogger(__name__)
@@ -133,7 +134,7 @@ class ChatAPI:
         self._core._reqid_counter += 100000
         url_params = {
             "bl": os.environ.get("NOTEBOOKLM_BL", _DEFAULT_BL),
-            "hl": "en",
+            "hl": get_default_language(),
             "_reqid": str(self._core._reqid_counter),
             "rt": "c",
         }
@@ -141,7 +142,7 @@ class ChatAPI:
             url_params["f.sid"] = self._core.auth.session_id
 
         query_string = urlencode(url_params)
-        url = f"{QUERY_URL}?{query_string}"
+        url = f"{get_query_url()}?{query_string}"
 
         http_client = self._core.get_http_client()
         try:
@@ -617,7 +618,10 @@ class ChatAPI:
         except ChatError:
             raise
         except Exception:
-            pass  # Ignore parse failures; let normal empty-answer handling proceed
+            logger.debug(
+                "Could not parse chat error payload; continuing with empty-answer handling",
+                exc_info=True,
+            )
 
     def _parse_citations(self, first: list) -> list[ChatReference]:
         """Parse citation details from response structure.

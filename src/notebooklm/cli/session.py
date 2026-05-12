@@ -19,6 +19,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 import click
 import httpx
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
     from playwright.sync_api import BrowserContext, Page
     from rich.console import Console
 
+from .._env import get_base_host, get_base_url
 from ..auth import (
     ALLOWED_COOKIE_DOMAINS,
     GOOGLE_REGIONAL_CCTLDS,
@@ -58,8 +60,6 @@ from .profile import _validate_profile_name, email_to_profile_name
 logger = logging.getLogger(__name__)
 
 GOOGLE_ACCOUNTS_URL = "https://accounts.google.com/"
-NOTEBOOKLM_URL = "https://notebooklm.google.com/"
-NOTEBOOKLM_HOST = "notebooklm.google.com"
 
 # Retryable Playwright connection errors
 RETRYABLE_CONNECTION_ERRORS = ("ERR_CONNECTION_CLOSED", "ERR_CONNECTION_RESET")
@@ -79,25 +79,36 @@ BROWSER_CLOSED_HELP = (
     "  1. Run: notebooklm login --fresh\n"
     "  2. Or run: notebooklm auth logout && notebooklm login"
 )
-CONNECTION_ERROR_HELP = (
-    "[red]Failed to connect to NotebookLM after multiple retries.[/red]\n"
-    "This may be caused by:\n"
-    "  • Network connectivity issues\n"
-    "  • Firewall or VPN blocking notebooklm.google.com\n"
-    "  • Corporate proxy interfering with the connection\n"
-    "  • Google rate limiting (too many login attempts)\n\n"
-    "Try:\n"
-    "  1. Check your internet connection\n"
-    "  2. Disable VPN/proxy temporarily\n"
-    "  3. Wait a few minutes before retrying\n"
-    "  4. Check if notebooklm.google.com is accessible in your browser"
-)
+
+
+def _connection_error_help() -> str:
+    """Return login connection troubleshooting text for the configured host."""
+    base_host = get_base_host()
+    return (
+        "[red]Failed to connect to NotebookLM after multiple retries.[/red]\n"
+        "This may be caused by:\n"
+        "  • Network connectivity issues\n"
+        f"  • Firewall or VPN blocking {base_host}\n"
+        "  • Corporate proxy interfering with the connection\n"
+        "  • Google rate limiting (too many login attempts)\n\n"
+        "Try:\n"
+        "  1. Check your internet connection\n"
+        "  2. Disable VPN/proxy temporarily\n"
+        "  3. Wait a few minutes before retrying\n"
+        f"  4. Check if {base_host} is accessible in your browser"
+    )
 
 
 def _is_navigation_interrupted_error(error: str | Exception) -> bool:
     """Return True for Playwright navigation races that are safe to ignore."""
     error_str = str(error).lower()
     return any(marker in error_str for marker in _NAVIGATION_INTERRUPTED_MARKERS)
+
+
+def _url_matches_base_host(url: str) -> bool:
+    """Return True when ``url`` is on the configured NotebookLM host."""
+    current_host = (urlparse(url).hostname or "").lower()
+    return current_host == get_base_host().lower()
 
 
 # Maps user-facing browser names to rookiepy function names.
@@ -254,6 +265,34 @@ def _login_browser_cookies_single(
     )
 
 
+def _profiles_by_account_email(profile_names: list[str]) -> dict[str, str]:
+    """Return existing profiles keyed by account metadata email."""
+    from ..auth import read_account_metadata
+
+    profiles_by_email: dict[str, str] = {}
+    for profile in profile_names:
+        metadata = read_account_metadata(get_storage_path(profile=profile))
+        email = metadata.get("email")
+        if isinstance(email, str) and email:
+            # list_profiles() is sorted, so this also prefers the unsuffixed
+            # profile over older duplicate suffixes such as alice-2.
+            profiles_by_email.setdefault(email, profile)
+    return profiles_by_email
+
+
+def _next_available_profile_name(base_name: str, unavailable: set[str]) -> str:
+    """Return ``base_name`` or the next ``-N`` suffix not in ``unavailable``."""
+    if base_name not in unavailable:
+        return base_name
+
+    suffix = 2
+    while True:
+        candidate = f"{base_name}-{suffix}"
+        if candidate not in unavailable:
+            return candidate
+        suffix += 1
+
+
 def _login_all_accounts_from_browser(browser_cookies: str) -> None:
     """Extract every signed-in Google account into its own profile."""
     from ..paths import list_profiles
@@ -263,20 +302,23 @@ def _login_all_accounts_from_browser(browser_cookies: str) -> None:
         console.print("[yellow]No accounts discovered.[/yellow]")
         return
 
-    console.print(f"\n[bold]Found {len(accounts)} accounts.[/bold] Creating profiles:")
-    # Seed ``used`` with profiles that already exist on disk, so an account
-    # whose auto-derived name collides with a hand-named profile gets a
-    # ``-2`` suffix instead of silently overwriting that profile's
-    # ``storage_state.json`` / ``account.json``.
-    used: set[str] = set(list_profiles())
+    console.print(f"\n[bold]Found {len(accounts)} accounts.[/bold] Saving profiles:")
+    # Reuse a profile when its account metadata already points at the same
+    # email. This makes repeated --all-accounts runs idempotent and lets a
+    # later run update authuser if Google's account indices shifted. Only
+    # allocate a suffix when the desired profile name belongs to a different
+    # account or a hand-created profile with no account metadata.
+    existing_profiles = list_profiles()
+    profiles_by_email = _profiles_by_account_email(existing_profiles)
+    unavailable: set[str] = set(existing_profiles)
+    claimed: set[str] = set()
     for account in accounts:
         base_name = email_to_profile_name(account.email)
-        target_profile = base_name
-        suffix = 2
-        while target_profile in used:
-            target_profile = f"{base_name}-{suffix}"
-            suffix += 1
-        used.add(target_profile)
+        target_profile = profiles_by_email.get(account.email)
+        if target_profile is None or target_profile in claimed:
+            target_profile = _next_available_profile_name(base_name, unavailable | claimed)
+        unavailable.add(target_profile)
+        claimed.add(target_profile)
 
         target_storage = get_storage_path(profile=target_profile)
         _write_extracted_cookies(
@@ -459,10 +501,9 @@ def _login_with_browser_cookies(
         browser_name: "auto" to use rookiepy.load(), or a specific browser name.
         profile: Profile name (forwarded to verification step).
         authuser: Google ``authuser`` index this profile authenticates as.
-            ``0`` is the default account; non-zero records ``account.json``
-            so subsequent calls hit ``?authuser=N``.
-        email: Optional account email to record in ``account.json`` for
-            display in ``status`` / ``inspect``.
+            ``0`` is the default account; non-zero records account metadata
+            in ``context.json`` so subsequent calls hit ``?authuser=N``.
+        email: Optional account email to record alongside the authuser index.
     """
     raw_cookies = _read_browser_cookies(browser_name)
 
@@ -494,7 +535,7 @@ def _login_with_browser_cookies(
 
     # Record the authuser index so future calls target the right Google
     # account. Even on a default-account login (authuser=0, no email), we
-    # must remove any *existing* account.json — otherwise a previous
+    # must remove any existing account metadata — otherwise a previous
     # ``--authuser N`` extraction would silently keep routing the refreshed
     # cookies to the old non-default account.
     if authuser or email:
@@ -509,11 +550,12 @@ def _login_with_browser_cookies(
                 f"Details: {e}"
             )
     else:
-        stale_account_json = storage_path.with_name("account.json")
+        from ..auth import clear_account_metadata
+
         try:
-            stale_account_json.unlink(missing_ok=True)
+            clear_account_metadata(storage_path)
         except OSError as e:
-            logger.warning("Failed to clear stale %s: %s", stale_account_json, e)
+            logger.warning("Failed to clear stale account metadata for %s: %s", storage_path, e)
 
     saved_msg = f"\n[green]Authentication saved to:[/green] {storage_path}"
     if email:
@@ -892,7 +934,7 @@ def register_session_commands(cli):
                 # Retry navigation on transient connection errors with backoff
                 for attempt in range(1, LOGIN_MAX_RETRIES + 1):
                     try:
-                        page.goto(NOTEBOOKLM_URL, timeout=30000)
+                        page.goto(f"{get_base_url()}/", timeout=30000)
                         break
                     except PlaywrightError as exc:
                         error_str = str(exc)
@@ -942,7 +984,7 @@ def register_session_commands(cli):
                                 f"Failed to connect to NotebookLM after {LOGIN_MAX_RETRIES} attempts. "
                                 f"Last error: {error_str}"
                             )
-                            console.print(CONNECTION_ERROR_HELP)
+                            console.print(_connection_error_help())
                             raise SystemExit(1) from exc
                         else:
                             # Non-retryable error - re-raise immediately
@@ -960,7 +1002,7 @@ def register_session_commands(cli):
                 # .google.co.uk). Use "commit" to resolve once response headers
                 # (including Set-Cookie) are processed, before any client-side
                 # JS redirect can interrupt. See #214.
-                for url in [GOOGLE_ACCOUNTS_URL, NOTEBOOKLM_URL]:
+                for url in [GOOGLE_ACCOUNTS_URL, f"{get_base_url()}/"]:
                     try:
                         page.goto(url, wait_until="commit")
                     except PlaywrightError as exc:
@@ -981,12 +1023,22 @@ def register_session_commands(cli):
                             raise
 
                 current_url = page.url
-                if NOTEBOOKLM_HOST not in current_url:
+                if not _url_matches_base_host(current_url):
                     console.print(f"[yellow]Warning: Current URL is {current_url}[/yellow]")
                     if not click.confirm("Save authentication anyway?"):
                         raise SystemExit(1)
 
                 context.storage_state(path=str(storage_path))
+                from ..auth import clear_account_metadata
+
+                try:
+                    clear_account_metadata(storage_path)
+                except OSError as exc:
+                    logger.warning(
+                        "Failed to clear stale account metadata for %s: %s",
+                        storage_path,
+                        exc,
+                    )
                 # Restrict permissions to owner only (contains sensitive cookies)
                 if sys.platform != "win32":
                     # chmod is a no-op on Windows (and can confuse ACLs)
@@ -1280,7 +1332,7 @@ def register_session_commands(cli):
         # `ask` / `use` to target the old account's notebook and surface
         # misleading not-found / permission errors.
         try:
-            if clear_context():
+            if clear_context(clear_account=True):
                 removed_any = True
         except OSError as exc:
             context_file = get_context_path()

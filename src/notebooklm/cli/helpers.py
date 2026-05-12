@@ -14,14 +14,16 @@ import json
 import logging
 import os
 import time
+from dataclasses import dataclass
 from functools import wraps
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit, urlunsplit
 
 import click
 from rich.console import Console
 from rich.table import Table
 
+from .._research import CitedSourceSelection, ResearchAPI
 from ..auth import AuthTokens, build_cookie_jar, load_auth_from_storage
 from ..exceptions import NetworkError, NotebookLimitError, RPCError, RPCTimeoutError
 from ..paths import get_context_path
@@ -38,6 +40,15 @@ logger = logging.getLogger(__name__)
 _CLI_ARTIFACT_ALIASES = {
     "flashcard": "flashcards",  # CLI uses singular, enum uses plural
 }
+
+
+@dataclass(frozen=True)
+class ResearchImportResult:
+    """Result of importing research sources from CLI commands."""
+
+    imported: list[dict[str, str]]
+    sources: list[dict]
+    cited_selection: CitedSourceSelection | None = None
 
 
 def cli_name_to_artifact_type(name: str) -> ArtifactType | None:
@@ -325,6 +336,73 @@ async def import_with_retry(
             attempt += 1
 
 
+def _select_research_sources_for_import(
+    sources: list[dict], report: str, cited_only: bool
+) -> tuple[list[dict], CitedSourceSelection | None]:
+    if not cited_only or not sources:
+        return sources, None
+
+    cited_selection = ResearchAPI.select_cited_sources(sources, report)
+    return cited_selection.sources, cited_selection
+
+
+def _display_cited_import_selection(cited_selection: CitedSourceSelection | None) -> None:
+    if cited_selection is None:
+        return
+
+    if cited_selection.used_fallback:
+        console.print("[yellow]Could not resolve cited sources; importing all sources.[/yellow]")
+        return
+
+    console.print(
+        f"[dim]Importing {cited_selection.matched_url_source_count} cited source(s)[/dim]"
+    )
+
+
+async def import_research_sources(
+    client,
+    notebook_id: str,
+    task_id: str,
+    sources: list[dict],
+    *,
+    report: str = "",
+    cited_only: bool = False,
+    max_elapsed: float = 1800,
+    json_output: bool = False,
+    status_message: str | None = None,
+) -> ResearchImportResult:
+    """Select and import research sources using shared CLI policy."""
+    sources_to_import, cited_selection = _select_research_sources_for_import(
+        sources, report, cited_only
+    )
+    if not sources_to_import:
+        return ResearchImportResult([], sources_to_import, cited_selection)
+
+    if not json_output:
+        _display_cited_import_selection(cited_selection)
+
+    retry_kwargs: dict[str, Any] = {"max_elapsed": max_elapsed}
+    if json_output:
+        retry_kwargs["json_output"] = True
+
+    async def _import_selected() -> list[dict[str, str]]:
+        return await import_with_retry(
+            client,
+            notebook_id,
+            task_id,
+            sources_to_import,
+            **retry_kwargs,
+        )
+
+    if status_message and not json_output:
+        with console.status(status_message):
+            imported = await _import_selected()
+    else:
+        imported = await _import_selected()
+
+    return ResearchImportResult(imported, sources_to_import, cited_selection)
+
+
 # =============================================================================
 # AUTHENTICATION
 # =============================================================================
@@ -468,7 +546,16 @@ def set_current_notebook(
     context_file = get_context_path()
     context_file.parent.mkdir(parents=True, exist_ok=True)
 
-    data: dict[str, str | bool] = {"notebook_id": notebook_id}
+    data: dict[str, Any] = {}
+    if context_file.exists():
+        try:
+            existing = json.loads(context_file.read_text(encoding="utf-8"))
+            if isinstance(existing, dict) and isinstance(existing.get("account"), dict):
+                data["account"] = existing["account"]
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    data["notebook_id"] = notebook_id
     if title:
         data["title"] = title
     if is_owner is not None:
@@ -479,15 +566,40 @@ def set_current_notebook(
     context_file.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-def clear_context() -> bool:
+def clear_context(*, clear_account: bool = False) -> bool:
     """Clear the current context.
 
-    Returns True if a context file was removed, False if none existed.
+    By default, only notebook/conversation fields are cleared; account
+    metadata used for multi-account auth routing is preserved. ``auth logout``
+    passes ``clear_account=True`` to remove the whole file.
+
+    Returns True if a context file was changed or removed, False if none existed.
     """
     context_file = get_context_path()
     if context_file.exists():
-        context_file.unlink()
-        return True
+        if clear_account:
+            context_file.unlink()
+            return True
+        try:
+            data = json.loads(context_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            context_file.unlink()
+            return True
+        if not isinstance(data, dict):
+            context_file.unlink()
+            return True
+        original = dict(data)
+        for key in ("notebook_id", "title", "is_owner", "created_at", "conversation_id"):
+            data.pop(key, None)
+        if not data:
+            context_file.unlink()
+            return True
+        if data != original:
+            context_file.write_text(
+                json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            return True
+        return False
     return False
 
 
@@ -795,9 +907,9 @@ def with_client(f):
 # =============================================================================
 
 
-def json_output_response(data: dict) -> None:
+def json_output_response(data: dict | list) -> None:
     """Print JSON response (no colors for machine parsing)."""
-    click.echo(json.dumps(data, indent=2, default=str))
+    click.echo(json.dumps(data, indent=2, default=str, ensure_ascii=False))
 
 
 def json_error_response(code: str, message: str, extra: dict | None = None) -> None:
@@ -811,7 +923,7 @@ def json_error_response(code: str, message: str, extra: dict | None = None) -> N
     response = {"error": True, "code": code, "message": message}
     if extra:
         response.update(extra)
-    click.echo(json.dumps(response, indent=2))
+    click.echo(json.dumps(response, indent=2, default=str, ensure_ascii=False))
     raise SystemExit(1)
 
 

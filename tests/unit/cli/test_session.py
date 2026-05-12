@@ -27,6 +27,7 @@ def mock_auth():
     with patch("notebooklm.cli.helpers.load_auth_from_storage") as mock:
         mock.return_value = {
             "SID": "test",
+            "__Secure-1PSIDTS": "test_1psidts",
             "HSID": "test",
             "SSID": "test",
             "APISID": "test",
@@ -49,6 +50,36 @@ def mock_context_file(tmp_path):
 # =============================================================================
 # LOGIN COMMAND TESTS
 # =============================================================================
+
+
+class TestLoginUrlValidation:
+    def test_url_matches_default_base_host(self, monkeypatch):
+        monkeypatch.delenv("NOTEBOOKLM_BASE_URL", raising=False)
+
+        from notebooklm.cli.session import _url_matches_base_host
+
+        assert _url_matches_base_host("https://notebooklm.google.com/notebook/abc")
+        assert not _url_matches_base_host(
+            "https://example.com/path?next=https://notebooklm.google.com/"
+        )
+
+    def test_url_matches_enterprise_base_host(self, monkeypatch):
+        monkeypatch.setenv("NOTEBOOKLM_BASE_URL", "https://notebooklm.cloud.google.com")
+
+        from notebooklm.cli.session import _url_matches_base_host
+
+        assert _url_matches_base_host("https://notebooklm.cloud.google.com/notebook/abc")
+        assert not _url_matches_base_host("https://notebooklm.google.com/notebook/abc")
+
+    def test_connection_error_help_uses_enterprise_base_host(self, monkeypatch):
+        monkeypatch.setenv("NOTEBOOKLM_BASE_URL", "https://notebooklm.cloud.google.com")
+
+        from notebooklm.cli.session import _connection_error_help
+
+        blocked_host = (
+            _connection_error_help().split("Firewall or VPN blocking ", 1)[1].split("\n", 1)[0]
+        )
+        assert blocked_host == "notebooklm.cloud.google.com"
 
 
 class TestLoginCommand:
@@ -472,6 +503,48 @@ class TestLoginCommand:
 
         assert result.exit_code == 0
         assert "Authentication saved" in result.output
+
+    def test_playwright_login_clears_stale_account_metadata(self, runner, tmp_path):
+        """Interactive login targets the visible account, so stale browser-cookie
+        account routing metadata must not survive the new storage state."""
+        browser_dir = tmp_path / "profile"
+        storage_file = tmp_path / "storage.json"
+        context_file = tmp_path / "context.json"
+        context_file.write_text(
+            json.dumps(
+                {
+                    "notebook_id": "nb_existing",
+                    "account": {"authuser": 1, "email": "old@example.com"},
+                }
+            )
+        )
+
+        with (
+            patch("notebooklm.cli.session._ensure_chromium_installed"),
+            patch("playwright.sync_api.sync_playwright") as mock_pw,
+            patch("notebooklm.cli.session.get_storage_path", return_value=storage_file),
+            patch(
+                "notebooklm.cli.session.get_browser_profile_dir",
+                return_value=browser_dir,
+            ),
+            patch("notebooklm.cli.session._sync_server_language_to_config"),
+            patch("builtins.input", return_value=""),
+        ):
+            mock_context = MagicMock()
+            mock_page = MagicMock()
+            mock_page.url = "https://notebooklm.google.com/"
+            mock_context.pages = [mock_page]
+            mock_context.storage_state.side_effect = lambda path: Path(path).write_text("{}")
+            mock_launch = (
+                mock_pw.return_value.__enter__.return_value.chromium.launch_persistent_context
+            )
+            mock_launch.return_value = mock_context
+
+            result = runner.invoke(cli, ["login"])
+
+        assert result.exit_code == 0, result.output
+        assert storage_file.exists()
+        assert json.loads(context_file.read_text()) == {"notebook_id": "nb_existing"}
 
     def test_login_fresh_ignored_with_browser_cookies(self, runner, tmp_path):
         """Test --fresh warns and is ignored when combined with --browser-cookies."""
@@ -1137,6 +1210,7 @@ class TestAuthCheckCommand:
         storage_data = {
             "cookies": [
                 {"name": "SID", "value": "test_sid", "domain": ".google.com"},
+                {"name": "__Secure-1PSIDTS", "value": "test_1psidts", "domain": ".google.com"},
                 {"name": "HSID", "value": "test_hsid", "domain": ".google.com"},
                 {"name": "SSID", "value": "test_ssid", "domain": ".google.com"},
             ]
@@ -1154,6 +1228,7 @@ class TestAuthCheckCommand:
         storage_data = {
             "cookies": [
                 {"name": "SID", "value": "test_sid", "domain": ".google.com"},
+                {"name": "__Secure-1PSIDTS", "value": "test_1psidts", "domain": ".google.com"},
                 {"name": "HSID", "value": "test_hsid", "domain": ".google.com"},
             ]
         }
@@ -1170,11 +1245,42 @@ class TestAuthCheckCommand:
         assert output["checks"]["sid_cookie"] is True
         assert "SID" in output["details"]["cookies_found"]
 
+    def test_auth_check_missing_1psidts_surfaces_tier1_error(self, runner, mock_storage_path):
+        """SID present but ``__Secure-1PSIDTS`` absent must surface the Tier 1 error.
+
+        Pinned by the #371 two-tier pre-flight: ``MINIMUM_REQUIRED_COOKIES``
+        now contains both ``SID`` and ``__Secure-1PSIDTS``; the load helpers
+        in ``auth.py`` raise on absence, and ``auth check`` reports the raised
+        ``ValueError`` so users see the new diagnostic.
+
+        Note: ``auth check`` itself returns exit code 0 regardless — that's a
+        pre-existing UX gap orthogonal to #371. We assert on the surfaced
+        error text instead, which is what users would actually see.
+        """
+        storage_data = {
+            "cookies": [
+                {"name": "SID", "value": "test_sid", "domain": ".google.com"},
+                # Note: __Secure-1PSIDTS deliberately omitted.
+                {"name": "HSID", "value": "test_hsid", "domain": ".google.com"},
+                {"name": "SSID", "value": "test_ssid", "domain": ".google.com"},
+            ]
+        }
+        mock_storage_path.write_text(json.dumps(storage_data))
+
+        result = runner.invoke(cli, ["auth", "check", "--json"])
+
+        assert result.exit_code == 0
+        output = json.loads(result.output)
+        assert output["status"] == "error"
+        assert output["checks"]["cookies_present"] is False
+        assert "__Secure-1PSIDTS" in output["details"].get("error", "")
+
     def test_auth_check_with_test_flag_success(self, runner, mock_storage_path):
         """Test auth check --test with successful token fetch."""
         storage_data = {
             "cookies": [
                 {"name": "SID", "value": "test_sid", "domain": ".google.com"},
+                {"name": "__Secure-1PSIDTS", "value": "test_1psidts", "domain": ".google.com"},
             ]
         }
         mock_storage_path.write_text(json.dumps(storage_data))
@@ -1195,6 +1301,7 @@ class TestAuthCheckCommand:
         storage_data = {
             "cookies": [
                 {"name": "SID", "value": "test_sid", "domain": ".google.com"},
+                {"name": "__Secure-1PSIDTS", "value": "test_1psidts", "domain": ".google.com"},
             ]
         }
         mock_storage_path.write_text(json.dumps(storage_data))
@@ -1216,6 +1323,7 @@ class TestAuthCheckCommand:
         storage_data = {
             "cookies": [
                 {"name": "SID", "value": "test_sid", "domain": ".google.com"},
+                {"name": "__Secure-1PSIDTS", "value": "test_1psidts", "domain": ".google.com"},
             ]
         }
         mock_storage_path.write_text(json.dumps(storage_data))
@@ -1243,6 +1351,7 @@ class TestAuthCheckCommand:
         env_storage = {
             "cookies": [
                 {"name": "SID", "value": "env_sid", "domain": ".google.com"},
+                {"name": "__Secure-1PSIDTS", "value": "test_1psidts", "domain": ".google.com"},
             ]
         }
         monkeypatch.setenv("NOTEBOOKLM_AUTH_JSON", json.dumps(env_storage))
@@ -1259,6 +1368,7 @@ class TestAuthCheckCommand:
         storage_data = {
             "cookies": [
                 {"name": "SID", "value": "test_sid", "domain": ".google.com"},
+                {"name": "__Secure-1PSIDTS", "value": "test_1psidts", "domain": ".google.com"},
                 {"name": "NID", "value": "test_nid", "domain": ".google.com.sg"},
             ]
         }
@@ -1275,9 +1385,11 @@ class TestAuthCheckCommand:
         storage_data = {
             "cookies": [
                 {"name": "SID", "value": "test_sid", "domain": ".google.com"},
+                {"name": "__Secure-1PSIDTS", "value": "test_1psidts", "domain": ".google.com"},
                 {"name": "HSID", "value": "test_hsid", "domain": ".google.com"},
                 {"name": "SSID", "value": "test_ssid", "domain": ".google.com"},
                 {"name": "SID", "value": "regional_sid", "domain": ".google.com.sg"},
+                {"name": "__Secure-1PSIDTS", "value": "test_1psidts", "domain": ".google.com.sg"},
                 {"name": "__Secure-1PSID", "value": "secure1", "domain": ".google.com"},
             ]
         }
@@ -1304,6 +1416,7 @@ class TestAuthCheckCommand:
         storage_data = {
             "cookies": [
                 {"name": "SID", "value": "test_sid", "domain": ".google.com"},
+                {"name": "__Secure-1PSIDTS", "value": "test_1psidts", "domain": ".google.com"},
             ]
         }
         mock_storage_path.write_text(json.dumps(storage_data))
@@ -1632,6 +1745,15 @@ class TestLoginBrowserCookies:
                 "expires": 1234567890,
                 "http_only": False,
             },
+            {
+                "domain": ".google.com",
+                "name": "__Secure-1PSIDTS",
+                "value": "test_1psidts",
+                "path": "/",
+                "secure": True,
+                "expires": 1234567890,
+                "http_only": False,
+            },
         ]
         mock_rookiepy = MagicMock()
         mock_rookiepy.load = MagicMock(return_value=mock_cookies)
@@ -1658,6 +1780,15 @@ class TestLoginBrowserCookies:
                 "domain": ".google.com",
                 "name": "SID",
                 "value": "abc",
+                "path": "/",
+                "secure": True,
+                "expires": None,
+                "http_only": False,
+            },
+            {
+                "domain": ".google.com",
+                "name": "__Secure-1PSIDTS",
+                "value": "test_1psidts",
                 "path": "/",
                 "secure": True,
                 "expires": None,
@@ -1727,6 +1858,69 @@ class TestLoginBrowserCookies:
                 "expires": 9999,
                 "http_only": False,
             },
+            {
+                "domain": ".google.com",
+                "name": "__Secure-1PSIDTS",
+                "value": "test_1psidts",
+                "path": "/",
+                "secure": True,
+                "expires": 9999,
+                "http_only": False,
+            },
+            {
+                "domain": ".google.com",
+                "name": "__Secure-1PSIDTS",
+                "value": "ts",
+                "path": "/",
+                "secure": True,
+                "expires": 9999,
+                "http_only": False,
+            },
+            {
+                "domain": ".google.com",
+                "name": "APISID",
+                "value": "apisid",
+                "path": "/",
+                "secure": True,
+                "expires": 9999,
+                "http_only": False,
+            },
+            {
+                "domain": ".google.com",
+                "name": "SAPISID",
+                "value": "sapisid",
+                "path": "/",
+                "secure": True,
+                "expires": 9999,
+                "http_only": False,
+            },
+            {
+                "domain": ".google.com",
+                "name": "__Secure-1PSIDTS",
+                "value": "ts",
+                "path": "/",
+                "secure": True,
+                "expires": 9999,
+                "http_only": False,
+            },
+            {
+                "domain": ".google.com",
+                "name": "APISID",
+                "value": "apisid",
+                "path": "/",
+                "secure": True,
+                "expires": 9999,
+                "http_only": False,
+            },
+            {
+                "domain": ".google.com",
+                "name": "SAPISID",
+                "value": "sapisid",
+                "path": "/",
+                "secure": True,
+                "expires": 9999,
+                "http_only": False,
+            },
         ]
         mock_rookiepy = MagicMock()
         mock_rookiepy.load = MagicMock(return_value=mock_cookies)
@@ -1775,6 +1969,9 @@ class TestAuthLogoutCommand:
         """Test auth logout deletes both storage_state.json and browser_profile/."""
         storage_file = tmp_path / "storage.json"
         storage_file.write_text('{"cookies": []}')
+        mock_context_file.write_text(
+            json.dumps({"account": {"authuser": 1, "email": "bob@example.com"}})
+        )
         browser_dir = tmp_path / "browser_profile"
         browser_dir.mkdir()
         (browser_dir / "Default").mkdir()
@@ -1792,6 +1989,7 @@ class TestAuthLogoutCommand:
         assert result.exit_code == 0
         assert "Logged out" in result.output
         assert not storage_file.exists()
+        assert not mock_context_file.exists()
         assert not browser_dir.exists()
 
     def test_auth_logout_when_already_logged_out(self, runner, tmp_path, mock_context_file):
@@ -1990,7 +2188,18 @@ class TestAuthRefreshCommand:
     def mock_storage_path(self, tmp_path):
         storage_file = tmp_path / "storage_state.json"
         storage_file.write_text(
-            json.dumps({"cookies": [{"name": "SID", "value": "x", "domain": ".google.com"}]})
+            json.dumps(
+                {
+                    "cookies": [
+                        {"name": "SID", "value": "x", "domain": ".google.com"},
+                        {
+                            "name": "__Secure-1PSIDTS",
+                            "value": "test_1psidts",
+                            "domain": ".google.com",
+                        },
+                    ]
+                }
+            )
         )
         with patch("notebooklm.cli.session.get_storage_path", return_value=storage_file):
             yield storage_file
@@ -2060,7 +2269,18 @@ class TestAuthRefreshCommand:
         """
         work_storage = tmp_path / "work_storage_state.json"
         work_storage.write_text(
-            json.dumps({"cookies": [{"name": "SID", "value": "y", "domain": ".google.com"}]})
+            json.dumps(
+                {
+                    "cookies": [
+                        {"name": "SID", "value": "y", "domain": ".google.com"},
+                        {
+                            "name": "__Secure-1PSIDTS",
+                            "value": "test_1psidts",
+                            "domain": ".google.com",
+                        },
+                    ]
+                }
+            )
         )
 
         def fake_storage_path(profile=None):
@@ -2103,7 +2323,7 @@ def _multiaccount_rookiepy_mock(emails):
             "expires": 9999,
             "http_only": False,
         }
-        for name in ("SID", "HSID", "SSID", "APISID", "SAPISID")
+        for name in ("SID", "HSID", "SSID", "APISID", "SAPISID", "__Secure-1PSIDTS")
     ]
     mock = MagicMock()
     mock.chrome = MagicMock(return_value=cookies)
@@ -2163,7 +2383,7 @@ class TestAuthInspect:
 class TestLoginMultiAccount:
     """--authuser / --profile-name / --all-accounts on `notebooklm login --browser-cookies`."""
 
-    def test_authuser_writes_account_json(self, runner, tmp_path):
+    def test_authuser_writes_account_metadata(self, runner, tmp_path):
         mock_rk = _multiaccount_rookiepy_mock(["alice@example.com", "bob@gmail.com"])
 
         async def _enum(*args, **kwargs):
@@ -2174,7 +2394,7 @@ class TestLoginMultiAccount:
                 Account(authuser=1, email="bob@gmail.com", is_default=False),
             ]
 
-        # Layout: tmp_path/profiles/bob/storage_state.json (and account.json sibling)
+        # Layout: tmp_path/profiles/bob/storage_state.json and context.json.
         target_dir = tmp_path / "profiles" / "bob"
 
         def fake_get_storage_path(profile=None):
@@ -2194,10 +2414,12 @@ class TestLoginMultiAccount:
             result = runner.invoke(cli, ["login", "--browser-cookies", "chrome", "--authuser", "1"])
 
         assert result.exit_code == 0, result.output
-        account_json = target_dir / "account.json"
-        assert account_json.exists()
-        meta = json.loads(account_json.read_text())
-        assert meta == {"authuser": 1, "email": "bob@gmail.com"}
+        context_json = target_dir / "context.json"
+        assert context_json.exists()
+        assert json.loads(context_json.read_text())["account"] == {
+            "authuser": 1,
+            "email": "bob@gmail.com",
+        }
 
     def test_authuser_out_of_range_aborts(self, runner, tmp_path):
         mock_rk = _multiaccount_rookiepy_mock(["alice@example.com"])
@@ -2235,9 +2457,15 @@ class TestLoginMultiAccount:
         def fake_get_storage_path(profile=None):
             return target_root / (profile or "default") / "storage_state.json"
 
+        def fake_list_profiles():
+            if not target_root.exists():
+                return []
+            return sorted(path.name for path in target_root.iterdir() if path.is_dir())
+
         with (
             patch.dict("sys.modules", {"rookiepy": mock_rk}),
             patch("notebooklm.cli.session.get_storage_path", side_effect=fake_get_storage_path),
+            patch("notebooklm.paths.list_profiles", side_effect=fake_list_profiles),
             patch("notebooklm.auth.enumerate_accounts", new=_enum),
             patch(
                 "notebooklm.cli.session.fetch_tokens_with_domains",
@@ -2248,10 +2476,141 @@ class TestLoginMultiAccount:
             result = runner.invoke(cli, ["login", "--browser-cookies", "chrome", "--all-accounts"])
 
         assert result.exit_code == 0, result.output
-        alice_meta = json.loads((target_root / "alice" / "account.json").read_text())
-        bob_meta = json.loads((target_root / "bob" / "account.json").read_text())
+        alice_meta = json.loads((target_root / "alice" / "context.json").read_text())["account"]
+        bob_meta = json.loads((target_root / "bob" / "context.json").read_text())["account"]
         assert alice_meta == {"authuser": 0, "email": "alice@example.com"}
         assert bob_meta == {"authuser": 1, "email": "bob@gmail.com"}
+
+    def test_all_accounts_rerun_reuses_profiles_by_email(self, runner, tmp_path):
+        mock_rk = _multiaccount_rookiepy_mock(["alice@example.com"])
+
+        async def _enum(*args, **kwargs):
+            from notebooklm.auth import Account
+
+            return [
+                Account(authuser=0, email="alice@example.com", is_default=True),
+                Account(authuser=1, email="bob@gmail.com", is_default=False),
+            ]
+
+        target_root = tmp_path / "profiles"
+
+        def fake_get_storage_path(profile=None):
+            return target_root / (profile or "default") / "storage_state.json"
+
+        def fake_list_profiles():
+            if not target_root.exists():
+                return []
+            return sorted(path.name for path in target_root.iterdir() if path.is_dir())
+
+        with (
+            patch.dict("sys.modules", {"rookiepy": mock_rk}),
+            patch("notebooklm.cli.session.get_storage_path", side_effect=fake_get_storage_path),
+            patch("notebooklm.paths.list_profiles", side_effect=fake_list_profiles),
+            patch("notebooklm.auth.enumerate_accounts", new=_enum),
+            patch(
+                "notebooklm.cli.session.fetch_tokens_with_domains",
+                new_callable=AsyncMock,
+                return_value=("csrf", "sess"),
+            ),
+        ):
+            first = runner.invoke(cli, ["login", "--browser-cookies", "chrome", "--all-accounts"])
+            second = runner.invoke(cli, ["login", "--browser-cookies", "chrome", "--all-accounts"])
+
+        assert first.exit_code == 0, first.output
+        assert second.exit_code == 0, second.output
+        assert sorted(path.name for path in target_root.iterdir()) == ["alice", "bob"]
+
+    def test_all_accounts_does_not_overwrite_same_name_without_matching_email(
+        self, runner, tmp_path
+    ):
+        mock_rk = _multiaccount_rookiepy_mock(["alice@example.com"])
+
+        async def _enum(*args, **kwargs):
+            from notebooklm.auth import Account
+
+            return [Account(authuser=0, email="alice@example.com", is_default=True)]
+
+        target_root = tmp_path / "profiles"
+        existing = target_root / "alice"
+        existing.mkdir(parents=True)
+        (existing / "storage_state.json").write_text("{}")
+
+        def fake_get_storage_path(profile=None):
+            return target_root / (profile or "default") / "storage_state.json"
+
+        def fake_list_profiles():
+            return sorted(path.name for path in target_root.iterdir() if path.is_dir())
+
+        with (
+            patch.dict("sys.modules", {"rookiepy": mock_rk}),
+            patch("notebooklm.cli.session.get_storage_path", side_effect=fake_get_storage_path),
+            patch("notebooklm.paths.list_profiles", side_effect=fake_list_profiles),
+            patch("notebooklm.auth.enumerate_accounts", new=_enum),
+            patch(
+                "notebooklm.cli.session.fetch_tokens_with_domains",
+                new_callable=AsyncMock,
+                return_value=("csrf", "sess"),
+            ),
+        ):
+            result = runner.invoke(cli, ["login", "--browser-cookies", "chrome", "--all-accounts"])
+
+        assert result.exit_code == 0, result.output
+        assert (target_root / "alice-2" / "context.json").exists()
+        assert json.loads((target_root / "alice-2" / "context.json").read_text())["account"] == {
+            "authuser": 0,
+            "email": "alice@example.com",
+        }
+
+    def test_all_accounts_updates_existing_profile_when_authuser_index_changes(
+        self, runner, tmp_path
+    ):
+        mock_rk = _multiaccount_rookiepy_mock(["bob@gmail.com"])
+
+        first_accounts = None
+
+        async def _enum(*args, **kwargs):
+            nonlocal first_accounts
+            from notebooklm.auth import Account
+
+            if first_accounts is None:
+                first_accounts = True
+                return [
+                    Account(authuser=0, email="alice@example.com", is_default=True),
+                    Account(authuser=1, email="bob@gmail.com", is_default=False),
+                ]
+            return [Account(authuser=0, email="bob@gmail.com", is_default=True)]
+
+        target_root = tmp_path / "profiles"
+
+        def fake_get_storage_path(profile=None):
+            return target_root / (profile or "default") / "storage_state.json"
+
+        def fake_list_profiles():
+            if not target_root.exists():
+                return []
+            return sorted(path.name for path in target_root.iterdir() if path.is_dir())
+
+        with (
+            patch.dict("sys.modules", {"rookiepy": mock_rk}),
+            patch("notebooklm.cli.session.get_storage_path", side_effect=fake_get_storage_path),
+            patch("notebooklm.paths.list_profiles", side_effect=fake_list_profiles),
+            patch("notebooklm.auth.enumerate_accounts", new=_enum),
+            patch(
+                "notebooklm.cli.session.fetch_tokens_with_domains",
+                new_callable=AsyncMock,
+                return_value=("csrf", "sess"),
+            ),
+        ):
+            first = runner.invoke(cli, ["login", "--browser-cookies", "chrome", "--all-accounts"])
+            second = runner.invoke(cli, ["login", "--browser-cookies", "chrome", "--all-accounts"])
+
+        assert first.exit_code == 0, first.output
+        assert second.exit_code == 0, second.output
+        assert json.loads((target_root / "bob" / "context.json").read_text())["account"] == {
+            "authuser": 0,
+            "email": "bob@gmail.com",
+        }
+        assert sorted(path.name for path in target_root.iterdir()) == ["alice", "bob"]
 
     def test_authuser_without_browser_cookies_rejected(self, runner):
         # --authuser only makes sense with --browser-cookies; the CLI should
@@ -2276,26 +2635,33 @@ class TestLoginMultiAccount:
         assert "all-accounts" in result.output.lower()
 
 
-class TestStaleAccountJsonCleanup:
-    """Default-account login must clear any stale account.json from a previous --authuser run."""
+class TestStaleAccountMetadataCleanup:
+    """Default-account login must clear stale account metadata from previous --authuser runs."""
 
-    def test_default_login_removes_stale_account_json(self, runner, tmp_path):
+    def test_default_login_removes_stale_account_metadata(self, runner, tmp_path):
         storage_file = tmp_path / "storage.json"
         # Simulate a previous `--authuser 1` extraction.
-        (tmp_path / "account.json").write_text(
-            json.dumps({"authuser": 1, "email": "bob@gmail.com"}), encoding="utf-8"
+        (tmp_path / "context.json").write_text(
+            json.dumps(
+                {
+                    "notebook_id": "nb_existing",
+                    "account": {"authuser": 1, "email": "bob@gmail.com"},
+                }
+            ),
+            encoding="utf-8",
         )
 
         mock_cookies = [
             {
                 "domain": ".google.com",
-                "name": "SID",
-                "value": "abc",
+                "name": name,
+                "value": f"{name}-value",
                 "path": "/",
                 "secure": True,
                 "expires": 9999,
                 "http_only": False,
-            },
+            }
+            for name in ("SID", "APISID", "SAPISID", "__Secure-1PSIDTS")
         ]
         mock_rookiepy = MagicMock()
         mock_rookiepy.load = MagicMock(return_value=mock_cookies)
@@ -2313,6 +2679,6 @@ class TestStaleAccountJsonCleanup:
             result = runner.invoke(cli, ["login", "--browser-cookies", "auto"])
 
         assert result.exit_code == 0, result.output
-        # The previous-run account.json must be gone so subsequent token fetches
-        # don't keep routing to authuser=1.
-        assert not (tmp_path / "account.json").exists()
+        # Account metadata must be gone so subsequent token fetches don't keep
+        # routing to authuser=1, while unrelated notebook context survives.
+        assert json.loads((tmp_path / "context.json").read_text()) == {"notebook_id": "nb_existing"}
