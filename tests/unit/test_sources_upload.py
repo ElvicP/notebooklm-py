@@ -788,6 +788,62 @@ class TestAddFile:
         assert warning_records[0].exc_info is not None
 
     @pytest.mark.asyncio
+    async def test_add_file_with_title_preserves_waited_metadata(
+        self, sources_api, mock_core, tmp_path
+    ):
+        """Renaming after the forced wait must not null out _type_code/url/created_at.
+
+        UPDATE_SOURCE's response shape can be sparse (see the rename() fallback
+        for ``result is None`` in _sources.py). If add_file naively overwrites
+        the fully-populated Source from wait_until_ready() with rename()'s
+        sparse return value, the source loses its real type code, URL, and
+        timestamp. Only the title should be taken from the rename response.
+        """
+        from datetime import datetime, timezone
+
+        test_file = tmp_path / "podcast.mp3"
+        test_file.write_bytes(b"fake audio")
+
+        created_at = datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+        # First rpc_call serves file registration. Second serves rename() —
+        # which returns a sparse Source (only id + new title) so we can verify
+        # the merge preserves type_code/url/created_at from the waited source.
+        mock_core.rpc_call.side_effect = [
+            [[[["src_audio"]]]],
+            None,  # Triggers rename()'s Source(id=source_id, title=new_title) fallback
+        ]
+        sources_api.wait_until_ready = AsyncMock(
+            return_value=Source(
+                id="src_audio",
+                title="podcast.mp3",
+                _type_code=10,
+                url="https://example.com/audio",
+                created_at=created_at,
+            )
+        )
+
+        mock_start_response = MagicMock()
+        mock_start_response.headers = {"x-goog-upload-url": "https://upload.example.com"}
+        mock_upload_response = MagicMock()
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.__aenter__.return_value = mock_client
+            mock_client.__aexit__.return_value = None
+            mock_client.post.side_effect = [mock_start_response, mock_upload_response]
+            mock_client_cls.return_value = mock_client
+
+            result = await sources_api.add_file("nb_123", str(test_file), title="Episode 1")
+
+        # New title is applied...
+        assert result.title == "Episode 1"
+        # ...but the metadata populated by wait_until_ready() survives.
+        assert result._type_code == 10
+        assert result.url == "https://example.com/audio"
+        assert result.created_at == created_at
+
+    @pytest.mark.asyncio
     async def test_add_file_rename_failure_still_waits(self, sources_api, mock_core, tmp_path):
         """A failed custom-title rename should not prevent wait=True polling.
         With the new ordering, wait runs BEFORE rename, so this verifies the

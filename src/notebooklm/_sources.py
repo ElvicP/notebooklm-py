@@ -4,6 +4,7 @@ import asyncio
 import builtins
 import logging
 import re
+from dataclasses import replace
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -448,8 +449,19 @@ class SourcesAPI:
                 trailing whitespace is stripped; empty titles are rejected. If
                 the post-upload rename fails, the upload is preserved, a warning
                 is logged, and the returned source keeps the filename title.
-            wait: If True, wait for source to be ready before returning.
-            wait_timeout: Maximum seconds to wait if wait=True (default: 120).
+
+                Important: supplying a non-default title forces a brief wait
+                for the source to become registered *before* the rename is
+                issued, even when ``wait=False``. The UPDATE_SOURCE RPC
+                silently no-ops against an unregistered source, so blocking
+                here is the only way to honor the caller's intent. ``wait_timeout``
+                bounds this forced wait. See #388.
+            wait: If True, wait for source to be ready before returning. Note
+                that supplying ``title`` also forces a pre-rename wait
+                regardless of this flag — see the ``title`` parameter above.
+            wait_timeout: Maximum seconds to wait if ``wait=True``. Also bounds
+                the forced pre-rename wait triggered by a custom ``title``
+                (even when ``wait=False``). Default: 120.
 
         Returns:
             The created Source object. If wait=False, status may be PROCESSING.
@@ -511,7 +523,12 @@ class SourcesAPI:
         # call is the only way to honor the caller's intent.
         if title is not None and title != filename:
             try:
-                source = await self.rename(notebook_id, source_id, title)
+                renamed = await self.rename(notebook_id, source_id, title)
+                # Only merge the new title onto the waited source. rename()'s
+                # response shape can be sparse (UPDATE_SOURCE sometimes returns
+                # just an id + title) and would otherwise null out _type_code,
+                # url, and created_at that wait_until_ready() populated.
+                source = replace(source, title=renamed.title)
             except (RPCError, NetworkError):
                 # Don't fail the whole upload if the rename fails — the file is
                 # already uploaded and registered. Surface a warning so the
