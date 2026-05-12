@@ -36,6 +36,7 @@ from ..auth import (
     convert_rookiepy_cookies_to_storage_state,
     extract_cookies_from_storage,
     fetch_tokens_with_domains,
+    read_account_metadata,
 )
 from ..client import NotebookLMClient
 from ..paths import (
@@ -356,6 +357,7 @@ def _write_extracted_cookies(
     profile: str | None,
     authuser: int,
     email: str,
+    quiet: bool = False,
 ) -> None:
     """Write a previously-loaded rookiepy cookie set to ``storage_path``.
 
@@ -397,9 +399,10 @@ def _write_extracted_cookies(
             f"Details: {e}"
         )
 
-    console.print(
-        f"  [green]✓[/green] {profile or storage_path}  " f"→  {email}  (authuser={authuser})"
-    )
+    if not quiet:
+        console.print(
+            f"  [green]✓[/green] {profile or storage_path}  " f"→  {email}  (authuser={authuser})"
+        )
 
     # Verify cookies for the active account.
     try:
@@ -411,6 +414,82 @@ def _write_extracted_cookies(
         logger.warning("Could not verify cookies for %s: %s", email, e)
         console.print(
             f"    [yellow]Warning: could not verify cookies for {email} (network).[/yellow]"
+        )
+
+
+def _select_refresh_account(
+    accounts: list[Any], metadata: dict[str, Any], browser_name: str
+) -> Any:
+    """Select the browser account that should refresh the active profile.
+
+    ``context.json`` stores both the account email (stable identity) and
+    ``authuser`` (current Google account index). If the browser's account
+    order changed, email wins and the caller rewrites the cached index.
+    """
+    expected_email = metadata.get("email")
+    if isinstance(expected_email, str) and expected_email.strip():
+        normalized = expected_email.strip().casefold()
+        for account in accounts:
+            if isinstance(account.email, str) and account.email.casefold() == normalized:
+                return account
+        available = ", ".join(f"{a.authuser}={a.email}" for a in accounts) or "none"
+        console.print(
+            f"[red]Profile account {expected_email} is not signed in to {browser_name}.[/red]\n"
+            f"Available accounts: {available}\n"
+            f"Run [cyan]notebooklm auth inspect --browser {browser_name}[/cyan] "
+            "or sign that account back into the browser."
+        )
+        raise SystemExit(1)
+
+    raw_authuser = metadata.get("authuser")
+    if isinstance(raw_authuser, int) and raw_authuser >= 0:
+        for account in accounts:
+            if account.authuser == raw_authuser:
+                return account
+        console.print(
+            f"[red]Profile stores authuser={raw_authuser}, but that browser index "
+            "is no longer available and context.json has no account email to repair from.[/red]\n"
+            f"Run [cyan]notebooklm auth inspect --browser {browser_name}[/cyan], then "
+            f"[cyan]notebooklm login --browser-cookies {browser_name} --authuser N[/cyan]."
+        )
+        raise SystemExit(1)
+
+    return next((account for account in accounts if account.is_default), accounts[0])
+
+
+def _refresh_from_browser_cookies(
+    browser_name: str,
+    *,
+    storage_path: Path,
+    profile: str | None,
+    quiet: bool,
+) -> None:
+    """Refresh the active profile from browser cookies, repairing authuser drift."""
+    raw_cookies, accounts = _enumerate_browser_accounts(browser_name, verbose=not quiet)
+    if not accounts:
+        console.print(f"[red]No signed-in Google accounts found in {browser_name}.[/red]")
+        raise SystemExit(1)
+
+    metadata = read_account_metadata(storage_path)
+    selected = _select_refresh_account(accounts, metadata, browser_name)
+    previous_authuser = metadata.get("authuser")
+
+    _write_extracted_cookies(
+        raw_cookies,
+        storage_path=storage_path,
+        profile=profile,
+        authuser=selected.authuser,
+        email=selected.email,
+        quiet=True,
+    )
+
+    if not quiet:
+        route = f"authuser={selected.authuser}"
+        if isinstance(previous_authuser, int) and previous_authuser != selected.authuser:
+            route = f"authuser {previous_authuser} -> {selected.authuser}"
+        console.print(
+            f"[green]ok[/green] refreshed from {browser_name}: {storage_path}\n"
+            f"[green]account[/green] {selected.email} ({route})"
         )
 
 
@@ -1614,10 +1693,23 @@ def register_session_commands(cli):
 
     @auth_group.command("refresh")
     @click.option(
+        "--browser-cookies",
+        "--browser-cookie",
+        "browser_cookies",
+        default=None,
+        is_flag=False,
+        flag_value="auto",
+        help=(
+            "Re-extract cookies from an installed browser and match the profile "
+            "account from context.json. Optionally specify browser: chrome, "
+            "firefox, brave, edge, safari, arc, ..."
+        ),
+    )
+    @click.option(
         "--quiet", "-q", is_flag=True, help="Suppress success output (only print on error)"
     )
     @click.pass_context
-    def auth_refresh(ctx, quiet):
+    def auth_refresh(ctx, browser_cookies, quiet):
         """Refresh stored cookies by exercising the auth path once.
 
         One-shot keepalive: opens a session, runs the layer-1 poke against
@@ -1639,6 +1731,7 @@ def register_session_commands(cli):
         \b
         Examples:
           notebooklm auth refresh                 # one-shot, exit 0/1
+          notebooklm auth refresh --browser-cookies chrome
           notebooklm --profile work auth refresh  # against a named profile
           watch -n 1200 notebooklm auth refresh   # quick in-terminal loop
 
@@ -1664,6 +1757,21 @@ def register_session_commands(cli):
 
         profile = ctx.obj.get("profile") if ctx.obj else None
         storage_path = get_storage_path(profile=profile)
+
+        if browser_cookies is not None:
+            try:
+                _refresh_from_browser_cookies(
+                    browser_cookies,
+                    storage_path=storage_path,
+                    profile=profile,
+                    quiet=quiet,
+                )
+            except Exception as exc:
+                if isinstance(exc, SystemExit):
+                    raise
+                click.echo(f"Error: {type(exc).__name__}: {exc}", err=True)
+                raise SystemExit(1) from exc
+            return
 
         try:
             run_async(fetch_tokens_with_domains(storage_path, profile))

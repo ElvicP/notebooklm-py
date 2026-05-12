@@ -504,6 +504,7 @@ notebooklm auth refresh [OPTIONS]
 ```
 
 **Options:**
+- `--browser-cookies <browser>`, `--browser-cookie <browser>` - Re-extract cookies from an installed browser and match the current profile's account from `context.json`. This repairs `authuser` when Google account indices change after another account logs out.
 - `--quiet`, `-q` - Suppress success output; print only on error (cron-friendly)
 
 **Cadence:** 15-20 minutes is the recommended interval. Tighter is wasteful (the 60 s mtime guard would skip it anyway); significantly looser may cross the `__Secure-1PSIDTS` server-side validity window for your account/region.
@@ -521,6 +522,9 @@ notebooklm auth refresh
 
 # Refresh a named profile (works with --profile / NOTEBOOKLM_PROFILE)
 notebooklm --profile work auth refresh
+
+# Re-extract from Chrome and repair authuser if account order changed
+notebooklm --profile work auth refresh --browser-cookies chrome
 
 # Quiet variant for cron / systemd
 notebooklm --profile work auth refresh --quiet

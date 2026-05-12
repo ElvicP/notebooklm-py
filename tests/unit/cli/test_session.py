@@ -2303,6 +2303,85 @@ class TestAuthRefreshCommand:
         assert called_args.args[0] == work_storage
         assert called_args.args[1] == "work"
 
+    def test_auth_refresh_browser_cookies_repairs_authuser_after_order_change(
+        self, runner, tmp_path
+    ):
+        """If a browser account logs out and indices shift, match by email and
+        rewrite context.json with the new authuser index."""
+        storage = tmp_path / "profiles" / "bob" / "storage_state.json"
+        storage.parent.mkdir(parents=True)
+        storage.write_text(json.dumps({"cookies": []}), encoding="utf-8")
+        (storage.parent / "context.json").write_text(
+            json.dumps({"account": {"authuser": 1, "email": "bob@gmail.com"}}),
+            encoding="utf-8",
+        )
+        mock_rk = _multiaccount_rookiepy_mock(["bob@gmail.com"])
+
+        async def _enum(*args, **kwargs):
+            from notebooklm.auth import Account
+
+            return [Account(authuser=0, email="bob@gmail.com", is_default=True)]
+
+        with (
+            patch.dict("sys.modules", {"rookiepy": mock_rk}),
+            patch("notebooklm.cli.session.get_storage_path", return_value=storage),
+            patch("notebooklm.auth.enumerate_accounts", new=_enum),
+            patch(
+                "notebooklm.cli.session.fetch_tokens_with_domains",
+                new_callable=AsyncMock,
+                return_value=("csrf_ok", "session_ok"),
+            ) as mock_fetch,
+        ):
+            result = runner.invoke(cli, ["auth", "refresh", "--browser-cookie", "chrome"])
+
+        assert result.exit_code == 0, result.output
+        assert "authuser 1 -> 0" in result.output
+        assert json.loads((storage.parent / "context.json").read_text())["account"] == {
+            "authuser": 0,
+            "email": "bob@gmail.com",
+        }
+        mock_fetch.assert_awaited_once()
+
+    def test_auth_refresh_browser_cookies_fails_when_profile_email_signed_out(
+        self, runner, tmp_path
+    ):
+        """A stored email is identity; if that account is absent from the browser,
+        do not refresh the profile with a different signed-in account."""
+        storage = tmp_path / "profiles" / "bob" / "storage_state.json"
+        storage.parent.mkdir(parents=True)
+        storage.write_text(json.dumps({"cookies": []}), encoding="utf-8")
+        (storage.parent / "context.json").write_text(
+            json.dumps({"account": {"authuser": 1, "email": "bob@gmail.com"}}),
+            encoding="utf-8",
+        )
+        mock_rk = _multiaccount_rookiepy_mock(["alice@example.com"])
+
+        async def _enum(*args, **kwargs):
+            from notebooklm.auth import Account
+
+            return [Account(authuser=0, email="alice@example.com", is_default=True)]
+
+        with (
+            patch.dict("sys.modules", {"rookiepy": mock_rk}),
+            patch("notebooklm.cli.session.get_storage_path", return_value=storage),
+            patch("notebooklm.auth.enumerate_accounts", new=_enum),
+            patch(
+                "notebooklm.cli.session.fetch_tokens_with_domains",
+                new_callable=AsyncMock,
+            ) as mock_fetch,
+        ):
+            result = runner.invoke(cli, ["auth", "refresh", "--browser-cookies", "chrome"])
+
+        assert result.exit_code == 1
+        assert "bob@gmail.com" in result.output
+        assert "not signed in" in result.output.lower()
+        assert "alice@example.com" in result.output
+        assert json.loads((storage.parent / "context.json").read_text())["account"] == {
+            "authuser": 1,
+            "email": "bob@gmail.com",
+        }
+        mock_fetch.assert_not_awaited()
+
 
 # =============================================================================
 # AUTH INSPECT + MULTI-ACCOUNT LOGIN TESTS (issue #359)
