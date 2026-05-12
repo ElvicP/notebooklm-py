@@ -30,6 +30,7 @@ Security Notes:
 import asyncio
 import contextlib
 import errno
+import http.cookiejar
 import json
 import logging
 import os
@@ -78,8 +79,89 @@ class CookieSnapshotKey(NamedTuple):
 
 CookieSnapshot: TypeAlias = dict[CookieSnapshotKey, str]
 
-# Minimum required cookies (must have at least SID for basic auth)
-MINIMUM_REQUIRED_COOKIES = {"SID"}
+# Tier 1: cookies whose absence Google rejects deterministically.
+#
+# - ``SID``: only individually-required cookie (singleton ablation).
+# - ``__Secure-1PSIDTS``: directly accepted by Google's homepage check, OR
+#   recoverable via the RotateCookies POST when other auth cookies are intact.
+#   When neither path is viable the homepage GET 302s to login.
+#
+# See ``docs/auth-keepalive.md`` §3.5 for the ablation methodology and the full
+# 16-pair failure table backing this set.
+MINIMUM_REQUIRED_COOKIES = {"SID", "__Secure-1PSIDTS"}
+
+
+_EXTRACTION_HINT = (
+    "This typically means --browser-cookies extraction was incomplete "
+    "(Chrome 127+ App-Bound Encryption can cause silent partial reads). "
+    "Run 'notebooklm login' to re-authenticate."
+)
+
+# Tier 2 fires per cookie-load; a single CLI run can hit it 2-3 times across
+# the four loader entry points. One warning per process is enough signal.
+_SECONDARY_BINDING_WARNED = False
+
+
+def _has_valid_secondary_binding(cookie_names: set[str]) -> bool:
+    """Tier 2 acceptance check (see ``MINIMUM_REQUIRED_COOKIES``).
+
+    Pair-wise ablation against a live Google session reveals that the
+    NotebookLM homepage GET requires *at least one* of two redundant
+    secondary-binding paths in addition to Tier 1:
+
+    - ``OSID`` (recent-sign-in binding), OR
+    - both ``APISID`` AND ``SAPISID`` (legacy XSSI binding pair).
+
+    Without either, Google 302s to ``accounts.google.com/v3/signin`` even when
+    ``SID`` and ``__Secure-1PSIDTS`` are present and otherwise valid.
+    """
+    if "OSID" in cookie_names:
+        return True
+    return {"APISID", "SAPISID"} <= cookie_names
+
+
+def _validate_required_cookies(
+    cookie_names: set[str],
+    *,
+    context: str = "",
+    extra_diagnostics: list[str] | None = None,
+) -> None:
+    """Enforce the Tier 1 cookie-set rule (raise) and warn on Tier 2 violation.
+
+    Hybrid rollout: Tier 1 (``MINIMUM_REQUIRED_COOKIES``) is a hard requirement
+    because its ablation evidence is unambiguous — Google rejects deterministically
+    and there is no recovery path inside the library. Tier 2 (secondary binding,
+    see ``_has_valid_secondary_binding``) is logged as a warning so partial
+    extractions surface in user logs without breaking edge-case auth flows we
+    haven't ablated yet (e.g. Workspace SSO). After one release of telemetry
+    this can be promoted to a hard raise.
+
+    Args:
+        cookie_names: Names of cookies present in the loaded set (any domain).
+        context: Optional suffix for the Tier 1 error message
+            (e.g. ``" for downloads"``).
+        extra_diagnostics: Optional extra lines inserted into the Tier 1 error
+            (e.g. observed cookies, source domains) for friendlier diagnosis.
+    """
+    missing = MINIMUM_REQUIRED_COOKIES - cookie_names
+    if missing:
+        missing_names = ", ".join(sorted(missing))
+        parts = [f"Missing required cookies{context}: {missing_names}"]
+        if extra_diagnostics:
+            parts.extend(extra_diagnostics)
+        parts.append(_EXTRACTION_HINT)
+        raise ValueError("\n".join(parts))
+
+    if not _has_valid_secondary_binding(cookie_names):
+        global _SECONDARY_BINDING_WARNED
+        if not _SECONDARY_BINDING_WARNED:
+            _SECONDARY_BINDING_WARNED = True
+            logger.warning(
+                "Cookie set lacks a secondary binding (need OSID, or both APISID "
+                "and SAPISID). Google may reject auth on the next call. %s",
+                _EXTRACTION_HINT,
+            )
+
 
 # Cookie domains to extract from storage state.
 #
@@ -252,10 +334,10 @@ class AuthTokens:
     def flat_cookies(self) -> FlatCookieMap:
         """Return a legacy name→value cookie mapping.
 
-        When the same cookie name exists on multiple domains, the base
-        ``.google.com`` value wins for compatibility with the previous flat
-        representation. Domain-aware HTTP operations should use ``cookie_jar``
-        or ``cookies`` directly instead.
+        Duplicate-name resolution follows :func:`_auth_domain_priority` so the
+        result matches what :func:`load_auth_from_storage` produces for the same
+        storage state (see issue #375). Domain-aware HTTP operations should use
+        ``cookie_jar`` or ``cookies`` directly instead.
         """
         return flatten_cookie_map(self.cookies)
 
@@ -292,11 +374,12 @@ class AuthTokens:
         if path is None and (profile is not None or "NOTEBOOKLM_AUTH_JSON" not in os.environ):
             path = get_storage_path(profile=profile)
 
-        storage_state = _load_storage_state(path)
-        cookies = extract_cookies_with_domains(storage_state)
-
-        # Build domain-preserving jar and use it for token fetch
-        jar = build_cookie_jar(cookies=cookies)
+        # Build the cookie jar via the lossless loader so path/secure/httpOnly
+        # survive into the live jar. The earlier
+        # extract_cookies_with_domains -> build_cookie_jar pipeline only carried
+        # (name, domain) -> value and dropped the same attributes the load
+        # paths in #365 fixed.
+        jar = build_httpx_cookies_from_storage(path)
         # Snapshot before token fetch can rotate cookies; the snapshot/delta
         # merge in save_cookies_to_storage will then write only what this
         # process actually rotated, preserving sibling-process state.
@@ -333,13 +416,25 @@ def normalize_cookie_map(cookies: CookieInput | None) -> DomainCookieMap:
 
 
 def flatten_cookie_map(cookies: CookieInput | None) -> FlatCookieMap:
-    """Flatten domain-aware cookies for legacy raw Cookie header callers."""
+    """Flatten domain-aware cookies for legacy raw Cookie header callers.
+
+    Duplicate-name resolution mirrors :func:`extract_cookies_from_storage`:
+    domains are ranked by :func:`_auth_domain_priority` (``.google.com`` >
+    ``.notebooklm.google.com`` > ``notebooklm.google.com`` > regional > other).
+    Named tiers are strictly distinct, so the cross-tier case from #375 (e.g.
+    ``OSID`` on ``myaccount.google.com`` (tier 0) vs ``notebooklm.google.com``
+    (tier 2)) resolves the same way regardless of input order. Within a single
+    tier, first occurrence in iteration order wins — matching
+    :func:`extract_cookies_from_storage`'s within-tier semantics.
+    """
     flat: FlatCookieMap = {}
+    priorities: dict[str, int] = {}
 
     for (name, domain), value in normalize_cookie_map(cookies).items():
-        is_base_domain = domain == ".google.com"
-        if name not in flat or is_base_domain:
+        priority = _auth_domain_priority(domain)
+        if name not in flat or priority > priorities[name]:
             flat[name] = value
+            priorities[name] = priority
 
     return flat
 
@@ -561,20 +656,20 @@ def extract_cookies_from_storage(storage_state: dict[str, Any]) -> dict[str, str
         if "SID" in cookie_domains:
             logger.debug("SID cookie from domain: %s", cookie_domains["SID"])
 
-    missing = MINIMUM_REQUIRED_COOKIES - set(cookies.keys())
-    if missing:
-        # Provide more helpful error message with diagnostic info
+    # Build diagnostic extras only on the failure path. The successful path is
+    # by far the common case; iterating the cookie list to compute found-names
+    # and Google domains every call would be wasted work.
+    cookie_names = set(cookies.keys())
+    extras: list[str] = []
+    if not MINIMUM_REQUIRED_COOKIES.issubset(cookie_names):
         all_domains = {c.get("domain", "") for c in storage_state.get("cookies", [])}
         google_domains = sorted(d for d in all_domains if "google" in d.lower())
         found_names = list(cookies.keys())[:5]
-
-        error_parts = [f"Missing required cookies: {missing}"]
         if found_names:
-            error_parts.append(f"Found cookies: {found_names}{'...' if len(cookies) > 5 else ''}")
+            extras.append(f"Found cookies: {found_names}{'...' if len(cookies) > 5 else ''}")
         if google_domains:
-            error_parts.append(f"Google domains in storage: {google_domains}")
-        error_parts.append("Run 'notebooklm login' to authenticate.")
-        raise ValueError("\n".join(error_parts))
+            extras.append(f"Google domains in storage: {google_domains}")
+    _validate_required_cookies(cookie_names, extra_diagnostics=extras)
 
     return cookies
 
@@ -708,12 +803,18 @@ def _load_storage_state(path: Path | None = None) -> dict[str, Any]:
 
 
 def load_auth_from_storage(path: Path | None = None) -> dict[str, str]:
-    """Load Google cookies from storage.
+    """Load Google cookies from storage as a flat name→value dict.
 
     Loads authentication cookies with the following precedence:
     1. Explicit path argument (from --storage CLI flag)
     2. NOTEBOOKLM_AUTH_JSON environment variable (inline JSON, no file needed)
     3. File at $NOTEBOOKLM_HOME/storage_state.json (or ~/.notebooklm/storage_state.json)
+
+    Duplicate-name resolution follows :func:`_auth_domain_priority`, matching
+    :attr:`AuthTokens.flat_cookies` for the same storage state — previously the
+    two paths disagreed on names that live only on non-base hosts (e.g.
+    ``OSID`` on ``myaccount.google.com`` vs ``notebooklm.google.com``). See
+    issue #375.
 
     Args:
         path: Path to storage_state.json. If provided, takes precedence over env vars.
@@ -814,25 +915,19 @@ def load_httpx_cookies(path: Path | None = None) -> "httpx.Cookies":
     storage_state = _load_storage_state(path)
 
     cookies = httpx.Cookies()
-    cookie_names = set()
+    cookie_names: set[str] = set()
 
-    for cookie in storage_state.get("cookies", []):
-        domain = cookie.get("domain", "")
-        name = cookie.get("name", "")
-        value = cookie.get("value", "")
+    for entry in storage_state.get("cookies", []):
+        domain = entry.get("domain", "")
+        name = entry.get("name", "")
+        value = entry.get("value", "")
 
         # Only include cookies from explicitly allowed domains
         if _is_allowed_cookie_domain(domain) and name and value:
-            cookies.set(name, value, domain=domain)
+            cookies.jar.set_cookie(_storage_entry_to_cookie(entry))
             cookie_names.add(name)
 
-    # Validate that essential cookies are present
-    missing = MINIMUM_REQUIRED_COOKIES - cookie_names
-    if missing:
-        raise ValueError(
-            f"Missing required cookies for downloads: {missing}\n"
-            f"Run 'notebooklm login' to re-authenticate."
-        )
+    _validate_required_cookies(cookie_names, context=" for downloads")
 
     return cookies
 
@@ -872,13 +967,7 @@ def extract_cookies_with_domains(
             cookie_map[key] = value
 
     # Validate required cookies exist (any domain)
-    cookie_names = {name for name, _ in cookie_map}
-    missing = MINIMUM_REQUIRED_COOKIES - cookie_names
-    if missing:
-        raise ValueError(
-            f"Missing required cookies: {missing}\nRun 'notebooklm login' to authenticate."
-        )
-
+    _validate_required_cookies({name for name, _ in cookie_map})
     return cookie_map
 
 
@@ -900,12 +989,27 @@ def build_httpx_cookies_from_storage(path: Path | None = None) -> "httpx.Cookies
         ValueError: If required cookies are missing or JSON is malformed.
     """
     storage_state = _load_storage_state(path)
-    cookie_map = extract_cookies_with_domains(storage_state)
 
     cookies = httpx.Cookies()
-    for (name, domain), value in cookie_map.items():
-        cookies.set(name, value, domain=domain)
+    # Dedup by (name, domain) to stay symmetric with save_cookies_to_storage,
+    # which keys cookies_by_key on the same pair. Cookie identity per RFC 6265
+    # is (name, domain, path), but the save side cannot represent multiple
+    # path-scoped siblings yet — so the load side keeps a compatible model
+    # rather than constructing pairs that would silently collapse on save.
+    seen_keys: set[CookieKey] = set()
+    for entry in storage_state.get("cookies", []):
+        domain = entry.get("domain", "")
+        name = entry.get("name")
+        value = entry.get("value", "")
+        if not _is_allowed_auth_domain(domain) or not name or not value:
+            continue
+        key = (name, domain)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        cookies.jar.set_cookie(_storage_entry_to_cookie(entry))
 
+    _validate_required_cookies({name for name, _ in seen_keys})
     return cookies
 
 
@@ -1390,6 +1494,44 @@ def _cookie_to_storage_state(cookie: Any) -> dict[str, Any]:
         "secure": cookie.secure,
         "sameSite": "None",
     }
+
+
+def _storage_entry_to_cookie(entry: dict[str, Any]) -> http.cookiejar.Cookie:
+    """Construct a faithful ``http.cookiejar.Cookie`` from a storage_state entry.
+
+    ``httpx.Cookies.set(name, value, domain=...)`` accepts only those three
+    fields, so cookies loaded that way drop ``path``, ``secure``, and
+    ``httpOnly``. Each load+save round-trip would erode attributes until disk
+    stabilized at ``Path=/``, ``secure=false``, ``httpOnly=false`` — silently
+    breaking ``__Host-`` prefix invariants and any future server-enforced
+    attribute. This helper is the load-side mirror of
+    :func:`_cookie_to_storage_state` so the round-trip is lossless. See #365.
+    """
+    domain = entry.get("domain", "") or ""
+    expires = entry.get("expires")
+    expires_value = None if expires in (None, -1) else expires
+    # _cookie_is_http_only checks key presence via has_nonstandard_attr; the
+    # value is irrelevant. Use "" instead of None so the typed signature
+    # ``rest: Mapping[str, str]`` is honored.
+    rest: dict[str, str] = {"HttpOnly": ""} if entry.get("httpOnly") else {}
+    return http.cookiejar.Cookie(
+        version=0,
+        name=entry.get("name", "") or "",
+        value=entry.get("value", "") or "",
+        port=None,
+        port_specified=False,
+        domain=domain,
+        domain_specified=bool(domain),
+        domain_initial_dot=domain.startswith("."),
+        path=entry.get("path") or "/",
+        path_specified=True,
+        secure=bool(entry.get("secure", False)),
+        expires=expires_value,
+        discard=expires_value is None,
+        comment=None,
+        comment_url=None,
+        rest=rest,
+    )
 
 
 def _cookie_key_variants(key: CookieKey) -> set[CookieKey]:
