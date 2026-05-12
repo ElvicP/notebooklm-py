@@ -19,6 +19,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 import click
 import httpx
@@ -96,6 +97,12 @@ def _is_navigation_interrupted_error(error: str | Exception) -> bool:
     """Return True for Playwright navigation races that are safe to ignore."""
     error_str = str(error).lower()
     return any(marker in error_str for marker in _NAVIGATION_INTERRUPTED_MARKERS)
+
+
+def _url_matches_base_host(url: str) -> bool:
+    """Return True when ``url`` is on the configured NotebookLM host."""
+    current_host = (urlparse(url).hostname or "").lower()
+    return current_host == get_base_host().lower()
 
 
 # Maps user-facing browser names to rookiepy function names.
@@ -631,7 +638,7 @@ def register_session_commands(cli):
                             raise
 
                 current_url = page.url
-                if get_base_host() not in current_url:
+                if not _url_matches_base_host(current_url):
                     console.print(f"[yellow]Warning: Current URL is {current_url}[/yellow]")
                     if not click.confirm("Save authentication anyway?"):
                         raise SystemExit(1)

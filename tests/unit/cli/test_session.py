@@ -52,6 +52,26 @@ def mock_context_file(tmp_path):
 # =============================================================================
 
 
+class TestLoginUrlValidation:
+    def test_url_matches_default_base_host(self, monkeypatch):
+        monkeypatch.delenv("NOTEBOOKLM_BASE_URL", raising=False)
+
+        from notebooklm.cli.session import _url_matches_base_host
+
+        assert _url_matches_base_host("https://notebooklm.google.com/notebook/abc")
+        assert not _url_matches_base_host(
+            "https://example.com/path?next=https://notebooklm.google.com/"
+        )
+
+    def test_url_matches_enterprise_base_host(self, monkeypatch):
+        monkeypatch.setenv("NOTEBOOKLM_BASE_URL", "https://notebooklm.cloud.google.com")
+
+        from notebooklm.cli.session import _url_matches_base_host
+
+        assert _url_matches_base_host("https://notebooklm.cloud.google.com/notebook/abc")
+        assert not _url_matches_base_host("https://notebooklm.google.com/notebook/abc")
+
+
 class TestLoginCommand:
     def test_login_playwright_import_error_handling(self, runner):
         """Test that ImportError for playwright is handled gracefully."""
