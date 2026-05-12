@@ -1159,6 +1159,26 @@ class TestResolveLanguageDirect:
             result = generate_module.resolve_language(None)
         assert result == "ja"
 
+    def test_resolve_language_treats_whitespace_env_as_unset(self, monkeypatch):
+        """Whitespace-only NOTEBOOKLM_HL falls through to config, not rejected."""
+        import importlib
+
+        monkeypatch.setenv("NOTEBOOKLM_HL", "   ")
+        generate_module = importlib.import_module("notebooklm.cli.generate")
+        with patch.object(generate_module, "get_language", return_value="ja"):
+            result = generate_module.resolve_language(None)
+        assert result == "ja"
+
+    def test_resolve_language_treats_whitespace_env_as_unset_no_config(self, monkeypatch):
+        """Whitespace-only NOTEBOOKLM_HL with no config falls through to default."""
+        import importlib
+
+        monkeypatch.setenv("NOTEBOOKLM_HL", "   ")
+        generate_module = importlib.import_module("notebooklm.cli.generate")
+        with patch.object(generate_module, "get_language", return_value=None):
+            result = generate_module.resolve_language(None)
+        assert result == "en"
+
 
 # =============================================================================
 # _OUTPUT_GENERATION_STATUS DIRECT TESTS

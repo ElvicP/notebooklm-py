@@ -150,7 +150,7 @@ def resolve_language(language: str | None) -> str:
                 param_hint="'--language'",
             )
         return language
-    env_lang = os.environ.get("NOTEBOOKLM_HL", "")
+    env_lang = os.environ.get("NOTEBOOKLM_HL", "").strip()
     if env_lang:
         if env_lang not in SUPPORTED_LANGUAGES:
             raise click.BadParameter(

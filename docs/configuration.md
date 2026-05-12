@@ -97,7 +97,7 @@ A persistent Chromium user data directory used during `notebooklm login`.
 | `NOTEBOOKLM_HOME` | Base directory for all files | `~/.notebooklm` |
 | `NOTEBOOKLM_PROFILE` | Active profile name | `default` |
 | `NOTEBOOKLM_AUTH_JSON` | Inline authentication JSON (for CI/CD) | - |
-| `NOTEBOOKLM_HL` | Default interface/output language (BCP-47 code) | `en` |
+| `NOTEBOOKLM_HL` | Default interface/output language code (e.g. `en`, `ja`, `zh_Hans`) | `en` |
 | `NOTEBOOKLM_LOG_LEVEL` | Logging level: `DEBUG`, `INFO`, `WARNING`, `ERROR` | `WARNING` |
 | `NOTEBOOKLM_DEBUG_RPC` | Legacy: Enable RPC debug logging (use `LOG_LEVEL=DEBUG` instead) | `false` |
 
