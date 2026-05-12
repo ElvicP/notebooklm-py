@@ -31,9 +31,16 @@ logger = logging.getLogger(__name__)
 
 
 # Source type codes where status=ERROR is genuinely terminal.
-# Audio/media (10) and unclassified (None / 0) sources can briefly
-# report status=3 during transcription before settling at status=2.
-# See #391.
+# Audio/media (code 10) and unclassified (None / 0) sources can briefly
+# report status=3 during transcription before settling at status=2,
+# so they must keep polling instead of raising. See #391.
+#
+# This is intentionally a hand-maintained whitelist (not derived from
+# _SOURCE_TYPE_CODE_MAP minus {10}): if Google adds a new audio-adjacent
+# code with the same transient-status=3 behavior, a derived set would
+# silently regress the fix. Keep the codes here in sync with
+# _SOURCE_TYPE_CODE_MAP in types.py — adding a code here opts it in to
+# strict terminal-error semantics.
 _NON_AUDIO_TERMINAL_TYPES: frozenset[int] = frozenset({1, 2, 3, 4, 5, 8, 9, 11, 13, 14, 16, 17})
 
 
