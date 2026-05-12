@@ -2276,11 +2276,11 @@ class TestAuthRefreshCommand:
         assert called_args.args[0] == work_storage
         assert called_args.args[1] == "work"
 
-    def test_auth_refresh_browser_cookies_repairs_authuser_after_order_change(
+    def test_auth_refresh_browser_cookies_repairs_account_after_order_change(
         self, runner, tmp_path
     ):
         """If a browser account logs out and indices shift, match by email and
-        rewrite context.json with the new authuser index."""
+        rewrite context.json with the new internal account index."""
         storage = tmp_path / "profiles" / "bob" / "storage_state.json"
         storage.parent.mkdir(parents=True)
         storage.write_text(json.dumps({"cookies": []}), encoding="utf-8")
@@ -2288,7 +2288,7 @@ class TestAuthRefreshCommand:
             json.dumps({"account": {"authuser": 1, "email": "bob@gmail.com"}}),
             encoding="utf-8",
         )
-        mock_rk = _multiaccount_rookiepy_mock(["bob@gmail.com"])
+        mock_rk = _multiaccount_rookiepy_mock()
 
         async def _enum(*args, **kwargs):
             from notebooklm.auth import Account
@@ -2308,7 +2308,8 @@ class TestAuthRefreshCommand:
             result = runner.invoke(cli, ["auth", "refresh", "--browser-cookie", "chrome"])
 
         assert result.exit_code == 0, result.output
-        assert "authuser 1 -> 0" in result.output
+        assert "bob@gmail.com" in result.output
+        assert "authuser" not in result.output
         assert json.loads((storage.parent / "context.json").read_text())["account"] == {
             "authuser": 0,
             "email": "bob@gmail.com",
@@ -2327,7 +2328,7 @@ class TestAuthRefreshCommand:
             json.dumps({"account": {"authuser": 1, "email": "bob@gmail.com"}}),
             encoding="utf-8",
         )
-        mock_rk = _multiaccount_rookiepy_mock(["alice@example.com"])
+        mock_rk = _multiaccount_rookiepy_mock()
 
         async def _enum(*args, **kwargs):
             from notebooklm.auth import Account
@@ -2361,9 +2362,10 @@ class TestAuthRefreshCommand:
 # =============================================================================
 
 
-def _multiaccount_rookiepy_mock(emails):
+def _multiaccount_rookiepy_mock():
     """Build a rookiepy mock that returns the same SID-bearing cookies for any
-    domain query. Cookies cover all signed-in accounts in Google's wire model.
+    domain query. Account enumeration is controlled by the patched
+    enumerate_accounts coroutine in each test.
     """
     cookies = [
         {
@@ -2385,9 +2387,7 @@ def _multiaccount_rookiepy_mock(emails):
 
 class TestAuthInspect:
     def test_inspect_lists_accounts(self, runner):
-        mock_rk = _multiaccount_rookiepy_mock(
-            ["alice@example.com", "bob@gmail.com", "carol@ws.com"]
-        )
+        mock_rk = _multiaccount_rookiepy_mock()
 
         async def _enum(*args, **kwargs):
             from notebooklm.auth import Account
@@ -2411,9 +2411,10 @@ class TestAuthInspect:
         assert "alice@example.com" in result.output
         assert "bob@gmail.com" in result.output
         assert "carol@ws.com" in result.output
+        assert "authuser" not in result.output
 
     def test_inspect_json_output(self, runner):
-        mock_rk = _multiaccount_rookiepy_mock(["alice@example.com"])
+        mock_rk = _multiaccount_rookiepy_mock()
 
         async def _enum(*args, **kwargs):
             from notebooklm.auth import Account
@@ -2428,15 +2429,15 @@ class TestAuthInspect:
         assert result.exit_code == 0, result.output
         data = json.loads(result.output)
         assert data["accounts"][0]["email"] == "alice@example.com"
-        assert data["accounts"][0]["authuser"] == 0
+        assert "authuser" not in data["accounts"][0]
         assert data["accounts"][0]["is_default"] is True
 
 
 class TestLoginMultiAccount:
-    """--authuser / --profile-name / --all-accounts on `notebooklm login --browser-cookies`."""
+    """--account / --profile-name / --all-accounts on `notebooklm login --browser-cookies`."""
 
-    def test_authuser_writes_account_metadata(self, runner, tmp_path):
-        mock_rk = _multiaccount_rookiepy_mock(["alice@example.com", "bob@gmail.com"])
+    def test_account_writes_account_metadata(self, runner, tmp_path):
+        mock_rk = _multiaccount_rookiepy_mock()
 
         async def _enum(*args, **kwargs):
             from notebooklm.auth import Account
@@ -2463,7 +2464,10 @@ class TestLoginMultiAccount:
                 return_value=("csrf", "sess"),
             ),
         ):
-            result = runner.invoke(cli, ["login", "--browser-cookies", "chrome", "--authuser", "1"])
+            result = runner.invoke(
+                cli,
+                ["login", "--browser-cookies", "chrome", "--account", "bob@gmail.com"],
+            )
 
         assert result.exit_code == 0, result.output
         context_json = target_dir / "context.json"
@@ -2473,8 +2477,28 @@ class TestLoginMultiAccount:
             "email": "bob@gmail.com",
         }
 
-    def test_authuser_out_of_range_aborts(self, runner, tmp_path):
-        mock_rk = _multiaccount_rookiepy_mock(["alice@example.com"])
+    def test_storage_without_account_keeps_default_import_path(self, runner, tmp_path):
+        target = tmp_path / "storage_state.json"
+
+        with (
+            patch("notebooklm.cli.session._login_with_browser_cookies") as login_mock,
+            patch(
+                "notebooklm.auth.enumerate_accounts",
+                side_effect=AssertionError("should not enumerate accounts"),
+            ),
+        ):
+            result = runner.invoke(
+                cli,
+                ["login", "--browser-cookies", "chrome", "--storage", str(target)],
+            )
+
+        assert result.exit_code == 0, result.output
+        login_mock.assert_called_once()
+        assert login_mock.call_args.args[0] == target
+        assert login_mock.call_args.args[1] == "chrome"
+
+    def test_account_not_found_aborts(self, runner, tmp_path):
+        mock_rk = _multiaccount_rookiepy_mock()
 
         async def _enum(*args, **kwargs):
             from notebooklm.auth import Account
@@ -2489,12 +2513,15 @@ class TestLoginMultiAccount:
             ),
             patch("notebooklm.auth.enumerate_accounts", new=_enum),
         ):
-            result = runner.invoke(cli, ["login", "--browser-cookies", "chrome", "--authuser", "5"])
+            result = runner.invoke(
+                cli,
+                ["login", "--browser-cookies", "chrome", "--account", "bob@gmail.com"],
+            )
         assert result.exit_code != 0
         assert "not found" in result.output.lower()
 
     def test_all_accounts_writes_one_profile_per_account(self, runner, tmp_path):
-        mock_rk = _multiaccount_rookiepy_mock(["alice@example.com"])
+        mock_rk = _multiaccount_rookiepy_mock()
 
         async def _enum(*args, **kwargs):
             from notebooklm.auth import Account
@@ -2534,7 +2561,7 @@ class TestLoginMultiAccount:
         assert bob_meta == {"authuser": 1, "email": "bob@gmail.com"}
 
     def test_all_accounts_rerun_reuses_profiles_by_email(self, runner, tmp_path):
-        mock_rk = _multiaccount_rookiepy_mock(["alice@example.com"])
+        mock_rk = _multiaccount_rookiepy_mock()
 
         async def _enum(*args, **kwargs):
             from notebooklm.auth import Account
@@ -2575,7 +2602,7 @@ class TestLoginMultiAccount:
     def test_all_accounts_does_not_overwrite_same_name_without_matching_email(
         self, runner, tmp_path
     ):
-        mock_rk = _multiaccount_rookiepy_mock(["alice@example.com"])
+        mock_rk = _multiaccount_rookiepy_mock()
 
         async def _enum(*args, **kwargs):
             from notebooklm.auth import Account
@@ -2616,7 +2643,7 @@ class TestLoginMultiAccount:
     def test_all_accounts_updates_existing_profile_when_authuser_index_changes(
         self, runner, tmp_path
     ):
-        mock_rk = _multiaccount_rookiepy_mock(["bob@gmail.com"])
+        mock_rk = _multiaccount_rookiepy_mock()
 
         first_accounts = None
 
@@ -2664,14 +2691,14 @@ class TestLoginMultiAccount:
         }
         assert sorted(path.name for path in target_root.iterdir()) == ["alice", "bob"]
 
-    def test_authuser_without_browser_cookies_rejected(self, runner):
-        # --authuser only makes sense with --browser-cookies; the CLI should
+    def test_account_without_browser_cookies_rejected(self, runner):
+        # --account only makes sense with --browser-cookies; the CLI should
         # tell the user instead of silently ignoring it.
-        result = runner.invoke(cli, ["login", "--authuser", "1"])
+        result = runner.invoke(cli, ["login", "--account", "bob@gmail.com"])
         assert result.exit_code != 0
         assert "browser-cookies" in result.output
 
-    def test_all_accounts_combined_with_authuser_rejected(self, runner):
+    def test_all_accounts_combined_with_account_rejected(self, runner):
         result = runner.invoke(
             cli,
             [
@@ -2679,8 +2706,8 @@ class TestLoginMultiAccount:
                 "--browser-cookies",
                 "chrome",
                 "--all-accounts",
-                "--authuser",
-                "1",
+                "--account",
+                "bob@gmail.com",
             ],
         )
         assert result.exit_code != 0
@@ -2688,11 +2715,11 @@ class TestLoginMultiAccount:
 
 
 class TestStaleAccountMetadataCleanup:
-    """Default-account login must clear stale account metadata from previous --authuser runs."""
+    """Default-account login must clear stale account metadata from previous targeted runs."""
 
     def test_default_login_removes_stale_account_metadata(self, runner, tmp_path):
         storage_file = tmp_path / "storage.json"
-        # Simulate a previous `--authuser 1` extraction.
+        # Simulate a previous targeted extraction.
         (tmp_path / "context.json").write_text(
             json.dumps(
                 {
@@ -2732,5 +2759,5 @@ class TestStaleAccountMetadataCleanup:
 
         assert result.exit_code == 0, result.output
         # Account metadata must be gone so subsequent token fetches don't keep
-        # routing to authuser=1, while unrelated notebook context survives.
+        # routing to the old account, while unrelated notebook context survives.
         assert json.loads((tmp_path / "context.json").read_text()) == {"notebook_id": "nb_existing"}

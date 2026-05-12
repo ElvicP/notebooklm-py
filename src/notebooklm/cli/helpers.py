@@ -464,11 +464,9 @@ def get_auth_tokens(ctx) -> AuthTokens:
     else:
         jar = build_cookie_jar(cookies=cookies, storage_path=resolved_storage_path)
 
-    # Read the persisted authuser so RPC URLs route to the right Google
-    # account; without this the CLI would mint tokens for ``authuser=N`` but
-    # then send batchexecute requests to ``authuser=0`` and Google rejects
-    # the resulting CSRF/session combination with HTTP 400.
-    from ..auth import get_authuser_for_storage
+    # Read persisted account routing so RPC URLs target the same Google
+    # account the tokens were minted for.
+    from ..auth import get_account_email_for_storage, get_authuser_for_storage
 
     return AuthTokens(
         cookies=cookies,
@@ -477,6 +475,7 @@ def get_auth_tokens(ctx) -> AuthTokens:
         storage_path=resolved_storage_path,
         cookie_jar=jar,
         authuser=get_authuser_for_storage(resolved_storage_path),
+        account_email=get_account_email_for_storage(resolved_storage_path),
     )
 
 

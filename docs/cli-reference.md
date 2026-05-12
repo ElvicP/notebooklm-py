@@ -283,6 +283,9 @@ By default, opens a Chromium browser with a persistent profile. Log in to your G
 - `--storage PATH` - Where to save storage_state.json (default: `$NOTEBOOKLM_HOME/profiles/<profile>/storage_state.json`)
 - `--browser [chromium|msedge]` - Browser to use for login (default: `chromium`). Use `msedge` for Microsoft Edge.
 - `--browser-cookies <auto|chrome|edge|firefox|safari|brave|arc|...>` - Read cookies from an installed browser instead of launching Playwright. Pass an explicit browser name, or `auto` to let rookiepy auto-detect. Requires `pip install "notebooklm-py[cookies]"`.
+- `--account EMAIL` - Pick a signed-in Google account by email when several are present in the browser. Only valid with `--browser-cookies`.
+- `--all-accounts` - Extract every Google account signed in to the browser into separate profiles named from each account email. Only valid with `--browser-cookies`.
+- `--profile-name NAME` - Name the profile created by a targeted `--account` import. Defaults to the account email's local part. Only valid with `--browser-cookies`.
 - `--fresh` - Start with a clean browser session (deletes the cached browser profile). Use to switch Google accounts. Has no effect with `--browser-cookies`.
 
 **Examples:**
@@ -302,13 +305,20 @@ notebooklm login --browser-cookies auto
 # Populate a named profile via cookie import
 notebooklm --profile work login --browser-cookies chrome
 
+# Pick a specific browser account by email
+notebooklm login --browser-cookies chrome --account alice@example.com
+
+# Extract every signed-in browser account into separate profiles
+notebooklm login --browser-cookies chrome --all-accounts
+
 # Force a clean browser session before logging in
 notebooklm login --fresh
 ```
 
 **Notes on `--browser-cookies`:**
 - Honors `--profile` / `NOTEBOOKLM_PROFILE` and writes to that profile's `storage_state.json`.
-- Always extracts cookies for the source browser's currently-active Google account on `google.com` / `notebooklm.google.com`. To populate multiple profiles from one browser, switch the active Google account in the browser between runs (or use a different browser per profile).
+- Without `--account` or `--all-accounts`, imports the browser's default Google account into the target profile.
+- Use `notebooklm auth inspect --browser <browser>` to see available account emails before a targeted import.
 
 ### Session: `use`
 
@@ -504,7 +514,7 @@ notebooklm auth refresh [OPTIONS]
 ```
 
 **Options:**
-- `--browser-cookies <browser>`, `--browser-cookie <browser>` - Re-extract cookies from an installed browser and match the current profile's account from `context.json`. This repairs `authuser` when Google account indices change after another account logs out.
+- `--browser-cookies <browser>`, `--browser-cookie <browser>` - Re-extract cookies from an installed browser and match the current profile's account from `context.json`. This repairs account routing when browser account order changes after another account logs out.
 - `--quiet`, `-q` - Suppress success output; print only on error (cron-friendly)
 
 **Cadence:** 15-20 minutes is the recommended interval. Tighter is wasteful (the 60 s mtime guard would skip it anyway); significantly looser may cross the `__Secure-1PSIDTS` server-side validity window for your account/region.
@@ -523,7 +533,7 @@ notebooklm auth refresh
 # Refresh a named profile (works with --profile / NOTEBOOKLM_PROFILE)
 notebooklm --profile work auth refresh
 
-# Re-extract from Chrome and repair authuser if account order changed
+# Re-extract from Chrome and repair account routing if browser account order changed
 notebooklm --profile work auth refresh --browser-cookies chrome
 
 # Quiet variant for cron / systemd

@@ -47,6 +47,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple, TypeAlias
+from urllib.parse import urlencode
 
 import httpx
 
@@ -339,6 +340,10 @@ class AuthTokens:
         authuser: Google ``authuser`` index this profile authenticates as.
             ``0`` (the default account) is used when no account metadata is
             present in ``context.json`` — matching pre-multi-account behavior.
+        account_email: Stable Google account identity for routing. When set,
+            NotebookLM requests use it as the ``authuser`` value instead of the
+            integer index, because Google account indices can change when other
+            accounts sign out.
         cookie_snapshot: Internal save baseline used when a pre-client token
             fetch mutates cookies but persistence fails or CAS-rejects. This
             lets the eventual ClientCore retry the unpersisted delta instead
@@ -352,6 +357,7 @@ class AuthTokens:
     cookie_jar: httpx.Cookies | None = None
     authuser: int = 0
     cookie_snapshot: CookieSnapshot | None = None
+    account_email: str | None = None
 
     def __post_init__(self) -> None:
         """Normalize legacy flat cookie mappings into domain-keyed mappings."""
@@ -367,6 +373,11 @@ class AuthTokens:
             Semicolon-separated cookie string (e.g., "SID=abc; HSID=def")
         """
         return "; ".join(f"{k}={v}" for k, v in self.flat_cookies.items())
+
+    @property
+    def account_route(self) -> str:
+        """Return the value to send in NotebookLM ``authuser`` routing fields."""
+        return format_authuser_value(self.authuser, self.account_email)
 
     @property
     def flat_cookies(self) -> FlatCookieMap:
@@ -413,6 +424,7 @@ class AuthTokens:
             path = get_storage_path(profile=profile)
 
         authuser = get_authuser_for_storage(path)
+        account_email = get_account_email_for_storage(path)
         # Build the cookie jar via the lossless loader so path/secure/httpOnly
         # survive into the live jar. The earlier
         # extract_cookies_with_domains -> build_cookie_jar pipeline only carried
@@ -423,8 +435,11 @@ class AuthTokens:
         # merge in save_cookies_to_storage will then write only what this
         # process actually rotated, preserving sibling-process state.
         snapshot = snapshot_cookie_jar(jar)
+        route_kwargs: dict[str, Any] = {"authuser": authuser}
+        if account_email is not None:
+            route_kwargs["account_email"] = account_email
         csrf_token, session_id, refreshed, post_refresh_snapshot = await _fetch_tokens_with_refresh(
-            jar, path, profile, authuser=authuser
+            jar, path, profile, **route_kwargs
         )
 
         # If NOTEBOOKLM_REFRESH_CMD ran, ``_fetch_tokens_with_refresh`` captured
@@ -467,6 +482,7 @@ class AuthTokens:
             cookie_jar=jar,
             authuser=authuser,
             cookie_snapshot=cookie_snapshot,
+            account_email=account_email,
         )
 
 
@@ -909,7 +925,7 @@ async def _probe_authuser(client: httpx.AsyncClient, n: int) -> str | None:
     that would fool ``contains_google_auth_redirect``.
     """
     response = await client.get(
-        f"https://notebooklm.google.com/?authuser={n}",
+        f"{get_base_url()}/?{authuser_query(n)}",
         headers={"User-Agent": _BROWSER_UA, "Accept": "text/html,*/*"},
     )
     if response.status_code != 200:
@@ -1031,6 +1047,35 @@ def get_authuser_for_storage(storage_path: Path | None) -> int:
     if isinstance(raw, int) and raw >= 0:
         return raw
     return 0
+
+
+def get_account_email_for_storage(storage_path: Path | None) -> str | None:
+    """Return the persisted account email for stable routing, if available."""
+    raw = read_account_metadata(storage_path).get("email")
+    if isinstance(raw, str):
+        email = raw.strip()
+        if email:
+            return email
+    return None
+
+
+def format_authuser_value(authuser: int = 0, account_email: str | None = None) -> str:
+    """Return the explicit NotebookLM auth routing value.
+
+    Google accepts either an integer account index or the account email in the
+    ``authuser`` field. Email is stable across browser account reordering, so it
+    wins when available; otherwise callers retain the existing integer behavior.
+    """
+    if account_email:
+        stripped = account_email.strip()
+        if stripped:
+            return stripped
+    return str(authuser)
+
+
+def authuser_query(authuser: int = 0, account_email: str | None = None) -> str:
+    """Return a URL-encoded ``authuser=...`` query string."""
+    return urlencode({"authuser": format_authuser_value(authuser, account_email)})
 
 
 def write_account_metadata(storage_path: Path, *, authuser: int, email: str | None = None) -> None:
@@ -2189,6 +2234,8 @@ async def _fetch_tokens_with_refresh(
     profile: str | None = None,
     *,
     authuser: int = 0,
+    account_email: str | None = None,
+    force_authuser_query: bool = False,
 ) -> tuple[str, str, bool, CookieSnapshot | None]:
     """Fetch tokens, optionally running NOTEBOOKLM_REFRESH_CMD on auth expiry.
 
@@ -2206,7 +2253,12 @@ async def _fetch_tokens_with_refresh(
     happened; caller's pre-fetch snapshot is still the right baseline).
     """
     try:
-        csrf, session_id = await _fetch_tokens_with_jar(cookie_jar, storage_path, authuser=authuser)
+        route_kwargs: dict[str, Any] = {"authuser": authuser}
+        if account_email is not None:
+            route_kwargs["account_email"] = account_email
+        if force_authuser_query:
+            route_kwargs["force_authuser_query"] = True
+        csrf, session_id = await _fetch_tokens_with_jar(cookie_jar, storage_path, **route_kwargs)
         return csrf, session_id, False, None
     except ValueError as err:
         if not _should_try_refresh(err):
@@ -2230,8 +2282,13 @@ async def _fetch_tokens_with_refresh(
                 # Capture the baseline NOW — after the wholesale replacement
                 # but before the retry fetch can mutate the jar.
                 post_refresh_snapshot = snapshot_cookie_jar(cookie_jar)
+            route_kwargs = {"authuser": authuser}
+            if account_email is not None:
+                route_kwargs["account_email"] = account_email
+            if force_authuser_query:
+                route_kwargs["force_authuser_query"] = True
             csrf, session_id = await _fetch_tokens_with_jar(
-                cookie_jar, refresh_storage_path, authuser=authuser
+                cookie_jar, refresh_storage_path, **route_kwargs
             )
             return csrf, session_id, True, post_refresh_snapshot
         finally:
@@ -2581,7 +2638,12 @@ async def _rotate_cookies(client: httpx.AsyncClient, storage_path: Path | None =
 
 
 async def _fetch_tokens_with_jar(
-    cookie_jar: httpx.Cookies, storage_path: Path | None = None, *, authuser: int = 0
+    cookie_jar: httpx.Cookies,
+    storage_path: Path | None = None,
+    *,
+    authuser: int = 0,
+    account_email: str | None = None,
+    force_authuser_query: bool = False,
 ) -> tuple[str, str]:
     """Internal: fetch CSRF and session tokens using a pre-built cookie jar.
 
@@ -2597,9 +2659,13 @@ async def _fetch_tokens_with_jar(
         cookie_jar: httpx.Cookies jar with auth cookies (domain-preserving or fallback).
         storage_path: Optional storage_state.json path, forwarded to
             ``_poke_session`` to gate the rotation poke.
-        authuser: Google ``authuser`` index to authenticate as. ``0`` (the
-            default account) keeps the URL identical to pre-multi-account
-            behavior; non-zero values append ``?authuser=N``.
+        authuser: Google account index to authenticate as. ``0`` is the
+            default account.
+        account_email: Stable account email to use instead of the integer
+            index when known.
+        force_authuser_query: Append ``?authuser=0`` when callers explicitly
+            requested account index 0. Implicit default-account calls leave the
+            URL byte-identical to pre-multi-account behavior.
 
     Returns:
         Tuple of (csrf_token, session_id)
@@ -2613,12 +2679,9 @@ async def _fetch_tokens_with_jar(
     async with httpx.AsyncClient(cookies=cookie_jar) as client:
         await _poke_session(client, storage_path)
 
-        # Append ?authuser=N only for non-default accounts: keeps the URL
-        # byte-identical for the common authuser=0 case so existing tests
-        # and downstream caches don't see a spurious change.
         url = f"{get_base_url()}/"
-        if authuser:
-            url = f"{url}?authuser={authuser}"
+        if account_email or authuser or force_authuser_query:
+            url = f"{url}?{authuser_query(authuser, account_email)}"
         response = await client.get(
             url,
             follow_redirects=True,
@@ -2648,8 +2711,37 @@ async def _fetch_tokens_with_jar(
         return csrf, session_id
 
 
+def _resolve_token_route_kwargs(
+    storage_path: Path | None,
+    *,
+    authuser: int | None,
+    account_email: str | None,
+) -> dict[str, Any]:
+    """Resolve token-fetch routing while preserving explicit caller intent."""
+    explicit_authuser = authuser is not None
+    resolved_authuser = get_authuser_for_storage(storage_path) if authuser is None else authuser
+    if account_email is not None:
+        resolved_account_email = account_email
+    elif explicit_authuser:
+        resolved_account_email = None
+    else:
+        resolved_account_email = get_account_email_for_storage(storage_path)
+
+    route_kwargs: dict[str, Any] = {"authuser": resolved_authuser}
+    if resolved_account_email is not None:
+        route_kwargs["account_email"] = resolved_account_email
+    if explicit_authuser:
+        route_kwargs["force_authuser_query"] = True
+    return route_kwargs
+
+
 async def fetch_tokens(
-    cookies: CookieInput, storage_path: Path | None = None, profile: str | None = None
+    cookies: CookieInput,
+    storage_path: Path | None = None,
+    profile: str | None = None,
+    *,
+    authuser: int | None = None,
+    account_email: str | None = None,
 ) -> tuple[str, str]:
     """Fetch tokens from a cookie mapping. For backward compatibility.
 
@@ -2664,6 +2756,10 @@ async def fetch_tokens(
         cookies: Google auth cookies. Mutated in place on refresh.
         storage_path: Optional storage_state.json path to reload after refresh.
         profile: Optional profile name exposed to the refresh command.
+        authuser: Optional explicit Google account index. Defaults to the
+            persisted profile value, or 0 when none exists.
+        account_email: Optional explicit Google account email. When provided,
+            it is used as the auth routing value instead of the integer index.
 
     Returns:
         Tuple of (csrf_token, session_id)
@@ -2674,9 +2770,13 @@ async def fetch_tokens(
         RuntimeError: If ``NOTEBOOKLM_REFRESH_CMD`` is set but fails
     """
     jar = build_cookie_jar(cookies=cookies, storage_path=storage_path)
-    authuser = get_authuser_for_storage(storage_path)
+    route_kwargs = _resolve_token_route_kwargs(
+        storage_path,
+        authuser=authuser,
+        account_email=account_email,
+    )
     csrf, session_id, refreshed, _post_refresh_snapshot = await _fetch_tokens_with_refresh(
-        jar, storage_path, profile, authuser=authuser
+        jar, storage_path, profile, **route_kwargs
     )
     if refreshed:
         fresh = _cookie_map_from_jar(jar)
@@ -2685,7 +2785,11 @@ async def fetch_tokens(
 
 
 async def fetch_tokens_with_domains(
-    path: Path | None = None, profile: str | None = None
+    path: Path | None = None,
+    profile: str | None = None,
+    *,
+    authuser: int | None = None,
+    account_email: str | None = None,
 ) -> tuple[str, str]:
     """Fetch tokens with domain-preserving cookies from storage.
 
@@ -2696,6 +2800,10 @@ async def fetch_tokens_with_domains(
     Args:
         path: Path to storage_state.json. If provided, takes precedence over env vars.
         profile: Optional profile name exposed to the refresh command.
+        authuser: Optional explicit Google account index. Defaults to the
+            persisted profile value, or 0 when none exists.
+        account_email: Optional explicit Google account email. When provided,
+            it is used as the auth routing value instead of the integer index.
 
     Returns:
         Tuple of (csrf_token, session_id)
@@ -2709,13 +2817,13 @@ async def fetch_tokens_with_domains(
     if path is None and (profile is not None or "NOTEBOOKLM_AUTH_JSON" not in os.environ):
         path = get_storage_path(profile=profile)
     jar = build_httpx_cookies_from_storage(path)
-    authuser = get_authuser_for_storage(path)
+    route_kwargs = _resolve_token_route_kwargs(path, authuser=authuser, account_email=account_email)
     # Capture the open-time snapshot before any rotation could fire. The
     # snapshot is the input to the dirty-flag/delta merge that closes the
     # stale-overwrite-fresh race (docs/auth-keepalive.md §3.4.1).
     snapshot = snapshot_cookie_jar(jar)
     csrf, session_id, refreshed, post_refresh_snapshot = await _fetch_tokens_with_refresh(
-        jar, path, profile, authuser=authuser
+        jar, path, profile, **route_kwargs
     )
     if refreshed and post_refresh_snapshot is not None:
         # NOTEBOOKLM_REFRESH_CMD replaced the jar wholesale. Use the snapshot

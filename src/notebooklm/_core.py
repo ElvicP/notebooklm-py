@@ -21,6 +21,7 @@ from .auth import (
     _rotate_cookies,
     advance_cookie_snapshot_after_save,
     build_cookie_jar,
+    format_authuser_value,
     save_cookies_to_storage,
     snapshot_cookie_jar,
 )
@@ -462,14 +463,14 @@ class ClientCore:
             "rt": "c",
         }
         # Multi-account: route batchexecute to the same Google account the
-        # auth tokens were minted for. Without this, a profile authenticated
-        # as authuser=1 would still hit account 0 here, and Google rejects
-        # the resulting CSRF/session combination with HTTP 400. Mirrors the
-        # ``?authuser=N`` we already append in ``_fetch_tokens_with_jar``;
-        # default ``authuser=0`` is omitted to keep URLs byte-identical to
-        # pre-multi-account behavior.
-        if self.auth.authuser:
-            params["authuser"] = str(self.auth.authuser)
+        # auth tokens were minted for. Email is preferred when known because
+        # Google's integer account indices can change as browser accounts are
+        # added or removed.
+        if self.auth.account_email or self.auth.authuser:
+            params["authuser"] = format_authuser_value(
+                self.auth.authuser,
+                self.auth.account_email,
+            )
         return f"{get_batchexecute_url()}?{urlencode(params)}"
 
     async def rpc_call(

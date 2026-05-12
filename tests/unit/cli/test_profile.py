@@ -82,6 +82,5 @@ class TestProfileListAccountMetadata:
                 "active": True,
                 "authenticated": True,
                 "account": "bob@gmail.com",
-                "authuser": 1,
             }
         ]

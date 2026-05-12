@@ -223,6 +223,7 @@ def _login_browser_cookies_single(
     browser_cookies: str,
     *,
     storage: str | None,
+    account_email: str | None,
     authuser: int | None,
     profile_name: str | None,
     active_profile: str | None,
@@ -233,23 +234,22 @@ def _login_browser_cookies_single(
 
     - ``--storage`` wins outright.
     - ``--profile-name`` selects a sibling profile under the home dir.
-    - ``--authuser`` defaults the new profile to the email's local-part
+    - ``--account`` defaults the new profile to the email's local-part
       when the user did not pass ``--profile-name``.
     - Otherwise we write to the active profile (existing behavior).
     """
     explicit_storage = Path(storage) if storage else None
 
-    if authuser is None and profile_name is None and explicit_storage is None:
+    if account_email is None and authuser is None and profile_name is None:
         # Path 1: existing behavior — extract default account into active profile.
-        resolved_storage = get_storage_path(profile=active_profile)
+        resolved_storage = explicit_storage or get_storage_path(profile=active_profile)
         _login_with_browser_cookies(resolved_storage, browser_cookies, active_profile)
         return
 
     # Path 2: targeted extraction. We need the email to derive a profile name
-    # (when --profile-name is omitted) and to pick the right authuser if the
-    # caller passed --profile-name without --authuser.
+    # when --profile-name is omitted.
     raw_cookies, accounts = _enumerate_browser_accounts(browser_cookies)
-    selected = _select_account(accounts, authuser=authuser)
+    selected = _select_account(accounts, account_email=account_email, authuser=authuser)
 
     target_profile = profile_name or email_to_profile_name(selected.email)
     if profile_name is not None:
@@ -331,21 +331,39 @@ def _login_all_accounts_from_browser(browser_cookies: str) -> None:
         )
 
 
-def _select_account(accounts: list[Any], *, authuser: int | None) -> Any:
+def _select_account(
+    accounts: list[Any],
+    *,
+    account_email: str | None,
+    authuser: int | None,
+) -> Any:
     """Pick the requested account from a discovery result.
 
-    ``None`` selects the default account (authuser=0). An out-of-range
-    ``authuser`` aborts with a list of available indices.
+    Email is the user-facing selector because it is stable across browser
+    account reordering. ``authuser`` remains as a hidden compatibility escape
+    hatch for existing scripts.
     """
+    if account_email:
+        requested = account_email.strip().casefold()
+        for account in accounts:
+            if account.email.casefold() == requested:
+                return account
+        available = ", ".join(a.email for a in accounts)
+        console.print(
+            f"[red]Account {account_email} not found among signed-in accounts.[/red]\n"
+            f"Available accounts: {available}"
+        )
+        raise SystemExit(1)
     if authuser is None:
         return next(a for a in accounts if a.is_default)
     for account in accounts:
         if account.authuser == authuser:
             return account
-    available = ", ".join(f"{a.authuser}={a.email}" for a in accounts)
+    available = ", ".join(a.email for a in accounts)
     console.print(
-        f"[red]authuser={authuser} not found among signed-in accounts.[/red]\n"
-        f"Available: {available}"
+        "[red]Requested browser account index was not found among signed-in "
+        "accounts.[/red]\n"
+        f"Available accounts: {available}"
     )
     raise SystemExit(1)
 
@@ -400,9 +418,7 @@ def _write_extracted_cookies(
         )
 
     if not quiet:
-        console.print(
-            f"  [green]✓[/green] {profile or storage_path}  " f"→  {email}  (authuser={authuser})"
-        )
+        console.print(f"  [green]✓[/green] {profile or storage_path}  →  {email}")
 
     # Verify cookies for the active account.
     try:
@@ -422,9 +438,9 @@ def _select_refresh_account(
 ) -> Any:
     """Select the browser account that should refresh the active profile.
 
-    ``context.json`` stores both the account email (stable identity) and
-    ``authuser`` (current Google account index). If the browser's account
-    order changed, email wins and the caller rewrites the cached index.
+    ``context.json`` stores both the account email (stable identity) and an
+    internal fallback index. If the browser's account order changed, email wins
+    and the caller rewrites the cached index.
     """
     expected_email = metadata.get("email")
     if isinstance(expected_email, str) and expected_email.strip():
@@ -432,7 +448,7 @@ def _select_refresh_account(
         for account in accounts:
             if isinstance(account.email, str) and account.email.casefold() == normalized:
                 return account
-        available = ", ".join(f"{a.authuser}={a.email}" for a in accounts) or "none"
+        available = ", ".join(a.email for a in accounts) or "none"
         console.print(
             f"[red]Profile account {expected_email} is not signed in to {browser_name}.[/red]\n"
             f"Available accounts: {available}\n"
@@ -447,10 +463,10 @@ def _select_refresh_account(
             if account.authuser == raw_authuser:
                 return account
         console.print(
-            f"[red]Profile stores authuser={raw_authuser}, but that browser index "
+            "[red]Profile stores an old account route, but that browser account "
             "is no longer available and context.json has no account email to repair from.[/red]\n"
             f"Run [cyan]notebooklm auth inspect --browser {browser_name}[/cyan], then "
-            f"[cyan]notebooklm login --browser-cookies {browser_name} --authuser N[/cyan]."
+            f"[cyan]notebooklm login --browser-cookies {browser_name} --account EMAIL[/cyan]."
         )
         raise SystemExit(1)
 
@@ -464,7 +480,7 @@ def _refresh_from_browser_cookies(
     profile: str | None,
     quiet: bool,
 ) -> None:
-    """Refresh the active profile from browser cookies, repairing authuser drift."""
+    """Refresh the active profile from browser cookies, repairing account drift."""
     raw_cookies, accounts = _enumerate_browser_accounts(browser_name, verbose=not quiet)
     if not accounts:
         console.print(f"[red]No signed-in Google accounts found in {browser_name}.[/red]")
@@ -472,8 +488,6 @@ def _refresh_from_browser_cookies(
 
     metadata = read_account_metadata(storage_path)
     selected = _select_refresh_account(accounts, metadata, browser_name)
-    previous_authuser = metadata.get("authuser")
-
     _write_extracted_cookies(
         raw_cookies,
         storage_path=storage_path,
@@ -484,12 +498,9 @@ def _refresh_from_browser_cookies(
     )
 
     if not quiet:
-        route = f"authuser={selected.authuser}"
-        if isinstance(previous_authuser, int) and previous_authuser != selected.authuser:
-            route = f"authuser {previous_authuser} -> {selected.authuser}"
         console.print(
             f"[green]ok[/green] refreshed from {browser_name}: {storage_path}\n"
-            f"[green]account[/green] {selected.email} ({route})"
+            f"[green]account[/green] {selected.email}"
         )
 
 
@@ -579,10 +590,8 @@ def _login_with_browser_cookies(
         storage_path: Where to write storage_state.json.
         browser_name: "auto" to use rookiepy.load(), or a specific browser name.
         profile: Profile name (forwarded to verification step).
-        authuser: Google ``authuser`` index this profile authenticates as.
-            ``0`` is the default account; non-zero records account metadata
-            in ``context.json`` so subsequent calls hit ``?authuser=N``.
-        email: Optional account email to record alongside the authuser index.
+        authuser: Internal Google account index fallback for this profile.
+        email: Optional account email to record for stable routing.
     """
     raw_cookies = _read_browser_cookies(browser_name)
 
@@ -612,11 +621,9 @@ def _login_with_browser_cookies(
         console.print(f"[red]Failed to save authentication to {storage_path}.[/red]\nDetails: {e}")
         raise SystemExit(1) from None
 
-    # Record the authuser index so future calls target the right Google
-    # account. Even on a default-account login (authuser=0, no email), we
-    # must remove any existing account metadata — otherwise a previous
-    # ``--authuser N`` extraction would silently keep routing the refreshed
-    # cookies to the old non-default account.
+    # Record account metadata so future calls target the same Google account.
+    # Even on a default-account login (authuser=0, no email), remove stale
+    # metadata so refreshed cookies cannot keep routing to an older account.
     if authuser or email:
         from ..auth import write_account_metadata
 
@@ -638,7 +645,7 @@ def _login_with_browser_cookies(
 
     saved_msg = f"\n[green]Authentication saved to:[/green] {storage_path}"
     if email:
-        saved_msg += f"\n[green]Account:[/green] {email} (authuser={authuser})"
+        saved_msg += f"\n[green]Account:[/green] {email}"
     console.print(saved_msg)
 
     # Verify that cookies work.
@@ -829,13 +836,21 @@ def register_session_commands(cli):
         ),
     )
     @click.option(
+        "--account",
+        "account_email",
+        default=None,
+        help=(
+            "Pick a signed-in Google account by email when several are present "
+            "in the browser. Only valid with --browser-cookies."
+        ),
+    )
+    @click.option(
         "--authuser",
         type=click.IntRange(min=0),
         default=None,
+        hidden=True,
         help=(
-            "Pick a non-default Google account when several are signed in to the "
-            "browser. 0 is the default. Use 'notebooklm auth inspect --browser <name>' "
-            "to list available accounts. Only valid with --browser-cookies."
+            "Internal compatibility option. Prefer --account EMAIL."
         ),
     )
     @click.option(
@@ -866,7 +881,17 @@ def register_session_commands(cli):
         help="Start with a clean browser session (deletes cached browser profile). Use to switch Google accounts.",
     )
     @click.pass_context
-    def login(ctx, storage, browser, browser_cookies, authuser, all_accounts, profile_name, fresh):
+    def login(
+        ctx,
+        storage,
+        browser,
+        browser_cookies,
+        account_email,
+        authuser,
+        all_accounts,
+        profile_name,
+        fresh,
+    ):
         """Log in to NotebookLM via browser.
 
         Opens a browser window for Google login. After logging in,
@@ -890,17 +915,28 @@ def register_session_commands(cli):
             raise SystemExit(1)
 
         if browser_cookies is None and (
-            authuser is not None or all_accounts or profile_name is not None
+            account_email is not None
+            or authuser is not None
+            or all_accounts
+            or profile_name is not None
         ):
             console.print(
-                "[red]Error: --authuser, --all-accounts, and --profile-name "
+                "[red]Error: --account, --all-accounts, and --profile-name "
                 "require --browser-cookies.[/red]"
             )
             raise SystemExit(1)
-        if all_accounts and (authuser is not None or profile_name is not None):
+        if account_email is not None and authuser is not None:
+            console.print(
+                "[red]Error: --account cannot be combined with the legacy "
+                "account-index option.[/red]"
+            )
+            raise SystemExit(1)
+        if all_accounts and (
+            account_email is not None or authuser is not None or profile_name is not None
+        ):
             console.print(
                 "[red]Error: --all-accounts cannot be combined with "
-                "--authuser or --profile-name.[/red]"
+                "--account or --profile-name.[/red]"
             )
             raise SystemExit(1)
         if all_accounts and storage:
@@ -924,6 +960,7 @@ def register_session_commands(cli):
             _login_browser_cookies_single(
                 browser_cookies,
                 storage=storage,
+                account_email=account_email,
                 authuser=authuser,
                 profile_name=profile_name,
                 active_profile=active_profile,
@@ -1444,8 +1481,8 @@ def register_session_commands(cli):
         """List Google accounts visible to a browser's cookie store.
 
         Read-only — never writes to disk. Use this before
-        ``notebooklm login --browser-cookies <browser>`` to see which
-        ``--authuser`` index maps to which email.
+        ``notebooklm login --browser-cookies <browser> --account <email>`` to
+        see which account emails are available.
 
         \b
         Examples:
@@ -1458,7 +1495,7 @@ def register_session_commands(cli):
                 {
                     "browser": browser_name,
                     "accounts": [
-                        {"authuser": a.authuser, "email": a.email, "is_default": a.is_default}
+                        {"email": a.email, "is_default": a.is_default}
                         for a in accounts
                     ],
                 }
@@ -1467,12 +1504,10 @@ def register_session_commands(cli):
         console.print(f"\n[bold]Browser:[/bold] {browser_name}")
         console.print(f"[bold]Found {len(accounts)} signed-in Google account(s):[/bold]\n")
         table = Table(show_header=True, header_style="bold")
-        table.add_column("authuser", justify="right")
         table.add_column("email")
         table.add_column("default", justify="center")
         for a in accounts:
             table.add_row(
-                str(a.authuser),
                 a.email,
                 "[green]✓[/green]" if a.is_default else "",
             )
@@ -1482,7 +1517,7 @@ def register_session_commands(cli):
             "browser's default user-data profile only. Accounts in other "
             "browser profiles will not appear here.[/dim]\n"
             "Pick one with: [cyan]notebooklm login --browser-cookies "
-            f"{browser_name} --authuser N[/cyan]\n"
+            f"{browser_name} --account EMAIL[/cyan]\n"
             "Or extract them all: [cyan]notebooklm login --browser-cookies "
             f"{browser_name} --all-accounts[/cyan]"
         )

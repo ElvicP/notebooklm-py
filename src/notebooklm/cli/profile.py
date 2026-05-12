@@ -100,7 +100,6 @@ def list_cmd(json_output):
         authenticated = storage.exists()
         account_metadata = read_account_metadata(storage)
         account_email = account_metadata.get("email")
-        account_authuser = account_metadata.get("authuser")
 
         profile_data.append(
             {
@@ -108,7 +107,6 @@ def list_cmd(json_output):
                 "active": is_active,
                 "authenticated": authenticated,
                 "account": account_email if isinstance(account_email, str) else None,
-                "authuser": account_authuser if isinstance(account_authuser, int) else None,
             }
         )
 
@@ -128,8 +126,6 @@ def list_cmd(json_output):
             "[green]authenticated[/green]" if p["authenticated"] else "[dim]not authenticated[/dim]"
         )
         account = str(p["account"] or "-")
-        if p["authuser"] is not None:
-            account = f"{account} (authuser={p['authuser']})"
         table.add_row(marker, str(p["name"]), account, auth_status)
 
     console.print(table)

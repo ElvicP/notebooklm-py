@@ -3485,10 +3485,10 @@ class TestAccountMetadata:
 
 
 class TestAuthuserPlumbing:
-    """fetch_tokens_with_domains must honor authuser persisted in context.json."""
+    """fetch_tokens_with_domains must honor account routing in context.json."""
 
     @pytest.mark.asyncio
-    async def test_fetch_tokens_with_domains_uses_persisted_authuser(
+    async def test_fetch_tokens_with_domains_prefers_persisted_email(
         self, tmp_path, httpx_mock: HTTPXMock
     ):
         from notebooklm.auth import fetch_tokens_with_domains, write_account_metadata
@@ -3510,9 +3510,10 @@ class TestAuthuserPlumbing:
         )
         write_account_metadata(storage, authuser=2, email="bob@example.com")
 
-        # Token fetch must hit ?authuser=2, not the default URL.
+        # Token fetch must use the stable email route, not the reorder-prone
+        # integer index.
         httpx_mock.add_response(
-            url="https://notebooklm.google.com/?authuser=2",
+            url="https://notebooklm.google.com/?authuser=bob%40example.com",
             content=b'"SNlM0e":"csrf_v2" "FdrFJe":"sess_v2"',
         )
 
@@ -3521,3 +3522,64 @@ class TestAuthuserPlumbing:
         assert session_id == "sess_v2"
         # If pytest-httpx had to fall back to a default match, the assert above
         # would fail; the explicit URL match is the contract.
+
+    @pytest.mark.asyncio
+    async def test_fetch_tokens_with_domains_uses_explicit_authuser_without_email(
+        self, tmp_path, httpx_mock: HTTPXMock
+    ):
+        from notebooklm.auth import fetch_tokens_with_domains
+
+        storage = tmp_path / "storage_state.json"
+        storage.write_text(
+            json.dumps(
+                {
+                    "cookies": [
+                        {"name": "SID", "value": "x", "domain": ".google.com"},
+                        {"name": "HSID", "value": "x", "domain": ".google.com"},
+                        {"name": "SSID", "value": "x", "domain": ".google.com"},
+                        {"name": "APISID", "value": "x", "domain": ".google.com"},
+                        {"name": "SAPISID", "value": "x", "domain": ".google.com"},
+                        {"name": "__Secure-1PSIDTS", "value": "x", "domain": ".google.com"},
+                    ]
+                }
+            )
+        )
+        httpx_mock.add_response(
+            url="https://notebooklm.google.com/?authuser=2",
+            content=b'"SNlM0e":"csrf_v2" "FdrFJe":"sess_v2"',
+        )
+
+        csrf, session_id = await fetch_tokens_with_domains(storage, authuser=2)
+        assert csrf == "csrf_v2"
+        assert session_id == "sess_v2"
+
+    @pytest.mark.asyncio
+    async def test_explicit_authuser_overrides_persisted_email(
+        self, tmp_path, httpx_mock: HTTPXMock
+    ):
+        from notebooklm.auth import fetch_tokens_with_domains, write_account_metadata
+
+        storage = tmp_path / "storage_state.json"
+        storage.write_text(
+            json.dumps(
+                {
+                    "cookies": [
+                        {"name": "SID", "value": "x", "domain": ".google.com"},
+                        {"name": "HSID", "value": "x", "domain": ".google.com"},
+                        {"name": "SSID", "value": "x", "domain": ".google.com"},
+                        {"name": "APISID", "value": "x", "domain": ".google.com"},
+                        {"name": "SAPISID", "value": "x", "domain": ".google.com"},
+                        {"name": "__Secure-1PSIDTS", "value": "x", "domain": ".google.com"},
+                    ]
+                }
+            )
+        )
+        write_account_metadata(storage, authuser=2, email="bob@example.com")
+        httpx_mock.add_response(
+            url="https://notebooklm.google.com/?authuser=0",
+            content=b'"SNlM0e":"csrf_v2" "FdrFJe":"sess_v2"',
+        )
+
+        csrf, session_id = await fetch_tokens_with_domains(storage, authuser=0)
+        assert csrf == "csrf_v2"
+        assert session_id == "sess_v2"

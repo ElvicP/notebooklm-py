@@ -208,6 +208,29 @@ class TestRefreshAuth:
             assert client.auth.session_id == "new_session_id_456"
 
     @pytest.mark.asyncio
+    async def test_refresh_auth_routes_to_account_email(self, httpx_mock: HTTPXMock):
+        """Refresh should fetch tokens for the same selected browser account."""
+        auth = AuthTokens(
+            cookies={"SID": "test_sid", "__Secure-1PSIDTS": "test_1psidts", "HSID": "test_hsid"},
+            csrf_token="test_csrf",
+            session_id="test_session",
+            authuser=2,
+            account_email="bob@example.com",
+        )
+        client = NotebookLMClient(auth)
+        html = '"SNlM0e":"new_csrf_token_123" "FdrFJe":"new_session_id_456"'
+        httpx_mock.add_response(
+            url="https://notebooklm.google.com/?authuser=bob%40example.com",
+            content=html.encode(),
+        )
+
+        async with client:
+            refreshed_auth = await client.refresh_auth()
+
+        assert refreshed_auth.csrf_token == "new_csrf_token_123"
+        assert refreshed_auth.session_id == "new_session_id_456"
+
+    @pytest.mark.asyncio
     async def test_refresh_auth_redirect_to_login(self, mock_auth, httpx_mock: HTTPXMock):
         """Test refresh_auth raises error on redirect to login - by final URL check."""
         client = NotebookLMClient(mock_auth)
@@ -848,8 +871,7 @@ class TestRpcCallAutoRetry:
 
 
 class TestBuildUrlAuthuser:
-    """Regression for #359: batchexecute URL must include ``authuser=N`` when
-    AuthTokens carries a non-zero authuser, otherwise non-default profiles 400."""
+    """Regression for #359: batchexecute URL routes non-default profiles."""
 
     def test_default_authuser_omits_param(self):
         auth = AuthTokens(
@@ -871,3 +893,16 @@ class TestBuildUrlAuthuser:
         core = ClientCore(auth=auth)
         url = core._build_url(RPCMethod.LIST_NOTEBOOKS)
         assert "authuser=2" in url
+
+    def test_account_email_preferred_over_authuser_index(self):
+        auth = AuthTokens(
+            cookies={("SID", ".google.com"): "x"},
+            csrf_token="csrf",
+            session_id="sess",
+            authuser=2,
+            account_email="bob@example.com",
+        )
+        core = ClientCore(auth=auth)
+        url = core._build_url(RPCMethod.LIST_NOTEBOOKS)
+        assert "authuser=bob%40example.com" in url
+        assert "authuser=2" not in url
