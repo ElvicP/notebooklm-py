@@ -517,11 +517,12 @@ def generate_video(
         "paper-craft": VideoStyle.PAPER_CRAFT,
     }
     is_cinematic = video_format == "cinematic"
-    if is_cinematic and style_prompt:
+    normalized_style_prompt = style_prompt.strip() if style_prompt is not None else None
+    if is_cinematic and normalized_style_prompt:
         raise click.UsageError("--style-prompt cannot be used with cinematic video")
-    if not is_cinematic and style == "custom" and not style_prompt:
+    if not is_cinematic and style == "custom" and not normalized_style_prompt:
         raise click.UsageError("--style custom requires --style-prompt")
-    if not is_cinematic and style_prompt and style != "custom":
+    if not is_cinematic and normalized_style_prompt and style != "custom":
         raise click.UsageError("--style-prompt requires --style custom")
 
     async def _run():
@@ -544,7 +545,7 @@ def generate_video(
                     instructions=description or None,
                     video_format=format_map[video_format],
                     video_style=style_map[style],
-                    style_prompt=style_prompt,
+                    style_prompt=normalized_style_prompt,
                 )
 
             timeout = 1800.0 if is_cinematic else 600.0

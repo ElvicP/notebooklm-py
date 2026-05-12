@@ -447,11 +447,12 @@ class ArtifactsAPI:
         """
         if language is None:
             language = get_default_language()
-        if video_format == VideoFormat.CINEMATIC and style_prompt:
+        normalized_style_prompt = style_prompt.strip() if style_prompt is not None else None
+        if video_format == VideoFormat.CINEMATIC and normalized_style_prompt:
             raise ValidationError("style_prompt is not supported for cinematic videos")
-        if video_style == VideoStyle.CUSTOM and not style_prompt:
+        if video_style == VideoStyle.CUSTOM and not normalized_style_prompt:
             raise ValidationError("style_prompt is required when video_style is CUSTOM")
-        if style_prompt and video_style != VideoStyle.CUSTOM:
+        if normalized_style_prompt and video_style != VideoStyle.CUSTOM:
             raise ValidationError("style_prompt requires video_style=VideoStyle.CUSTOM")
 
         if source_ids is None:
@@ -471,8 +472,8 @@ class ArtifactsAPI:
             format_code,
             style_code,
         ]
-        if style_prompt:
-            video_config.append(style_prompt)
+        if normalized_style_prompt:
+            video_config.append(normalized_style_prompt)
 
         params = [
             [2],

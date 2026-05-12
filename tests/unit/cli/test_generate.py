@@ -189,7 +189,7 @@ class TestGenerateVideo:
                         "--style",
                         "custom",
                         "--style-prompt",
-                        "Use hand-drawn diagrams",
+                        "  Use hand-drawn diagrams  ",
                         "-n",
                         "nb_123",
                     ],
@@ -207,6 +207,26 @@ class TestGenerateVideo:
         result = runner.invoke(
             cli,
             ["generate", "video", "--style", "custom", "-n", "nb_123"],
+        )
+
+        assert result.exit_code == 1
+        assert "--style custom requires --style-prompt" in result.output
+
+    def test_generate_video_custom_style_rejects_blank_prompt(
+        self, runner, mock_auth, mock_fetch_tokens
+    ):
+        result = runner.invoke(
+            cli,
+            [
+                "generate",
+                "video",
+                "--style",
+                "custom",
+                "--style-prompt",
+                "   ",
+                "-n",
+                "nb_123",
+            ],
         )
 
         assert result.exit_code == 1

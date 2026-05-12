@@ -292,7 +292,7 @@ class TestArtifactsSourceSelection:
             notebook_id="nb_123",
             source_ids=["src_a"],
             video_style=VideoStyle.CUSTOM,
-            style_prompt="Use hand-drawn diagrams",
+            style_prompt="  Use hand-drawn diagrams  ",
         )
 
         params = mock_core.rpc_call.call_args.args[1]
@@ -323,6 +323,20 @@ class TestArtifactsSourceSelection:
                 source_ids=["src_a"],
                 video_style=VideoStyle.CUSTOM,
                 style_prompt="",
+            )
+
+    @pytest.mark.asyncio
+    async def test_generate_video_custom_style_rejects_blank_prompt(
+        self, mock_core, mock_notes_api
+    ):
+        api = ArtifactsAPI(mock_core, mock_notes_api)
+
+        with pytest.raises(ValidationError, match="style_prompt is required"):
+            await api.generate_video(
+                notebook_id="nb_123",
+                source_ids=["src_a"],
+                video_style=VideoStyle.CUSTOM,
+                style_prompt="   ",
             )
 
     @pytest.mark.asyncio
