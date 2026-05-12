@@ -576,26 +576,27 @@ class SourcesAPI:
         #
         # When wait=True the caller asked for full processing; use
         # wait_until_ready. When only a custom title was supplied, use the
-        # narrower wait_until_registered (default 30s) so wait=False callers
-        # don't pay the full processing latency just to get a rename through.
+        # narrower wait_until_registered so wait=False callers don't pay the
+        # full processing latency just to get a rename through.
         needs_title_rename = title is not None and title != filename
         if wait:
             source = await self.wait_until_ready(notebook_id, source_id, timeout=wait_timeout)
         elif needs_title_rename:
-            # Cap the narrow wait at min(wait_timeout, 30) — registration is
-            # fast (seconds), so honor a tighter user-supplied bound but cap
-            # the default at 30s rather than blocking on full processing.
-            registered_timeout = min(wait_timeout, 30.0)
-            source = await self.wait_until_registered(
-                notebook_id, source_id, timeout=registered_timeout
-            )
+            # Honor the caller's wait_timeout directly — wait_until_registered
+            # polls and returns on the first PROCESSING/READY status, so the
+            # narrow wait still completes fast for typical sources even when
+            # the upper bound is generous (e.g. long-audio callers passing 300s).
+            source = await self.wait_until_registered(notebook_id, source_id, timeout=wait_timeout)
         else:
-            # Note: _type_code is None because the actual type is determined
-            # by the API after processing (PDF, TEXT, IMAGE, etc.). Callers
-            # can use wait=True or get() to retrieve the resolved type.
+            # Fire-and-forget placeholder. _type_code is None because the
+            # actual type is determined by the API after processing (PDF,
+            # TEXT, IMAGE, etc.). status=PROCESSING reflects that the source
+            # has been registered but not yet processed — callers can use
+            # wait=True or get() to retrieve the resolved state.
             source = Source(
                 id=source_id,
                 title=filename,
+                status=SourceStatus.PROCESSING,
                 _type_code=None,  # Placeholder until processed
             )
 

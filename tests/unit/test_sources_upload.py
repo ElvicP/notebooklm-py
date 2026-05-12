@@ -6,6 +6,7 @@ import pytest
 
 from notebooklm._sources import SourcesAPI
 from notebooklm.exceptions import NetworkError, RPCError, ValidationError
+from notebooklm.rpc.types import SourceStatus
 from notebooklm.types import Source
 
 
@@ -526,8 +527,12 @@ class TestAddFile:
         assert mock_core.rpc_call.call_count == 2
         rename_params = mock_core.rpc_call.call_args_list[1].args[1]
         assert rename_params == [None, ["src_md"], [[["Real Intended Title"]]]]
-        # Narrow wait (default 30s cap) — not the full wait_until_ready.
-        sources_api.wait_until_registered.assert_awaited_once_with("nb_123", "src_md", timeout=30.0)
+        # Narrow wait uses the caller's wait_timeout (default 120s) — not the
+        # full wait_until_ready. wait_until_registered returns on first
+        # PROCESSING/READY status so the bound stays cheap in practice.
+        sources_api.wait_until_registered.assert_awaited_once_with(
+            "nb_123", "src_md", timeout=120.0
+        )
         sources_api.wait_until_ready.assert_not_called()
 
     @pytest.mark.asyncio
@@ -596,8 +601,10 @@ class TestAddFile:
         ]
 
         async def wait_side_effect(notebook_id, source_id, *, timeout):
-            # Narrow registration wait — default cap is 30s for wait=False.
-            assert timeout == 30.0
+            # Narrow registration wait — wait_timeout default (120s) is forwarded
+            # verbatim. wait_until_registered returns on the first non-PREPARING
+            # status, so the bound stays cheap.
+            assert timeout == 120.0
             # Wait runs BEFORE the rename: at this point only the register
             # RPC has been issued.
             assert mock_core.rpc_call.call_count == 1
@@ -624,16 +631,20 @@ class TestAddFile:
             )
 
         assert result.title == "Real Intended Title"
-        sources_api.wait_until_registered.assert_awaited_once_with("nb_123", "src_md", timeout=30.0)
+        sources_api.wait_until_registered.assert_awaited_once_with(
+            "nb_123", "src_md", timeout=120.0
+        )
         sources_api.wait_until_ready.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_add_file_with_title_forwards_wait_timeout(
         self, sources_api, mock_core, tmp_path
     ):
-        """The caller's wait_timeout must cap the narrow registration wait, but
-        the wait stays narrow (capped at 30s default) when wait=False — large
-        wait_timeout values don't extend the forced-wait beyond the cap.
+        """The caller's wait_timeout must be forwarded verbatim to the narrow
+        registration wait. The wait_until_registered helper polls and returns
+        on first PROCESSING/READY response, so generous bounds (e.g. long
+        audio uploads passing wait_timeout=600) stay cheap in practice while
+        still honoring the caller's intent if registration is unusually slow.
         """
         test_file = tmp_path / "podcast.mp3"
         test_file.write_bytes(b"fake audio")
@@ -666,9 +677,9 @@ class TestAddFile:
                 wait_timeout=600.0,
             )
 
-        # min(600.0, 30.0) = 30.0 — narrow wait stays narrow.
+        # wait_timeout is forwarded directly — no min() cap.
         sources_api.wait_until_registered.assert_awaited_once_with(
-            "nb_123", "src_audio", timeout=30.0
+            "nb_123", "src_audio", timeout=600.0
         )
         sources_api.wait_until_ready.assert_not_called()
 
@@ -699,6 +710,39 @@ class TestAddFile:
         assert result.id == "src_pdf"
         assert result.title == "test.pdf"
         sources_api.wait_until_ready.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_add_file_no_title_no_wait_returns_processing_status(
+        self, sources_api, mock_core, tmp_path
+    ):
+        """The fire-and-forget placeholder Source returned when wait=False and
+        no custom title is supplied must carry status=PROCESSING. Previously
+        it defaulted to READY, so callers saw is_ready=True on a source that
+        had only just been registered. Regression guard for the CodeRabbit
+        comment on #396.
+        """
+        test_file = tmp_path / "test.pdf"
+        test_file.write_bytes(b"fake pdf content")
+
+        mock_core.rpc_call.return_value = [[[["src_pdf"]]]]
+        sources_api.wait_until_ready = AsyncMock()
+
+        mock_start_response = MagicMock()
+        mock_start_response.headers = {"x-goog-upload-url": "https://upload.example.com"}
+        mock_upload_response = MagicMock()
+
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.__aenter__.return_value = mock_client
+            mock_client.__aexit__.return_value = None
+            mock_client.post.side_effect = [mock_start_response, mock_upload_response]
+            mock_client_cls.return_value = mock_client
+
+            result = await sources_api.add_file("nb_123", str(test_file))
+
+        assert result.status == SourceStatus.PROCESSING
+        assert result.is_processing is True
+        assert result.is_ready is False
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("title", ["", "   "])
