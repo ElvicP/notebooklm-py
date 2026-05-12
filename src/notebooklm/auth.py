@@ -40,6 +40,7 @@ import sys
 import tempfile
 import threading
 import time
+import warnings
 import weakref
 from collections.abc import Iterator
 from contextvars import ContextVar
@@ -400,14 +401,17 @@ class AuthTokens:
         # merge in save_cookies_to_storage will then write only what this
         # process actually rotated, preserving sibling-process state.
         snapshot = snapshot_cookie_jar(jar)
-        csrf_token, session_id, refreshed = await _fetch_tokens_with_refresh(jar, path, profile)
+        csrf_token, session_id, refreshed, post_refresh_snapshot = await _fetch_tokens_with_refresh(
+            jar, path, profile
+        )
 
-        # If NOTEBOOKLM_REFRESH_CMD ran, the jar was wholesale replaced from
-        # disk and the pre-fetch ``snapshot`` no longer describes our baseline.
-        # Re-snapshot so the save writes only what changed since the refresh
-        # (typically nothing — refresh-cmd already wrote the disk state).
-        if refreshed:
-            snapshot = snapshot_cookie_jar(jar)
+        # If NOTEBOOKLM_REFRESH_CMD ran, ``_fetch_tokens_with_refresh`` captured
+        # a snapshot immediately after the jar was wholesale-replaced from
+        # disk — before the retry fetch could mutate it with redirect
+        # Set-Cookies. Use that snapshot so the retry's rotations land on
+        # disk as deltas instead of being silently absorbed into the baseline.
+        if refreshed and post_refresh_snapshot is not None:
+            snapshot = post_refresh_snapshot
 
         # Persist any refreshed cookies from the token fetch
         save_cookies_to_storage(jar, path, original_snapshot=snapshot)
@@ -1139,6 +1143,9 @@ def _file_lock(lock_path: Path, *, blocking: bool, log_prefix: str) -> Iterator[
         os.close(fd)
 
 
+_FLOCK_UNAVAILABLE_WARNED = False
+
+
 @contextlib.contextmanager
 def _file_lock_exclusive(lock_path: Path) -> Iterator[None]:
     """Blocking cross-process exclusive lock on ``lock_path``.
@@ -1152,10 +1159,25 @@ def _file_lock_exclusive(lock_path: Path) -> Iterator[None]:
 
     The lock is per-process: threads within one process aren't serialized —
     that's the intra-process ``threading.Lock`` in ``ClientCore``. If the
-    lock can't be acquired (e.g. NFS where flock semantics vary), the save
-    proceeds anyway; correctness on NFS is best-effort.
+    lock can't be acquired (e.g. NFS where flock semantics vary, read-only
+    parent dir, fd exhaustion), the save proceeds anyway; correctness in
+    that mode is best-effort and relies on the snapshot/delta CAS guards in
+    :func:`_merge_cookies_with_snapshot` alone. The first time this
+    fallback fires per process emits a WARNING so operators learn their
+    deployment is running without cross-process coordination.
     """
-    with _file_lock(lock_path, blocking=True, log_prefix="save_cookies_to_storage"):
+    global _FLOCK_UNAVAILABLE_WARNED
+    with _file_lock(lock_path, blocking=True, log_prefix="save_cookies_to_storage") as state:
+        if state == "unavailable" and not _FLOCK_UNAVAILABLE_WARNED:
+            _FLOCK_UNAVAILABLE_WARNED = True
+            logger.warning(
+                "Cross-process file lock unavailable at %s; cookie saves will "
+                "proceed without cross-process coordination and rely solely on "
+                "snapshot/delta CAS guards. Common causes: NFS without flock "
+                "support, read-only parent directory, fd exhaustion. (Logged "
+                "once per process.)",
+                lock_path,
+            )
         yield
 
 
@@ -1224,7 +1246,7 @@ def save_cookies_to_storage(
     path: Path | None = None,
     *,
     original_snapshot: CookieSnapshot | None = None,
-) -> None:
+) -> bool:
     """Save an updated httpx.Cookies jar back to Playwright storage_state.json.
 
     This ensures that when Google issues short-lived token refreshes (e.g.
@@ -1242,13 +1264,11 @@ def save_cookies_to_storage(
     Two merge modes:
 
     - **Legacy (``original_snapshot=None``)**: every in-memory cookie whose
-      value differs from disk wins. This is the historical behavior and is
-      kept for back-compat with callers that pre-date the snapshot API.
-      It is vulnerable to the stale-overwrite-fresh race documented in
-      ``docs/auth-keepalive.md`` §3.4.1: a process holding stale in-memory
-      state will silently clobber a sibling's freshly-rotated cookie.
-      TODO: opt every in-tree caller into snapshot semantics, then
-      remove this branch.
+      value differs from disk wins. Vulnerable to the stale-overwrite-fresh
+      race documented in ``docs/auth-keepalive.md`` §3.4.1 and emits a
+      ``DeprecationWarning``. Kept only as a public-API back-compat shim
+      for callers outside this repo; every first-party caller passes
+      ``original_snapshot``.
     - **Snapshot/delta (``original_snapshot`` provided)**: only cookies
       whose in-memory value differs from the snapshot are written, and
       cookies present in the snapshot but no longer in the jar are
@@ -1263,6 +1283,15 @@ def save_cookies_to_storage(
         original_snapshot: Open-time snapshot from
             :func:`snapshot_cookie_jar`. When provided, only deltas and
             deletions relative to the snapshot are persisted.
+
+    Returns:
+        ``True`` if the disk state now reflects the caller's intent (write
+        succeeded, was a successful no-op, or the call was a deliberate skip
+        because auth was loaded from an env var). ``False`` if an I/O error
+        prevented the save and the disk state may not match the in-memory
+        jar; callers using the snapshot/delta path should NOT advance their
+        baseline in that case so the failed delta gets retried on the next
+        save (see ``ClientCore.save_cookies``).
     """
     if (
         not path
@@ -1270,57 +1299,85 @@ def save_cookies_to_storage(
         and os.environ["NOTEBOOKLM_AUTH_JSON"].strip()
     ):
         logger.debug("Skipping cookie sync: Auth loaded from NOTEBOOKLM_AUTH_JSON env var")
-        return
+        return True
 
     if not path:
         logger.debug("Skipping cookie sync: No storage file path available")
-        return
+        return True
+
+    if original_snapshot is None:
+        warnings.warn(
+            "save_cookies_to_storage called without original_snapshot; the "
+            "legacy full-merge path is vulnerable to the stale-overwrite-fresh "
+            "race (docs/auth-keepalive.md §3.4.1). Pass an original_snapshot "
+            "captured via snapshot_cookie_jar() at jar-open time.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
     lock_path = path.with_name(f".{path.name}.lock")
     with _file_lock_exclusive(lock_path):
         if not path.exists():
             logger.debug("Skipping cookie sync: Storage file not found at %s", path)
-            return
+            return False
 
         try:
             storage_data = json.loads(path.read_text(encoding="utf-8"))
         except Exception as e:
             logger.warning("Failed to read storage state for cookie sync: %s", e)
-            return
+            return False
 
         if not isinstance(storage_data, dict) or "cookies" not in storage_data:
-            return
+            logger.warning(
+                "storage_state at %s lacks 'cookies' key; rotated cookies will not be persisted",
+                path,
+            )
+            return False
 
         if original_snapshot is None:
             updated_count = _merge_cookies_legacy(cookie_jar, storage_data)
+            cas_rejected = False
         else:
-            updated_count = _merge_cookies_with_snapshot(
+            updated_count, cas_rejected = _merge_cookies_with_snapshot(
                 cookie_jar, storage_data, original_snapshot
             )
 
-        if updated_count > 0:
-            temp_path: Path | None = None
-            try:
-                with tempfile.NamedTemporaryFile(
-                    "w",
-                    encoding="utf-8",
-                    dir=path.parent,
-                    prefix=f".{path.name}.",
-                    suffix=".tmp",
-                    delete=False,
-                ) as temp_file:
-                    temp_file.write(json.dumps(storage_data, indent=2, ensure_ascii=False))
-                    temp_path = Path(temp_file.name)
-                os.chmod(temp_path, 0o600)
-                temp_path.replace(path)
-                logger.debug("Successfully synced %d refreshed cookies to %s", updated_count, path)
-            except Exception as e:
-                logger.warning("Failed to write updated cookies to %s: %s", path, e)
-                if temp_path is not None:
-                    try:
-                        temp_path.unlink(missing_ok=True)
-                    except Exception as cleanup_err:
-                        logger.debug("Failed to clean up temp file %s: %s", temp_path, cleanup_err)
+        if updated_count == 0:
+            # A CAS rejection with no other successful work means disk does
+            # not reflect our intent; the caller must not advance baseline.
+            return not cas_rejected
+
+        temp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temp_file:
+                # Capture the temp path BEFORE the write so the cleanup-on-
+                # failure branch can still unlink it if write() raises (ENOSPC,
+                # EROFS). Without this, partial temp files leak into the
+                # storage parent dir on every save attempt.
+                temp_path = Path(temp_file.name)
+                temp_file.write(json.dumps(storage_data, indent=2, ensure_ascii=False))
+            os.chmod(temp_path, 0o600)
+            temp_path.replace(path)
+            logger.debug("Successfully synced %d refreshed cookies to %s", updated_count, path)
+            # Even on a successful disk write, if any CAS arm rejected work,
+            # disk diverges from ``post`` for at least one key — caller must
+            # not advance baseline.
+            return not cas_rejected
+        except Exception as e:
+            logger.warning("Failed to write updated cookies to %s: %s", path, e)
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except Exception as cleanup_err:
+                    logger.debug("Failed to clean up temp file %s: %s", temp_path, cleanup_err)
+            return False
 
 
 def _merge_cookies_legacy(cookie_jar: httpx.Cookies, storage_data: dict[str, Any]) -> int:
@@ -1379,26 +1436,29 @@ def _merge_cookies_with_snapshot(
     cookie_jar: httpx.Cookies,
     storage_data: dict[str, Any],
     original_snapshot: CookieSnapshot,
-) -> int:
+) -> tuple[int, bool]:
     """Snapshot/delta merge: write only what this process actually changed.
 
     Closes §3.4.1 (stale-overwrite-fresh) and §3.4.2 (path collapse):
 
-    - **Deltas**: cookies in the jar whose snapshot tuple
-      (``value, expires, secure, http_only``) differs from
-      ``original_snapshot`` are written to disk. New cookies acquired
-      during the session are treated as deltas (snapshot lookup is
-      ``None``, so they always differ). Comparing the full tuple keeps
-      attribute-only refreshes (same value, new ``expires``) flowing to
-      disk; the legacy path tracked ``expires`` directly and a regression
-      here would silently drop session-extension Set-Cookies.
+    - **Deltas (CAS-guarded for keys in the snapshot)**: cookies in the
+      jar whose snapshot tuple (``value, expires, secure, http_only``)
+      differs from ``original_snapshot`` are written to disk **only if**
+      the on-disk value still matches the snapshot value. If disk has
+      rotated since open time, a sibling process has written it; we
+      preserve their write rather than clobber it with our local
+      rotation. New cookies acquired during the session (no snapshot
+      entry) bypass the CAS check and write normally. Comparing the full
+      snapshot tuple keeps attribute-only refreshes (same value, new
+      ``expires``) flowing to disk; the legacy path tracked ``expires``
+      directly and a regression here would silently drop session-extension
+      Set-Cookies.
     - **Deletions (CAS-guarded)**: a key present in the snapshot but
       absent from the jar is dropped from disk **only if** the on-disk
-      value still matches the snapshot value. If disk has rotated to a
-      different value since open time, a sibling process has written it;
-      we preserve their write rather than clobber it with our stale
-      eviction (e.g. an ``Max-Age=0`` that evicted our locally-expired
-      copy must not erase the sibling's freshly-issued replacement).
+      value still matches the snapshot value — symmetric with the
+      value-update CAS above. An ``Max-Age=0`` that evicted our
+      locally-expired copy must not erase the sibling's freshly-issued
+      replacement.
     - **Untouched**: cookies in the jar whose tuple matches the snapshot
       are not written, so a sibling-process write to the same key
       survives. Cookies on disk that are not in the snapshot are also
@@ -1410,7 +1470,15 @@ def _merge_cookies_with_snapshot(
         original_snapshot: Open-time snapshot of the same jar.
 
     Returns:
-        Number of cookie entries added, modified, or removed.
+        Tuple of ``(updated_count, cas_rejected)``:
+
+        - ``updated_count``: cookie entries added, modified, or removed
+          (drives whether the temp-write step runs).
+        - ``cas_rejected``: whether any CAS check rejected a delta or
+          deletion. Caller uses this to decide whether the post-save
+          baseline can be advanced — if disk still disagrees with our
+          intent on any key, the baseline must stay so the next save
+          retries the delta.
     """
     current_snapshot = snapshot_cookie_jar(cookie_jar)
 
@@ -1449,6 +1517,7 @@ def _merge_cookies_with_snapshot(
     }
 
     updated_count = 0
+    cas_rejected = False
 
     # Apply deltas + deletions to the existing storage entries in place.
     new_cookies: list[dict[str, Any]] = []
@@ -1475,6 +1544,35 @@ def _merge_cookies_with_snapshot(
                 break
 
         if matched_delta_cookie is not None:
+            if matched_delta_key is None:  # pragma: no cover - loop invariant
+                raise RuntimeError("matched_delta_cookie set without matched_delta_key")
+            # CAS-guard for value updates: if our snapshot had this key in any
+            # leading-dot variant and disk's current value differs from the
+            # snapshot value, a sibling process has rewritten the row between
+            # our open and our save. Preserve their write rather than clobber.
+            # Variant-aware lookup mirrors the delta match above: if the snapshot
+            # was keyed on ``accounts.google.com`` but the matched delta key is
+            # the leading-dot variant, a plain ``.get(matched_delta_key)`` would
+            # miss the entry and silently bypass the CAS.
+            snapshot_entry = next(
+                (
+                    original_snapshot[variant]
+                    for variant in _cookie_snapshot_key_variants(matched_delta_key)
+                    if variant in original_snapshot
+                ),
+                None,
+            )
+            if snapshot_entry is not None and stored_cookie.get("value") != snapshot_entry.value:
+                logger.debug(
+                    "Skipped CAS-guarded value update of %s on %s: disk value "
+                    "differs from snapshot (sibling write preserved)",
+                    matched_delta_key.name,
+                    matched_delta_key.domain,
+                )
+                cas_rejected = True
+                matched_delta_keys.add(matched_delta_key)
+                new_cookies.append(stored_cookie)
+                continue
             new_expires = (
                 matched_delta_cookie.expires if matched_delta_cookie.expires is not None else -1
             )
@@ -1483,7 +1581,6 @@ def _merge_cookies_with_snapshot(
             stored_cookie["path"] = matched_delta_cookie.path or stored_cookie.get("path", "/")
             stored_cookie["secure"] = matched_delta_cookie.secure
             stored_cookie["httpOnly"] = _cookie_is_http_only(matched_delta_cookie)
-            assert matched_delta_key is not None  # for mypy
             matched_delta_keys.add(matched_delta_key)
             updated_count += 1
             new_cookies.append(stored_cookie)
@@ -1509,6 +1606,7 @@ def _merge_cookies_with_snapshot(
             if stored_cookie.get("value") == snapshot_value:
                 updated_count += 1
                 continue  # drop the entry from disk
+            cas_rejected = True
 
         new_cookies.append(stored_cookie)
 
@@ -1521,7 +1619,7 @@ def _merge_cookies_with_snapshot(
         updated_count += 1
 
     storage_data["cookies"] = new_cookies
-    return updated_count
+    return updated_count, cas_rejected
 
 
 def _cookie_is_http_only(cookie: Any) -> bool:
@@ -1696,11 +1794,25 @@ async def _fetch_tokens_with_refresh(
     cookie_jar: httpx.Cookies,
     storage_path: Path | None = None,
     profile: str | None = None,
-) -> tuple[str, str, bool]:
-    """Fetch tokens, optionally running NOTEBOOKLM_REFRESH_CMD on auth expiry."""
+) -> tuple[str, str, bool, CookieSnapshot | None]:
+    """Fetch tokens, optionally running NOTEBOOKLM_REFRESH_CMD on auth expiry.
+
+    Returns ``(csrf, session_id, refreshed, post_refresh_snapshot)``.
+
+    When ``refreshed`` is ``True``, ``post_refresh_snapshot`` is a snapshot
+    captured **immediately after** ``_replace_cookie_jar`` swaps in the
+    refresh-cmd output and **before** the retry token fetch can mutate the
+    jar with redirect Set-Cookies. Callers must use that snapshot as the
+    save baseline; re-snapshotting the jar after this function returns
+    would include the retry's rotations in the baseline (so they would
+    never reach disk on the subsequent save).
+
+    When ``refreshed`` is ``False`` the snapshot is ``None`` (no refresh
+    happened; caller's pre-fetch snapshot is still the right baseline).
+    """
     try:
         csrf, session_id = await _fetch_tokens_with_jar(cookie_jar, storage_path)
-        return csrf, session_id, False
+        return csrf, session_id, False, None
     except ValueError as err:
         if not _should_try_refresh(err):
             raise
@@ -1720,8 +1832,11 @@ async def _fetch_tokens_with_refresh(
                     _REFRESH_GENERATIONS[refresh_key] = refresh_generation + 1
                 fresh_jar = build_httpx_cookies_from_storage(refresh_storage_path)
                 _replace_cookie_jar(cookie_jar, fresh_jar)
+                # Capture the baseline NOW — after the wholesale replacement
+                # but before the retry fetch can mutate the jar.
+                post_refresh_snapshot = snapshot_cookie_jar(cookie_jar)
             csrf, session_id = await _fetch_tokens_with_jar(cookie_jar, refresh_storage_path)
-            return csrf, session_id, True
+            return csrf, session_id, True, post_refresh_snapshot
         finally:
             _REFRESH_ATTEMPTED_CONTEXT.reset(refresh_token)
 
@@ -2153,7 +2268,9 @@ async def fetch_tokens(
         RuntimeError: If ``NOTEBOOKLM_REFRESH_CMD`` is set but fails
     """
     jar = build_cookie_jar(cookies=cookies, storage_path=storage_path)
-    csrf, session_id, refreshed = await _fetch_tokens_with_refresh(jar, storage_path, profile)
+    csrf, session_id, refreshed, _post_refresh_snapshot = await _fetch_tokens_with_refresh(
+        jar, storage_path, profile
+    )
     if refreshed:
         fresh = _cookie_map_from_jar(jar)
         _update_cookie_input(cookies, fresh)
@@ -2189,11 +2306,14 @@ async def fetch_tokens_with_domains(
     # snapshot is the input to the dirty-flag/delta merge that closes the
     # stale-overwrite-fresh race (docs/auth-keepalive.md §3.4.1).
     snapshot = snapshot_cookie_jar(jar)
-    csrf, session_id, refreshed = await _fetch_tokens_with_refresh(jar, path, profile)
-    if refreshed:
-        # NOTEBOOKLM_REFRESH_CMD replaced the jar wholesale; the pre-fetch
-        # snapshot would otherwise mis-attribute every fresh cookie as our
-        # rotation and clobber sibling-process state.
-        snapshot = snapshot_cookie_jar(jar)
+    csrf, session_id, refreshed, post_refresh_snapshot = await _fetch_tokens_with_refresh(
+        jar, path, profile
+    )
+    if refreshed and post_refresh_snapshot is not None:
+        # NOTEBOOKLM_REFRESH_CMD replaced the jar wholesale. Use the snapshot
+        # captured immediately after the replacement (before the retry fetch
+        # added redirect Set-Cookies); re-snapshotting here would let those
+        # retry rotations be absorbed into the baseline and never reach disk.
+        snapshot = post_refresh_snapshot
     save_cookies_to_storage(jar, path, original_snapshot=snapshot)
     return csrf, session_id

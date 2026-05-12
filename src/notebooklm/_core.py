@@ -273,7 +273,6 @@ class ClientCore:
             return
 
         jar_copy = httpx.Cookies(jar)
-        original_snapshot = self._loaded_cookie_snapshot
         # Computed on the loop thread off ``jar_copy`` so the worker can refresh
         # the baseline without re-snapshotting a jar that may have mutated in
         # the meantime (next keepalive poke, in-flight RPC redirect).
@@ -283,18 +282,26 @@ class ClientCore:
             s: httpx.Cookies = jar_copy,
             p: Path = effective_path,
             lock: threading.Lock = self._save_lock,
-            snap: CookieSnapshot | None = original_snapshot,
             post: CookieSnapshot = post_save_snapshot,
             client: ClientCore = self,
         ) -> None:
             """Worker-thread save: hold the in-process lock around the disk write."""
             with lock:
-                save_cookies_to_storage(s, p, original_snapshot=snap)
-                # Only reached on successful save (or successful no-op return
-                # from save_cookies_to_storage). On exception the baseline
-                # stays at the open-time snapshot so the next save retries
-                # the same delta. See class-level "_loaded_cookie_snapshot".
-                client._loaded_cookie_snapshot = post
+                # Read the baseline INSIDE the lock so a prior save that
+                # completed while we were queued advances ours too. Capturing
+                # this on the loop thread would let a concurrent save observe
+                # a stale baseline, compute deltas against pre-prior-save
+                # state, hit CAS rejection on every key, and silently lose
+                # the local rotation.
+                snap = client._loaded_cookie_snapshot
+                # Advance the baseline only if save_cookies_to_storage reported
+                # the disk now reflects ``post``. A silent I/O error or CAS
+                # rejection returns False — in that case the baseline must
+                # stay where it was so the next save retries the same delta.
+                # An exception also leaves the baseline untouched. See
+                # class-level ``_loaded_cookie_snapshot``.
+                if save_cookies_to_storage(s, p, original_snapshot=snap):
+                    client._loaded_cookie_snapshot = post
 
         await asyncio.to_thread(_save)
 

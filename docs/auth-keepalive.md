@@ -405,33 +405,31 @@ reading `auth.py` against the lifecycle of `NotebookLMClient` /
 > ``CookieSnapshotKey -> value`` snapshot of its jar; ``save_cookies_to_storage``
 > accepts an ``original_snapshot=...`` kwarg and, when provided, writes only
 > the deltas (cookies whose value differs from the snapshot) plus deletions
-> (cookies present in the snapshot but absent from the jar). Cookies the
-> in-process code never touched are left to whatever a sibling process may
-> have written, so the stale-overwrite-fresh race below cannot fire. Legacy
-> callers that don't pass ``original_snapshot`` still get the old
-> full-merge behavior (and remain vulnerable) — but every in-tree caller
-> has been opted in. See ``tests/unit/test_auth_cookie_save_race.py`` for
-> the canonical timeline test.
+> (cookies present in the snapshot but absent from the jar) — both arms
+> CAS-guarded against the current on-disk value so a sibling-process write
+> on the same key is never clobbered. Cookies the in-process code never
+> touched are left to whatever a sibling process may have written, so the
+> stale-overwrite-fresh race below cannot fire. The
+> ``original_snapshot=None`` form remains as a public-API back-compat shim
+> but emits a ``DeprecationWarning``; every in-tree caller passes a
+> snapshot. See ``tests/unit/test_auth_cookie_save_race.py`` for the
+> canonical timeline test plus value-update CAS and refresh-cmd
+> re-snapshot coverage.
 
-The most likely culprit when rotation seems to silently fail.
-`save_cookies_to_storage` (`auth.py:1003–1036`) merges the in-memory
-jar onto disk using a **value-difference rule**: for each cookie on
-disk, if the in-memory variant has a different value, write the
-in-memory value. There is no generation counter, no mtime comparison,
-and no dirty flag.
-
-Failure timeline:
+The original failure timeline (historical — the resolution box above
+describes the in-tree fix):
 
 | t | Process A (long-lived, `keepalive=None`) | Process B (CLI invocation) | Disk state |
 |---|---|---|---|
 | 0 | `from_storage()` → reads `*PSIDTS=OLD` | — | `OLD` |
 | +5 m | working (batchexecute traffic only; never touches identity surface) | `from_storage()` rotates → `*PSIDTS=NEW` → saves under flock | `NEW` |
-| +10 m | `close()` → save runs under flock → reads disk (`NEW`) → A's in-memory (`OLD`) differs → **A writes `OLD`** | done | **`OLD` (clobbered)** |
+| +10 m | `close()` → save runs under flock → reads disk (`NEW`) → A's in-memory (`OLD`) differs → **A writes `OLD`** (pre-#361 only) | done | **`OLD` (clobbered)** |
 | +60 m+ | next request to `notebooklm.google.com` fails — rotation never effectively landed | | |
 
 The cross-process flock added in
 [#344](https://github.com/teng-lin/notebooklm-py/pull/344) prevents
-interleaved writes but not stale-overwrites-fresh.
+interleaved writes but not stale-overwrites-fresh. #361 added the
+snapshot/delta machinery on top to close the remaining gap.
 
 **Defensive comparison across the ecosystem.** This codebase is, as far
 as a survey can establish, the *most defensive* OSS implementation —
@@ -454,17 +452,18 @@ genuinely needs the defenses we have, plus the §3.4.1 gap closed. The
 peer-ecosystem state of the art is "last writer wins, hope for the
 best."
 
-Possible fixes (not yet implemented):
+Fix shipped in #361 (write-only-deltas + dirty-flag against open-time
+snapshot, with CAS guards against the live on-disk value on both write
+and deletion). The two alternatives considered and rejected:
 
-- **Re-read disk after flock acquisition**, compare each in-memory
-  cookie against the value loaded at `open()` time; only overwrite
-  cookies the in-process code actually changed (dirty-flag pattern).
-- **Generation counter** stamped on every cookie write — refuse to
-  downgrade.
-- **Write-only-deltas**: persist only cookies whose in-memory value
-  differs from open-time snapshot; leave the rest to disk.
+- **Generation counter** stamped on every cookie write — would require
+  every external writer to opt in to the new format and breaks
+  compatibility with Playwright's `storage_state.json` schema.
+- **Full bidirectional sync** — overkill for a session-token store;
+  the snapshot/delta CAS shape converges to the same correctness without
+  a schema change.
 
-Mitigations available today:
+Mitigations available today (still useful even with the fix in place):
 
 - Pass `keepalive=N` to long-lived `NotebookLMClient` instances so
   rotation actually fires in-process (in-memory stays fresh, save is
