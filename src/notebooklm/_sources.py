@@ -526,10 +526,11 @@ class SourcesAPI:
                 Note that supplying ``title`` also forces a narrow pre-rename
                 registration wait regardless of this flag — see the ``title``
                 parameter above.
-            wait_timeout: Maximum seconds to wait if ``wait=True``. Also caps
-                the narrow registration wait triggered by a custom ``title``
-                (which is otherwise bounded by a 30s default to keep callers
-                that passed ``wait=False`` fast). Default: 120.
+            wait_timeout: Maximum seconds to wait if ``wait=True``. Also bounds
+                the narrow registration wait triggered by a custom ``title``;
+                that wait returns on the first PROCESSING/READY poll so it
+                completes in seconds for typical sources regardless of this
+                value. Default: 120.
 
         Returns:
             The created Source object. If wait=False, status may be PROCESSING.
