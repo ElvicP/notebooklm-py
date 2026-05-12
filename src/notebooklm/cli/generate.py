@@ -20,7 +20,6 @@ from typing import Any
 
 import click
 
-from .._env import get_default_language
 from ..client import NotebookLMClient
 from ..types import (
     AudioFormat,
@@ -163,9 +162,7 @@ def resolve_language(language: str | None) -> str:
     config_lang = get_language()
     if config_lang is not None:
         return config_lang
-    # Falls back through get_default_language() so an explicitly-empty
-    # NOTEBOOKLM_HL still becomes the documented DEFAULT_LANGUAGE.
-    return get_default_language() or DEFAULT_LANGUAGE
+    return DEFAULT_LANGUAGE
 
 
 async def handle_generation_result(
