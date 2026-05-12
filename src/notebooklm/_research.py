@@ -24,7 +24,7 @@ _RESEARCH_RESULT_TYPE_ALIASES = {
 
 _URL_RE = r"https?://(?:[^\s<>\]\(\)\"']+|\([^\s<>\]\(\)\"']*\))+"
 _URL_PATTERN = re.compile(_URL_RE)
-_MARKDOWN_IMAGE_PATTERN = re.compile(rf"!\[[^\]]*\]\(({_URL_RE})\)")
+_MARKDOWN_IMAGE_PATTERN = re.compile(rf"!\[[^\]]*\]\(({_URL_RE})(?:\s+[^\)]*)?\)")
 _MARKDOWN_LINK_PATTERN = re.compile(rf"(?<!!)\[[^\]]+\]\(({_URL_RE})\)")
 _TRAILING_URL_PUNCTUATION = ".,;:!?"
 
