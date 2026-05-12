@@ -59,8 +59,8 @@ def get_base_host() -> str:
 def get_default_language() -> str:
     """Return the user's preferred interface language.
 
-    Reads the ``NOTEBOOKLM_HL`` environment variable. Falls back to ``"en"``
-    when the variable is unset or empty.
+    Reads the ``NOTEBOOKLM_HL`` environment variable. Surrounding whitespace
+    is stripped; unset, empty, or whitespace-only values fall back to ``"en"``.
 
     This value is threaded into two places:
 
@@ -70,4 +70,5 @@ def get_default_language() -> str:
       ``ArtifactsAPI.generate_*`` methods, which embed the code into the
       RPC payload.
     """
-    return os.environ.get("NOTEBOOKLM_HL", "") or "en"
+    raw = os.environ.get("NOTEBOOKLM_HL", "") or ""
+    return raw.strip() or "en"

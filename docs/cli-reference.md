@@ -137,7 +137,7 @@ Supported source types: URLs, YouTube videos, files (PDF, text, Markdown, Word, 
 All generate commands support:
 - `--source/-s` to select specific sources (repeatable)
 - `--json` for machine-readable output (returns `task_id` and `status`)
-- `--language` to override output language (defaults to config or 'en')
+- `--language` to override output language (precedence: `--language` > `NOTEBOOKLM_HL` env > config > `'en'`)
 - `--retry N` to automatically retry on rate limits with exponential backoff
 
 | Command | Options | Example |
