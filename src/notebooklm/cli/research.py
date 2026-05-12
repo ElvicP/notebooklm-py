@@ -9,6 +9,7 @@ import asyncio
 
 import click
 
+from .._research import ResearchAPI
 from ..client import NotebookLMClient
 from .helpers import (
     console,
@@ -123,9 +124,12 @@ def research_status(ctx, notebook_id, json_output, client_auth):
     help="Seconds between status checks (default: 5)",
 )
 @click.option("--import-all", is_flag=True, help="Import all found sources when done")
+@click.option("--cited-only", is_flag=True, help="With --import-all, import only cited sources")
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 @with_client
-def research_wait(ctx, notebook_id, timeout, interval, import_all, json_output, client_auth):
+def research_wait(
+    ctx, notebook_id, timeout, interval, import_all, cited_only, json_output, client_auth
+):
     """Wait for research to complete.
 
     Blocks until research is completed or timeout is reached.
@@ -135,8 +139,12 @@ def research_wait(ctx, notebook_id, timeout, interval, import_all, json_output, 
     Examples:
       notebooklm research wait
       notebooklm research wait --timeout 600 --import-all
+      notebooklm research wait --import-all --cited-only
       notebooklm research wait --json
     """
+    if cited_only and not import_all:
+        raise click.UsageError("--cited-only requires --import-all")
+
     nb_id = require_notebook(notebook_id)
 
     async def _run():
@@ -178,6 +186,11 @@ def research_wait(ctx, notebook_id, timeout, interval, import_all, json_output, 
             query = status.get("query", "")
 
             report = status.get("report", "")
+            sources_to_import = sources
+            cited_selection = None
+            if cited_only and sources:
+                cited_selection = ResearchAPI.select_cited_sources(sources, report)
+                sources_to_import = cited_selection.sources
 
             if json_output:
                 result = {
@@ -187,12 +200,16 @@ def research_wait(ctx, notebook_id, timeout, interval, import_all, json_output, 
                     "sources": sources,
                     "report": report,
                 }
-                if import_all and sources and task_id:
+                if cited_selection is not None:
+                    result["cited_only"] = True
+                    result["cited_sources_selected"] = len(sources_to_import)
+                    result["cited_only_fallback"] = cited_selection.used_fallback
+                if import_all and sources_to_import and task_id:
                     imported = await import_with_retry(
                         client,
                         nb_id_resolved,
                         task_id,
-                        sources,
+                        sources_to_import,
                         max_elapsed=timeout,
                         json_output=True,
                     )
@@ -205,13 +222,24 @@ def research_wait(ctx, notebook_id, timeout, interval, import_all, json_output, 
 
                 display_report(report)
 
-                if import_all and sources and task_id:
+                if import_all and sources_to_import and task_id:
+                    if cited_selection is not None:
+                        if cited_selection.used_fallback:
+                            console.print(
+                                "[yellow]Could not resolve cited sources; "
+                                "importing all sources.[/yellow]"
+                            )
+                        else:
+                            console.print(
+                                f"[dim]Importing {cited_selection.matched_url_source_count} "
+                                "cited source(s)[/dim]"
+                            )
                     with console.status("Importing sources..."):
                         imported = await import_with_retry(
                             client,
                             nb_id_resolved,
                             task_id,
-                            sources,
+                            sources_to_import,
                             max_elapsed=timeout,
                         )
                     console.print(f"[green]Imported {len(imported)} sources[/green]")

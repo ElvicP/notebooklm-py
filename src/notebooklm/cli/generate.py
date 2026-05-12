@@ -421,6 +421,7 @@ def generate_audio(
     type=click.Choice(
         [
             "auto",
+            "custom",
             "classic",
             "whiteboard",
             "kawaii",
@@ -433,6 +434,7 @@ def generate_audio(
     ),
     default="auto",
 )
+@click.option("--style-prompt", default=None, help="Custom visual style prompt")
 @click.option("--language", default=None, help="Output language (default: from config or 'en')")
 @click.option("--source", "-s", "source_ids", multiple=True, help="Limit to specific source IDs")
 @click.option("--wait/--no-wait", default=False, help="Wait for completion (default: no-wait)")
@@ -445,6 +447,7 @@ def generate_video(
     notebook_id,
     video_format,
     style,
+    style_prompt,
     language,
     source_ids,
     wait,
@@ -479,6 +482,7 @@ def generate_video(
     }
     style_map = {
         "auto": VideoStyle.AUTO_SELECT,
+        "custom": VideoStyle.CUSTOM,
         "classic": VideoStyle.CLASSIC,
         "whiteboard": VideoStyle.WHITEBOARD,
         "kawaii": VideoStyle.KAWAII,
@@ -489,6 +493,12 @@ def generate_video(
         "paper-craft": VideoStyle.PAPER_CRAFT,
     }
     is_cinematic = video_format == "cinematic"
+    if is_cinematic and style_prompt:
+        raise click.UsageError("--style-prompt cannot be used with cinematic video")
+    if not is_cinematic and style == "custom" and not style_prompt:
+        raise click.UsageError("--style custom requires --style-prompt")
+    if not is_cinematic and style_prompt and style != "custom":
+        raise click.UsageError("--style-prompt requires --style custom")
 
     async def _run():
         async with NotebookLMClient(client_auth) as client:
@@ -510,6 +520,7 @@ def generate_video(
                     instructions=description or None,
                     video_format=format_map[video_format],
                     video_style=style_map[style],
+                    style_prompt=style_prompt,
                 )
 
             timeout = 1800.0 if is_cinematic else 600.0

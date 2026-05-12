@@ -22,6 +22,7 @@ from pathlib import Path
 import click
 from rich.table import Table
 
+from .._research import ResearchAPI
 from .._url_utils import is_youtube_url
 from ..client import NotebookLMClient
 from ..types import source_status_to_str
@@ -557,6 +558,7 @@ def source_add_drive(ctx, file_id, title, notebook_id, mime_type, client_auth):
     help="Search mode (default: fast)",
 )
 @click.option("--import-all", is_flag=True, help="Import all found sources")
+@click.option("--cited-only", is_flag=True, help="With --import-all, import only cited sources")
 @click.option(
     "--no-wait",
     is_flag=True,
@@ -574,7 +576,16 @@ def source_add_drive(ctx, file_id, title, notebook_id, mime_type, client_auth):
 )
 @with_client
 def source_add_research(
-    ctx, query, notebook_id, search_source, mode, import_all, no_wait, timeout, client_auth
+    ctx,
+    query,
+    notebook_id,
+    search_source,
+    mode,
+    import_all,
+    cited_only,
+    no_wait,
+    timeout,
+    client_auth,
 ):
     """Search web or drive and add sources from results.
 
@@ -584,8 +595,12 @@ def source_add_research(
       source add-research "project docs" --from drive     # Search Google Drive
       source add-research "AI papers" --mode deep         # Deep search
       source add-research "tutorials" --import-all        # Auto-import all results
+      source add-research "topic" --import-all --cited-only
       source add-research "topic" --mode deep --no-wait   # Non-blocking deep search
     """
+    if cited_only and not import_all:
+        raise click.UsageError("--cited-only requires --import-all")
+
     nb_id = require_notebook(notebook_id)
 
     async def _run():
@@ -628,11 +643,30 @@ def source_add_research(
                 display_report(status.get("report", ""), json_hint=False)
 
                 if import_all and sources and task_id:
+                    sources_to_import = sources
+                    cited_selection = None
+                    if cited_only:
+                        cited_selection = ResearchAPI.select_cited_sources(
+                            sources,
+                            status.get("report", ""),
+                        )
+                        sources_to_import = cited_selection.sources
+                    if cited_selection is not None:
+                        if cited_selection.used_fallback:
+                            console.print(
+                                "[yellow]Could not resolve cited sources; "
+                                "importing all sources.[/yellow]"
+                            )
+                        else:
+                            console.print(
+                                f"[dim]Importing {cited_selection.matched_url_source_count} "
+                                "cited source(s)[/dim]"
+                            )
                     imported = await import_with_retry(
                         client,
                         nb_id_resolved,
                         task_id,
-                        sources,
+                        sources_to_import,
                         max_elapsed=timeout,
                     )
                     console.print(f"[green]Imported {len(imported)} sources[/green]")

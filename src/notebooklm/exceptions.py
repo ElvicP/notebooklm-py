@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ._env import get_base_url
+
 __all__ = [
     # Base
     "NotebookLMError",
@@ -348,7 +350,7 @@ class NotebookLimitError(NotebookError):
         message = (
             "Cannot create notebook: account appears to be at or very near the "
             f"NotebookLM notebook limit ({count_text} owned notebooks reported). "
-            "Delete old notebooks at https://notebooklm.google.com and try again."
+            f"Delete old notebooks at {get_base_url()} and try again."
         )
         if known_limits:
             message += f" Known NotebookLM limits include: {known_text}."
