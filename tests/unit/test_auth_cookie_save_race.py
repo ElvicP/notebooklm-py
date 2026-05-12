@@ -1437,8 +1437,8 @@ class TestCASVariantAware:
         4. A Set-Cookie aligns the in-memory jar to disk (``OSID`` reset to
            the sibling's value) and a second ``ClientCore.save_cookies``
            runs. With the variant-aware baseline preserved by step 3, the
-           second save advances cleanly without re-clobbering the sibling
-           write.
+           second save recognizes convergence, advances cleanly, and a later
+           rotation can persist without re-clobbering the sibling write.
         """
         from notebooklm import auth as auth_mod
         from notebooklm._core import ClientCore
@@ -1519,13 +1519,25 @@ class TestCASVariantAware:
                 "divergence through the leading-dot variant"
             )
             assert core._loaded_cookie_snapshot is not None
-            assert core._loaded_cookie_snapshot[bare_key].value == "OLD", (
-                "After the second save (which also CAS-rejects, because disk "
-                "still diverges from baseline) the variant-aware baseline "
-                "preservation must keep the bare-host entry AT its original "
-                "value — a regression that absorbed the rejected dotted "
-                "delta's value into the baseline would silently disable CAS "
-                "protection for the next rotation"
+            assert core._loaded_cookie_snapshot.get(dotted_key) is not None
+            assert core._loaded_cookie_snapshot[dotted_key].value == "SIBLING", (
+                "After the second save, disk already matches the current "
+                "dotted-variant jar value, so the save must recover from the "
+                "prior CAS rejection and advance baseline to the converged "
+                "value instead of keeping the stale OLD baseline forever"
+            )
+
+            _set_cookie_value(core._http_client.cookies, "OSID", "NEXT")
+            await core.save_cookies(core._http_client.cookies)
+
+            assert _cookie_value(storage, "OSID", "accounts.google.com") == "NEXT", (
+                "After convergence advances the baseline, a later OSID "
+                "rotation must persist through the variant-aware lookup"
+            )
+            assert core._loaded_cookie_snapshot is not None
+            assert core._loaded_cookie_snapshot[dotted_key].value == "NEXT", (
+                "The successful follow-up rotation should advance the dotted "
+                "baseline to the value now reflected on disk"
             )
         finally:
             await core.close()
