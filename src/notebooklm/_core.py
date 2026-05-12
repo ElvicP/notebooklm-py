@@ -251,6 +251,12 @@ class ClientCore:
            serialize through this lock so the newer caller always wins.
         3. **Off-load** the actual save to a worker thread via
            ``asyncio.to_thread`` so disk I/O never stalls the event loop.
+        4. **Refresh the baseline snapshot** on success so that a subsequent
+           save in this client computes deltas against what we just
+           persisted — not against the open-time snapshot. Without this
+           step the same delta would re-apply on every save, silently
+           clobbering any sibling-process write that landed between two of
+           our own saves (the keepalive + close common case).
 
         Cross-process serialization is handled at a different layer — the
         OS-level file lock inside :func:`save_cookies_to_storage` itself.
@@ -268,16 +274,27 @@ class ClientCore:
 
         jar_copy = httpx.Cookies(jar)
         original_snapshot = self._loaded_cookie_snapshot
+        # Computed on the loop thread off ``jar_copy`` so the worker can refresh
+        # the baseline without re-snapshotting a jar that may have mutated in
+        # the meantime (next keepalive poke, in-flight RPC redirect).
+        post_save_snapshot = snapshot_cookie_jar(jar_copy)
 
         def _save(
-            s=jar_copy,
-            p=effective_path,
-            lock=self._save_lock,
-            snap=original_snapshot,
+            s: httpx.Cookies = jar_copy,
+            p: Path = effective_path,
+            lock: threading.Lock = self._save_lock,
+            snap: CookieSnapshot | None = original_snapshot,
+            post: CookieSnapshot = post_save_snapshot,
+            client: ClientCore = self,
         ) -> None:
             """Worker-thread save: hold the in-process lock around the disk write."""
             with lock:
                 save_cookies_to_storage(s, p, original_snapshot=snap)
+                # Only reached on successful save (or successful no-op return
+                # from save_cookies_to_storage). On exception the baseline
+                # stays at the open-time snapshot so the next save retries
+                # the same delta. See class-level "_loaded_cookie_snapshot".
+                client._loaded_cookie_snapshot = post
 
         await asyncio.to_thread(_save)
 

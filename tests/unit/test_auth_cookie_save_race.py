@@ -29,6 +29,7 @@ import pytest
 from notebooklm.auth import (
     AuthTokens,
     CookieSnapshotKey,
+    CookieSnapshotValue,
     save_cookies_to_storage,
     snapshot_cookie_jar,
 )
@@ -82,7 +83,9 @@ class TestSnapshotCookieJar:
         jar = httpx.Cookies()
         jar.set("SID", "abc", domain=".google.com", path="/")
         snap = snapshot_cookie_jar(jar)
-        assert snap == {CookieSnapshotKey("SID", ".google.com", "/"): "abc"}
+        key = CookieSnapshotKey("SID", ".google.com", "/")
+        assert set(snap) == {key}
+        assert snap[key].value == "abc"
 
     def test_path_aware_keys_do_not_collapse(self):
         """Two cookies with the same name+domain but different paths are
@@ -91,8 +94,8 @@ class TestSnapshotCookieJar:
         jar.set("OSID", "root", domain="accounts.google.com", path="/")
         jar.set("OSID", "scoped", domain="accounts.google.com", path="/u/0/")
         snap = snapshot_cookie_jar(jar)
-        assert snap[CookieSnapshotKey("OSID", "accounts.google.com", "/")] == "root"
-        assert snap[CookieSnapshotKey("OSID", "accounts.google.com", "/u/0/")] == "scoped"
+        assert snap[CookieSnapshotKey("OSID", "accounts.google.com", "/")].value == "root"
+        assert snap[CookieSnapshotKey("OSID", "accounts.google.com", "/u/0/")].value == "scoped"
 
     def test_normalizes_missing_path_to_root(self):
         """Cookies without an explicit path default to ``/`` in the snapshot key."""
@@ -498,3 +501,234 @@ class TestRefreshAuthOnBoundSessionIsNoOp:
             "refresh_auth on a bound session that didn't rotate must not "
             "clobber the disk value with the in-memory stale value"
         )
+
+
+class TestAttributeOnlyRefresh:
+    """A ``Set-Cookie`` with the same value but new ``expires`` /
+    ``secure`` / ``httpOnly`` must still propagate to disk. The legacy
+    save compared ``expires`` directly; the snapshot path previously
+    keyed on value alone and silently dropped attribute-only refreshes
+    (CodeRabbit / Codex / Gemini all converged on this finding for the
+    pre-fix branch)."""
+
+    def test_expires_extension_writes_through(self, tmp_path):
+        storage = tmp_path / "storage_state.json"
+        _write_storage(
+            storage,
+            [
+                {
+                    "name": "SID",
+                    "value": "abc",
+                    "domain": ".google.com",
+                    "path": "/",
+                    "expires": 1_000_000,
+                    "httpOnly": True,
+                    "secure": True,
+                    "sameSite": "None",
+                },
+            ],
+        )
+
+        # Build a jar whose SID has the same value but a longer expiry.
+        # Mirrors Google extending a session cookie's lifetime via 302
+        # redirect without rotating the value.
+        jar = httpx.Cookies()
+        jar.set("SID", "abc", domain=".google.com", path="/")
+        snapshot_pre = snapshot_cookie_jar(jar)
+
+        # Simulate the in-memory expiry refresh by reconstructing the jar
+        # entry with a later ``expires``.
+        for cookie in jar.jar:
+            if cookie.name == "SID":
+                cookie.expires = 2_000_000
+
+        save_cookies_to_storage(jar, storage, original_snapshot=snapshot_pre)
+
+        on_disk = next(c for c in _read_cookies(storage) if c["name"] == "SID")
+        assert on_disk["expires"] == 2_000_000, (
+            "An attribute-only refresh (same value, new expires) must reach "
+            "disk — the legacy path persisted this and the snapshot path "
+            "regressed it"
+        )
+
+
+class TestSnapshotRefreshedAfterSave:
+    """``ClientCore._loaded_cookie_snapshot`` is refreshed after every
+    successful save. Without this, the open-time snapshot stays frozen
+    and a second save from the same client re-applies the first save's
+    delta — silently clobbering any sibling-process write that landed
+    between two of our own saves (the keepalive + close common case).
+    """
+
+    @pytest.mark.asyncio
+    async def test_second_save_does_not_replay_first_delta(self, tmp_path, httpx_mock):
+        from notebooklm.client import NotebookLMClient
+
+        storage = tmp_path / "storage_state.json"
+        # Initial disk state: PSIDTS=OPEN at process-open time.
+        _write_storage(
+            storage,
+            [
+                {
+                    "name": "__Secure-1PSIDTS",
+                    "value": "OPEN",
+                    "domain": ".google.com",
+                    "path": "/",
+                    "expires": -1,
+                    "httpOnly": True,
+                    "secure": True,
+                    "sameSite": "None",
+                },
+                {
+                    "name": "SID",
+                    "value": "sid",
+                    "domain": ".google.com",
+                    "path": "/",
+                    "expires": -1,
+                    "httpOnly": True,
+                    "secure": True,
+                    "sameSite": "None",
+                },
+            ],
+        )
+
+        auth = AuthTokens(
+            cookies={
+                ("__Secure-1PSIDTS", ".google.com"): "OPEN",
+                ("SID", ".google.com"): "sid",
+            },
+            csrf_token="csrf",
+            session_id="sid",
+            storage_path=storage,
+        )
+
+        # Two homepage responses — refresh_auth is called twice.
+        for _ in range(2):
+            httpx_mock.add_response(
+                url="https://notebooklm.google.com/",
+                content=(
+                    b"<html><script>window.WIZ_global_data="
+                    b'{"SNlM0e":"csrf","FdrFJe":"sid"};</script></html>'
+                ),
+            )
+
+        client = NotebookLMClient(auth)
+        async with client:
+            # First save: rotates *PSIDTS in-process to A1, then save propagates.
+            for cookie in client._core._http_client.cookies.jar:
+                if cookie.name == "__Secure-1PSIDTS":
+                    cookie.value = "A1"
+            await client.refresh_auth()
+            assert _cookie_value(storage, "__Secure-1PSIDTS", ".google.com") == "A1"
+
+            # Sibling process B writes B1 to disk between A's two saves.
+            cookies = _read_cookies(storage)
+            for c in cookies:
+                if c["name"] == "__Secure-1PSIDTS":
+                    c["value"] = "B1"
+            _write_storage(storage, cookies)
+
+            # Second save: A's jar still has A1 (no rotation since save 1).
+            # Without the post-save snapshot refresh, A's delta would
+            # remain {PSIDTS: A1 vs OPEN} and A would write A1 over B1.
+            # With the fix, A's baseline now reflects A1, so no delta
+            # is computed and B1 is preserved.
+            await client.refresh_auth()
+
+        assert _cookie_value(storage, "__Secure-1PSIDTS", ".google.com") == "B1", (
+            "A's second save must NOT replay the first save's delta over "
+            "a sibling process's intervening write"
+        )
+
+
+class TestDeletionCASGuard:
+    """The deletion path compares the on-disk value to the snapshot
+    value before dropping. If they differ a sibling process has rewritten
+    the row and our local eviction (e.g. an expired ``Max-Age=0``) must
+    not erase their fresh state."""
+
+    def test_deletion_skipped_when_disk_value_differs(self, tmp_path):
+        storage = tmp_path / "storage_state.json"
+        _write_storage(
+            storage,
+            [
+                {
+                    "name": "__Secure-1PSIDTS",
+                    "value": "OLD",
+                    "domain": ".google.com",
+                    "path": "/",
+                    "expires": -1,
+                    "httpOnly": True,
+                    "secure": True,
+                    "sameSite": "None",
+                },
+            ],
+        )
+
+        jar = httpx.Cookies()
+        jar.set("__Secure-1PSIDTS", "OLD", domain=".google.com", path="/")
+        snapshot = snapshot_cookie_jar(jar)
+
+        # B writes a fresh value to disk between our snapshot and our save.
+        cookies = _read_cookies(storage)
+        cookies[0]["value"] = "B-NEW"
+        _write_storage(storage, cookies)
+
+        # Locally we evict the cookie (httpx eviction on Max-Age=0). Our
+        # jar no longer carries the entry → it becomes a deletion candidate.
+        jar.delete("__Secure-1PSIDTS", domain=".google.com", path="/")
+
+        save_cookies_to_storage(jar, storage, original_snapshot=snapshot)
+
+        assert _cookie_value(storage, "__Secure-1PSIDTS", ".google.com") == "B-NEW", (
+            "Deletion of a snapshot key must not drop the disk row when "
+            "the disk value has rotated since our snapshot (CAS guard)"
+        )
+
+    def test_deletion_applied_when_disk_value_matches(self, tmp_path):
+        """The CAS-guarded deletion still fires when no sibling write has
+        intervened: snapshot value == disk value, so the drop is safe."""
+        storage = tmp_path / "storage_state.json"
+        _write_storage(
+            storage,
+            [
+                {
+                    "name": "__Secure-1PSIDTS",
+                    "value": "OLD",
+                    "domain": ".google.com",
+                    "path": "/",
+                    "expires": -1,
+                    "httpOnly": True,
+                    "secure": True,
+                    "sameSite": "None",
+                },
+            ],
+        )
+
+        jar = httpx.Cookies()
+        jar.set("__Secure-1PSIDTS", "OLD", domain=".google.com", path="/")
+        snapshot = snapshot_cookie_jar(jar)
+
+        jar.delete("__Secure-1PSIDTS", domain=".google.com", path="/")
+        save_cookies_to_storage(jar, storage, original_snapshot=snapshot)
+
+        assert _cookie_value(storage, "__Secure-1PSIDTS", ".google.com") is None
+
+
+class TestSnapshotValueIncludesAttributes:
+    """``CookieSnapshotValue`` is a tuple of
+    ``(value, expires, secure, http_only)``. The widening exists so that
+    attribute-only refreshes register as deltas — see
+    ``TestAttributeOnlyRefresh``."""
+
+    def test_value_tuple_fields(self):
+        v = CookieSnapshotValue(value="abc", expires=12345, secure=True, http_only=False)
+        assert v.value == "abc"
+        assert v.expires == 12345
+        assert v.secure is True
+        assert v.http_only is False
+
+    def test_distinct_attributes_yield_distinct_values(self):
+        a = CookieSnapshotValue(value="abc", expires=10, secure=True, http_only=True)
+        b = CookieSnapshotValue(value="abc", expires=20, secure=True, http_only=True)
+        assert a != b

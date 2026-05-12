@@ -77,7 +77,23 @@ class CookieSnapshotKey(NamedTuple):
     path: str
 
 
-CookieSnapshot: TypeAlias = dict[CookieSnapshotKey, str]
+class CookieSnapshotValue(NamedTuple):
+    """Snapshot value tuple: ``(value, expires, secure, http_only)``.
+
+    Widened from a bare ``str`` so that a ``Set-Cookie`` which keeps the same
+    value but renews ``expires`` (or flips ``secure`` / ``httpOnly``) still
+    registers as a delta. The legacy save path compared ``expires`` directly
+    and would write the new expiry through; the snapshot path previously
+    keyed on value alone and silently dropped attribute-only refreshes.
+    """
+
+    value: str
+    expires: int | None
+    secure: bool
+    http_only: bool
+
+
+CookieSnapshot: TypeAlias = dict[CookieSnapshotKey, CookieSnapshotValue]
 
 # Tier 1: cookies whose absence Google rejects deterministically.
 #
@@ -384,7 +400,14 @@ class AuthTokens:
         # merge in save_cookies_to_storage will then write only what this
         # process actually rotated, preserving sibling-process state.
         snapshot = snapshot_cookie_jar(jar)
-        csrf_token, session_id, _ = await _fetch_tokens_with_refresh(jar, path, profile)
+        csrf_token, session_id, refreshed = await _fetch_tokens_with_refresh(jar, path, profile)
+
+        # If NOTEBOOKLM_REFRESH_CMD ran, the jar was wholesale replaced from
+        # disk and the pre-fetch ``snapshot`` no longer describes our baseline.
+        # Re-snapshot so the save writes only what changed since the refresh
+        # (typically nothing — refresh-cmd already wrote the disk state).
+        if refreshed:
+            snapshot = snapshot_cookie_jar(jar)
 
         # Persist any refreshed cookies from the token fetch
         save_cookies_to_storage(jar, path, original_snapshot=snapshot)
@@ -1155,11 +1178,17 @@ def snapshot_cookie_jar(cookie_jar: httpx.Cookies) -> CookieSnapshot:
         cookie_jar: The httpx.Cookies object to snapshot.
 
     Returns:
-        Mapping of ``CookieSnapshotKey -> value`` capturing the jar's
-        current contents.
+        Mapping of ``CookieSnapshotKey -> CookieSnapshotValue`` capturing
+        each cookie's value and the attributes the storage_state schema
+        persists (``expires``, ``secure``, ``httpOnly``).
     """
     return {
-        CookieSnapshotKey(cookie.name, cookie.domain, cookie.path or "/"): cookie.value
+        CookieSnapshotKey(cookie.name, cookie.domain, cookie.path or "/"): CookieSnapshotValue(
+            value=cookie.value,
+            expires=cookie.expires,
+            secure=bool(cookie.secure),
+            http_only=_cookie_is_http_only(cookie),
+        )
         for cookie in cookie_jar.jar
         if cookie.name and cookie.domain and cookie.value is not None
     }
@@ -1355,13 +1384,22 @@ def _merge_cookies_with_snapshot(
 
     Closes §3.4.1 (stale-overwrite-fresh) and §3.4.2 (path collapse):
 
-    - **Deltas**: cookies in the jar whose value differs from the snapshot
-      are written to disk. New cookies acquired during the session are
-      treated as deltas (snapshot lookup is ``None``, current value is a
-      string, so they always differ).
-    - **Deletions**: cookies present in the snapshot but no longer in the
-      jar are removed from disk. Captures e.g. ``Max-Age=0`` evictions.
-    - **Untouched**: cookies in the jar whose value matches the snapshot
+    - **Deltas**: cookies in the jar whose snapshot tuple
+      (``value, expires, secure, http_only``) differs from
+      ``original_snapshot`` are written to disk. New cookies acquired
+      during the session are treated as deltas (snapshot lookup is
+      ``None``, so they always differ). Comparing the full tuple keeps
+      attribute-only refreshes (same value, new ``expires``) flowing to
+      disk; the legacy path tracked ``expires`` directly and a regression
+      here would silently drop session-extension Set-Cookies.
+    - **Deletions (CAS-guarded)**: a key present in the snapshot but
+      absent from the jar is dropped from disk **only if** the on-disk
+      value still matches the snapshot value. If disk has rotated to a
+      different value since open time, a sibling process has written it;
+      we preserve their write rather than clobber it with our stale
+      eviction (e.g. an ``Max-Age=0`` that evicted our locally-expired
+      copy must not erase the sibling's freshly-issued replacement).
+    - **Untouched**: cookies in the jar whose tuple matches the snapshot
       are not written, so a sibling-process write to the same key
       survives. Cookies on disk that are not in the snapshot are also
       left alone (they belong to a sibling process or another path).
@@ -1396,10 +1434,10 @@ def _merge_cookies_with_snapshot(
 
     deltas: dict[CookieSnapshotKey, Any] = {}
     for snapshot_key, cookie in cookies_by_snapshot_key.items():
-        if original_snapshot.get(snapshot_key) != cookie.value:
+        if original_snapshot.get(snapshot_key) != current_snapshot.get(snapshot_key):
             deltas[snapshot_key] = cookie
 
-    deletions: set[CookieSnapshotKey] = {
+    deletion_candidates: set[CookieSnapshotKey] = {
         snapshot_key
         for snapshot_key in original_snapshot
         if snapshot_key not in current_snapshot
@@ -1451,12 +1489,26 @@ def _merge_cookies_with_snapshot(
             new_cookies.append(stored_cookie)
             continue
 
-        is_deletion = any(
-            variant in deletions for variant in _cookie_snapshot_key_variants(stored_key)
+        deletion_match = next(
+            (
+                variant
+                for variant in _cookie_snapshot_key_variants(stored_key)
+                if variant in deletion_candidates
+            ),
+            None,
         )
-        if is_deletion:
-            updated_count += 1
-            continue  # drop the entry from disk
+        if deletion_match is not None:
+            # CAS-guard: only drop the disk row if its value still matches
+            # what we observed at snapshot time. A sibling process may have
+            # rewritten this key between our open and our save; clobbering
+            # their fresh value with our local eviction would resurrect the
+            # exact stale-overwrite-fresh hazard the snapshot path exists
+            # to close (just inverted — deletion-of-fresh instead of
+            # value-write-of-stale).
+            snapshot_value = original_snapshot[deletion_match].value
+            if stored_cookie.get("value") == snapshot_value:
+                updated_count += 1
+                continue  # drop the entry from disk
 
         new_cookies.append(stored_cookie)
 
@@ -2137,6 +2189,11 @@ async def fetch_tokens_with_domains(
     # snapshot is the input to the dirty-flag/delta merge that closes the
     # stale-overwrite-fresh race (docs/auth-keepalive.md §3.4.1).
     snapshot = snapshot_cookie_jar(jar)
-    csrf, session_id, _ = await _fetch_tokens_with_refresh(jar, path, profile)
+    csrf, session_id, refreshed = await _fetch_tokens_with_refresh(jar, path, profile)
+    if refreshed:
+        # NOTEBOOKLM_REFRESH_CMD replaced the jar wholesale; the pre-fetch
+        # snapshot would otherwise mis-attribute every fresh cookie as our
+        # rotation and clobber sibling-process state.
+        snapshot = snapshot_cookie_jar(jar)
     save_cookies_to_storage(jar, path, original_snapshot=snapshot)
     return csrf, session_id
