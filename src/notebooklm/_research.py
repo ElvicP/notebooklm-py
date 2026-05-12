@@ -120,6 +120,8 @@ class ResearchAPI:
         if not report:
             return set()
 
+        # Collect URL-like references from both markdown links and bare text,
+        # then subtract markdown images because embedded assets are not citations.
         urls = {
             cls._normalize_url(match.group(1)) for match in _MARKDOWN_LINK_PATTERN.finditer(report)
         }

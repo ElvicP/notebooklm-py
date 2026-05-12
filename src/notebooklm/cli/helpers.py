@@ -16,7 +16,7 @@ import os
 import time
 from dataclasses import dataclass
 from functools import wraps
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit, urlunsplit
 
 import click
@@ -381,33 +381,24 @@ async def import_research_sources(
     if not json_output:
         _display_cited_import_selection(cited_selection)
 
+    retry_kwargs: dict[str, Any] = {"max_elapsed": max_elapsed}
+    if json_output:
+        retry_kwargs["json_output"] = True
+
+    async def _import_selected() -> list[dict[str, str]]:
+        return await import_with_retry(
+            client,
+            notebook_id,
+            task_id,
+            sources_to_import,
+            **retry_kwargs,
+        )
+
     if status_message and not json_output:
         with console.status(status_message):
-            imported = await import_with_retry(
-                client,
-                notebook_id,
-                task_id,
-                sources_to_import,
-                max_elapsed=max_elapsed,
-            )
+            imported = await _import_selected()
     else:
-        if json_output:
-            imported = await import_with_retry(
-                client,
-                notebook_id,
-                task_id,
-                sources_to_import,
-                max_elapsed=max_elapsed,
-                json_output=True,
-            )
-        else:
-            imported = await import_with_retry(
-                client,
-                notebook_id,
-                task_id,
-                sources_to_import,
-                max_elapsed=max_elapsed,
-            )
+        imported = await _import_selected()
 
     return ResearchImportResult(imported, sources_to_import, cited_selection)
 
