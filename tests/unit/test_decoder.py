@@ -110,16 +110,16 @@ class TestParseChunkedResponse:
         assert chunks[0] == ["valid0"]
         assert chunks[9] == ["valid9"]
 
-    def test_skips_mismatched_byte_count_below_threshold(self, caplog):
-        """Mismatched byte counts are malformed chunks, not valid JSON fallbacks."""
+    def test_warns_but_parses_mismatched_byte_count_with_valid_json(self, caplog):
+        """Mismatched byte counts are tolerated when the payload is valid JSON."""
         valid_parts = "\n".join(self._chunk_record([f"valid{i}"]) for i in range(10))
         payload = json.dumps(["wrong-size"])
         response = f"{valid_parts}\n{len(payload) + 1}\n{payload}\n"
 
         chunks = parse_chunked_response(response)
 
-        assert chunks == [[f"valid{i}"] for i in range(10)]
-        assert "declared" in caplog.text
+        assert chunks == [[f"valid{i}"] for i in range(10)] + [["wrong-size"]]
+        assert "declares" in caplog.text
         assert "payload is" in caplog.text
 
     def test_skips_byte_count_without_payload_below_threshold(self, caplog):

@@ -184,10 +184,11 @@ def parse_chunked_response(response: str) -> list[Any]:
 
     Note:
         Malformed chunks are skipped with a warning logged. A byte-count line
-        without a following payload, or with a payload whose UTF-8 byte length
-        does not match the declared count, is treated as malformed and skipped.
-        If the error rate exceeds 10%, raises RPCError as this likely indicates
-        API changes.
+        without a following payload is malformed. A byte-count mismatch is
+        logged but tolerated when the following payload is still valid JSON,
+        because recorded and proxy-transformed streams may not preserve Google's
+        original byte count. If the malformed-record rate exceeds 10%, raises
+        RPCError as this likely indicates API changes.
     """
     if not response or not response.strip():
         return []
@@ -221,17 +222,14 @@ def parse_chunked_response(response: str) -> list[Any]:
             json_str = lines[i]
             actual_byte_count = len(json_str.encode("utf-8"))
             if actual_byte_count != byte_count:
-                skipped_count += 1
                 logger.warning(
-                    "Skipping chunk at line %d: declared %d bytes but payload is %d bytes. "
-                    "Preview: %s",
+                    "Chunk at line %d declares %d bytes but payload is %d bytes; "
+                    "parsing valid JSON payload anyway. Preview: %s",
                     i + 1,
                     byte_count,
                     actual_byte_count,
                     json_str[:100],
                 )
-                i += 1
-                continue
 
             try:
                 chunk = json.loads(json_str)
