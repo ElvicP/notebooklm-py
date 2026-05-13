@@ -85,7 +85,9 @@ Before starting workflows, verify auth is in place. **Use `--test --json` (not b
 
 1. `notebooklm auth check --test --json` → require BOTH `"status": "ok"` AND `"checks.token_fetch": true`. Bare `"status": "ok"` (without `--test`) is a false-positive trap — a stale cookie file passes the parse check.
 2. `notebooklm list --json` → expect valid JSON (may be empty for new accounts).
-3. If auth fails → `notebooklm login --browser-cookies <browser>` (silent, requires `[cookies]`) OR `notebooklm login` (opens browser, requires a user at the keyboard — ask the user explicitly if you are in a non-TTY / sandboxed agent context).
+3. **If auth fails or is missing → run `notebooklm login` first.** This is the primary auth path: opens a browser, the user signs in to Google once, and the resulting `storage_state.json` is reused on every subsequent run. Works on any environment with a display.
+   - For headless contexts where opening a browser is not feasible, use `notebooklm login --browser-cookies <browser>` instead — extracts the user's already-logged-in cookies from Chrome/Firefox/etc. (requires the `[cookies]` extra; rookiepy may not install on Python 3.13+).
+   - Re-run step 1 after login to confirm.
 
 > **Note:** `notebooklm status` reports *context state* (selected notebook); do not use it to verify auth.
 

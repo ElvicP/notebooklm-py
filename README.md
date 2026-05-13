@@ -124,8 +124,13 @@ notebooklm auth check --test --json
 
 **For human CLI users:**
 ```bash
-pip install "notebooklm-py[browser]"   # or: pipx install "notebooklm-py[browser]" for an isolated CLI on $PATH
-notebooklm login                       # opens browser for Google OAuth
+# Install (pipx is recommended on Linux/macOS — keeps the CLI off your system Python;
+# pip works fine if you're already in a venv).
+pipx install "notebooklm-py[browser]"            # OR: pip install "notebooklm-py[browser]"
+playwright install chromium                       # ~170 MB download, no progress bar — be patient (30-90 s).
+                                                  # Login auto-installs this for chromium too,
+                                                  # but doing it up front gives you visible feedback.
+notebooklm login                                  # opens browser for Google OAuth
 ```
 
 **As a library** (in your app's venv): `pip install notebooklm-py`.
