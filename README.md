@@ -88,17 +88,24 @@ These features are available via API/CLI but not exposed in NotebookLM's web int
 
 ## Installation
 
-Most users want one of three install paths:
-
+**For AI agents** (Claude Code, Codex — the project's primary persona):
 ```bash
-pip install "notebooklm-py[browser]"             # CLI use (interactive login)
-pip install notebooklm-py                        # library use (your app's venv)
-pipx install "notebooklm-py[browser]"            # isolated CLI on $PATH
+pip install "notebooklm-py[browser]"
+notebooklm skill install                # registers SKILL.md into ~/.claude/skills/, ~/.agents/skills/
+# Optional, for headless cookie auth: pip install "notebooklm-py[cookies]" (Python ≤ 3.12 — see installation guide for the 3.13+ fallback)
 ```
+
+**For human CLI users:**
+```bash
+pip install "notebooklm-py[browser]"   # or: pipx install "notebooklm-py[browser]" for an isolated CLI on $PATH
+notebooklm login                       # opens browser for Google OAuth
+```
+
+**As a library** (in your app's venv): `pip install notebooklm-py`.
 
 If `playwright install chromium` fails on Linux with `TypeError: onExit is not a function`, see the [Linux workaround](docs/troubleshooting.md#linux).
 
-**Contributors:** see [CONTRIBUTING.md](CONTRIBUTING.md). **AI agents, headless servers, all extras, and platform notes:** see [docs/installation.md](docs/installation.md).
+**Contributors:** see [CONTRIBUTING.md](CONTRIBUTING.md). **Headless servers, all extras, and platform notes:** see [docs/installation.md](docs/installation.md).
 
 ## Quick Start
 
