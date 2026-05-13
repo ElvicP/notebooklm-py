@@ -73,6 +73,29 @@ def email_to_profile_name(email: str, *, fallback: str = "account") -> str:
     return sanitized
 
 
+def _read_config(config_path, *, suppress_errors: bool = True) -> dict:
+    """Read global config, optionally tolerating unreadable/corrupt files."""
+    if not config_path.exists():
+        return {}
+    try:
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        if not suppress_errors:
+            raise
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_config(config_path, data: dict) -> None:
+    """Write global config with private permissions."""
+    config_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    config_path.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    config_path.chmod(0o600)
+
+
 @click.group("profile")
 def profile():
     """Manage authentication profiles for multiple accounts."""
@@ -178,21 +201,14 @@ def switch_cmd(name):
         raise click.ClickException(f"Profile '{name}' not found.{hint}")
 
     config_path = get_config_path()
-    data: dict = {}
-    if config_path.exists():
-        try:
-            data = json.loads(config_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
+    data = _read_config(config_path)
 
     old_profile = data.get("default_profile", "default")
     data["default_profile"] = name
-    config_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    config_path.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-    config_path.chmod(0o600)
+    try:
+        _write_config(config_path, data)
+    except OSError as e:
+        raise click.ClickException(f"Failed to update config.json: {e}") from None
 
     console.print(f"[green]Switched default profile: {old_profile} → {name}[/green]")
 
@@ -268,18 +284,11 @@ def rename_cmd(old_name, new_name):
     # AND config.json doesn't exist (implicit "default" fallback).
     config_path = get_config_path()
     try:
-        data: dict = {}
-        if config_path.exists():
-            data = json.loads(config_path.read_text(encoding="utf-8"))
+        data = _read_config(config_path, suppress_errors=False)
         configured_default = data.get("default_profile") or "default"
         if configured_default == old_name:
             data["default_profile"] = new_name
-            config_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            config_path.write_text(
-                json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
-            )
-            config_path.chmod(0o600)
+            _write_config(config_path, data)
             console.print(f"[dim]Updated default profile in config: {old_name} → {new_name}[/dim]")
     except (json.JSONDecodeError, OSError) as e:
         console.print(
