@@ -11,10 +11,21 @@ source .venv/bin/activate
 uv run playwright install chromium
 pre-commit install
 
-# Run tests / lint / format
-uv run pytest
-uv run ruff check src/ tests/
-uv run ruff format src/ tests/
+# Run the full pre-commit suite (matches what CI runs).
+# IMPORTANT: use the broad `.` scope, not `src/ tests/` — the pre-commit hook
+# in CI invokes ruff-format on the whole tree and is stricter than a narrow scope.
+uv run ruff format --check . && \
+    uv run ruff check . && \
+    uv run mypy src/notebooklm --ignore-missing-imports && \
+    uv run pytest
+```
+
+**No uv?** Plain pip works as a fallback (won't enforce the lockfile, so you may resolve newer dep versions than CI):
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[all]"   # [all] = browser + dev + markdown (no cookies; see installation.md)
+playwright install chromium
+pre-commit install
 ```
 
 For full prerequisites, headless setup, optional extras (`[cookies]`, `[markdown]`), and platform notes, see [docs/installation.md#e-contributor](docs/installation.md#e-contributor).
@@ -25,16 +36,16 @@ This project uses **ruff** for linting and formatting:
 
 ```bash
 # Check for lint issues
-ruff check src/ tests/
+ruff check .
 
 # Auto-fix lint issues
-ruff check --fix src/ tests/
+ruff check --fix .
 
 # Check formatting
-ruff format --check src/ tests/
+ruff format --check .
 
 # Apply formatting
-ruff format src/ tests/
+ruff format .
 ```
 
 **Pre-commit hooks** (already installed by the canonical setup above; included in the `[dev]` extra):
@@ -48,8 +59,8 @@ pre-commit run --all-files                      # manual run on the whole tree
 1. Create a feature branch from `main`
 2. Make your changes with clear commit messages
 3. Ensure tests pass: `pytest`
-4. Ensure lint passes: `ruff check src/ tests/`
-5. Ensure formatting: `ruff format --check src/ tests/`
+4. Ensure lint passes: `ruff check .`
+5. Ensure formatting: `ruff format --check .`
 6. Submit a PR with a description of changes
 
 ### Pull Request Quality Expectations

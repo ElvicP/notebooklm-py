@@ -36,15 +36,15 @@ uv run notebooklm --help
 **IMPORTANT:** Always run these checks before committing to avoid CI failures:
 
 ```bash
-uv run ruff format src/ tests/
-uv run ruff check src/ tests/
+uv run ruff format .
+uv run ruff check .
 uv run mypy src/notebooklm --ignore-missing-imports
 uv run pytest
 ```
 
 Or use this one-liner:
 ```bash
-uv run ruff format src/ tests/ && uv run ruff check src/ tests/ && uv run mypy src/notebooklm --ignore-missing-imports && uv run pytest
+uv run ruff format . && uv run ruff check . && uv run mypy src/notebooklm --ignore-missing-imports && uv run pytest
 ```
 
 ## Architecture
