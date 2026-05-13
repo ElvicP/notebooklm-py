@@ -236,9 +236,12 @@ Non-default browsers, cookie extraction, markdown source dumps.
 
 > **Why this section uses the combined `[browser,cookies]` form** — unlike Persona A, which uses two separate `pip install` calls so a `rookiepy` build failure doesn't leave the user with nothing: power users explicitly opted in, know what `rookiepy` is, and prefer the all-or-nothing tradeoff (single command, no wrapping logic).
 
-- **`--browser-cookies` (no Playwright login):** `pip install "notebooklm-py[browser,cookies]"`. **Caveat:** `rookiepy` may fail to install on Python 3.13/3.14; use Python 3.12 or accept the risk.
+> ⚠️  **Don't use `[all]` for power-user setups.** `[all]` deliberately *excludes* `cookies` (see [§ All vs All-Extras](#all-vs-all-extras)). If you `pip install "notebooklm-py[all]"` and then try `--browser-cookies`, you'll get an opaque `rookiepy` import error. For everything-and-the-kitchen-sink, use `pip install "notebooklm-py[browser,cookies,markdown]"` explicitly (Python ≤ 3.12 only).
+
+- **`--browser-cookies` (no Playwright login):** `pip install "notebooklm-py[browser,cookies]"`. **Caveat:** `rookiepy` may fail to install on Python 3.13/3.14; use Python 3.12 or accept the risk. See [cli-reference.md#login](cli-reference.md#login) for the full `--browser-cookies` syntax (including `firefox::<container>` for Firefox Multi-Account Containers, on every OS — not just macOS) and `notebooklm auth inspect --browser <browser>` for previewing available accounts before import.
 - **Markdown source dumps:** `pip install "notebooklm-py[markdown]"` for `notebooklm source fulltext -f markdown`.
-- **Edge instead of Chromium:** install Edge first (no auto-install for `--browser msedge`); then `notebooklm login --browser msedge`.
+- **Edge instead of Chromium:** install Microsoft Edge from [microsoft.com/edge](https://www.microsoft.com/edge) first — `--browser msedge` does NOT auto-install Edge (only `--browser chromium` auto-installs). Then `notebooklm login --browser msedge`.
+- **Multi-account (personal + work):** see [configuration.md#multiple-accounts](configuration.md#multiple-accounts). Common power-user flow: `notebooklm profile create work && notebooklm -p work login --browser-cookies edge --account work@corp.com`. Use `--all-accounts` to bootstrap profiles for every signed-in Google account in one command.
 
 ---
 
