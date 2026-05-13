@@ -446,7 +446,7 @@ notebooklm source add-research "topic" --mode deep --import-all
 **JSON output:** Use `--json` flag for machine-readable output:
 ```bash
 notebooklm list --json
-notebooklm auth check --json
+notebooklm auth check --test --json   # use --test for network-validated auth (see § Agent Setup Verification)
 notebooklm source list --json
 notebooklm artifact list --json
 ```
@@ -458,7 +458,7 @@ notebooklm artifact list --json
 {"notebooks": [{"index": 1, "id": "...", "title": "...", "is_owner": true, "created_at": "..."}], "count": 1}
 ```
 
-`notebooklm auth check --json`:
+`notebooklm auth check --test --json` (use `--test` to drive the network token-fetch — bare `--json` would leave `"token_fetch": null`):
 ```json
 {"status": "ok", "checks": {"storage_exists": true, "json_valid": true, "cookies_present": true, "sid_cookie": true, "token_fetch": true}, "details": {"storage_path": "...", "auth_source": "file", "cookies_found": ["SID", "HSID", "..."], "cookie_domains": [".google.com"]}}
 ```

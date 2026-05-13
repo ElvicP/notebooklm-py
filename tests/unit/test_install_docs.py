@@ -30,7 +30,7 @@ TROUBLESHOOTING_MD = REPO_ROOT / "docs" / "troubleshooting.md"
 CHANGELOG_MD = REPO_ROOT / "CHANGELOG.md"
 
 CANONICAL_CONTRIBUTOR_INSTALL = "uv sync --frozen --extra browser --extra dev --extra markdown"
-SKILL_BROWSER_LINE_RE = re.compile(r'pip install "notebooklm-py\[browser\]"')
+SKILL_BROWSER_LINE_RE = re.compile(r'pip install "notebooklm-py\[browser\]"(?![\w,])')
 INSTALLATION_LINK_RE = re.compile(r"\bdocs/installation\.md\b")
 
 

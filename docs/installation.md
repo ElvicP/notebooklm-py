@@ -41,7 +41,7 @@ This is the canonical installation guide for `notebooklm-py`. The README has a q
 | **B — End user** | `pip install "notebooklm-py[browser]"` (or `pipx install "notebooklm-py[browser]"` for isolation) |
 | **C — Library user** | `pip install notebooklm-py` |
 | **D — Headless server / CI** | `pip install notebooklm-py` (no Playwright; ship a `storage_state.json`) |
-| **E — Contributor** | `uv sync --frozen --extra browser --extra dev --extra markdown && uv run playwright install chromium` |
+| **E — Contributor** | `uv sync --frozen --extra browser --extra dev --extra markdown && uv run playwright install chromium && uv run pre-commit install` |
 | **F — Power user** | `pip install "notebooklm-py[browser,cookies,markdown]"` (Python ≤ 3.12 only) |
 
 ---
