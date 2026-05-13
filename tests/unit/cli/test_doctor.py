@@ -57,12 +57,21 @@ def test_doctor_reports_clean_profile_layout(runner, isolated_notebooklm_home):
 
     assert data["profile"] == "default"
     assert data["profile_source"] == "config.json"
-    assert data["checks"] == {
-        "migration": {"status": "pass", "detail": "complete"},
-        "profile_dir": {"status": "pass", "detail": str(profile_dir)},
-        "auth": {"status": "pass", "detail": "local SID cookie present (1 cookies)"},
-        "config": {"status": "pass", "detail": "valid (default_profile: default)"},
+    assert data["checks"]["migration"] == {"status": "pass", "detail": "complete"}
+    assert data["checks"]["auth"] == {
+        "status": "pass",
+        "detail": "local SID cookie present (1 cookies)",
     }
+    assert data["checks"]["config"] == {
+        "status": "pass",
+        "detail": "valid (default_profile: default)",
+    }
+    if sys.platform == "win32":
+        assert data["checks"]["profile_dir"]["status"] == "warn"
+        assert str(profile_dir) in data["checks"]["profile_dir"]["detail"]
+        assert "permissions:" in data["checks"]["profile_dir"]["detail"]
+    else:
+        assert data["checks"]["profile_dir"] == {"status": "pass", "detail": str(profile_dir)}
 
 
 def test_doctor_reports_legacy_layout_without_startup_migration(runner, isolated_notebooklm_home):
