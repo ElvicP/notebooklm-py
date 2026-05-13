@@ -14,7 +14,11 @@ import sys
 from pathlib import Path
 
 import pytest
-import tomllib
+
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # pragma: no cover -- only hit on Python 3.10
+    import tomli as tomllib  # transitive via uv.lock; declared in [dev] for safety
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INSTALLATION_MD = REPO_ROOT / "docs" / "installation.md"
