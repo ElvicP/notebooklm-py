@@ -12,6 +12,8 @@ import json
 import os
 import re
 import shutil
+import sys
+from pathlib import Path
 
 import click
 from rich.table import Table
@@ -73,7 +75,7 @@ def email_to_profile_name(email: str, *, fallback: str = "account") -> str:
     return sanitized
 
 
-def _read_config(config_path, *, suppress_errors: bool = True) -> dict:
+def _read_config(config_path: Path, *, suppress_errors: bool = True) -> dict:
     """Read global config, optionally tolerating unreadable/corrupt files."""
     if not config_path.exists():
         return {}
@@ -86,14 +88,19 @@ def _read_config(config_path, *, suppress_errors: bool = True) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _write_config(config_path, data: dict) -> None:
+def _write_config(config_path: Path, data: dict) -> None:
     """Write global config with private permissions."""
-    config_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if sys.platform == "win32":
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        config_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        config_path.parent.chmod(0o700)
     config_path.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+        json.dumps(data, indent=2, ensure_ascii=False, default=str) + "\n",
         encoding="utf-8",
     )
-    config_path.chmod(0o600)
+    if sys.platform != "win32":
+        config_path.chmod(0o600)
 
 
 @click.group("profile")

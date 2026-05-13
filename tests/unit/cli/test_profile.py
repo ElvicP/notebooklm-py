@@ -172,6 +172,25 @@ class TestProfileSwitchCommand:
         assert read_config(tmp_path) == {"language": "ja", "default_profile": "work"}
         if sys.platform != "win32":
             assert ((tmp_path / "config.json").stat().st_mode & 0o777) == 0o600
+            assert (tmp_path.stat().st_mode & 0o777) == 0o700
+
+    def test_switch_secures_existing_config_directory(self, runner, tmp_path):
+        make_profile(tmp_path, "work")
+        if sys.platform != "win32":
+            tmp_path.chmod(0o777)
+
+        result = runner.invoke(cli, ["profile", "switch", "work"], env=notebooklm_env(tmp_path))
+
+        assert result.exit_code == 0, result.output
+        if sys.platform != "win32":
+            assert (tmp_path.stat().st_mode & 0o777) == 0o700
+
+    def test_write_config_serializes_path_values(self, tmp_path):
+        config_path = tmp_path / "config.json"
+
+        profile_module._write_config(config_path, {"profile_path": Path("profiles/work")})
+
+        assert read_config(tmp_path) == {"profile_path": "profiles/work"}
 
     def test_switch_recovers_from_corrupt_config(self, runner, tmp_path):
         make_profile(tmp_path, "work")
