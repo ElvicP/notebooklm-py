@@ -282,6 +282,15 @@ jobs:
       - name: Install notebooklm-py
         run: pip install notebooklm-py
 
+      # Pre-flight: fail fast and loud on missing/expired auth.
+      # `auth check --json` returns exit 0 even when status is "error"; --test makes the network
+      # call needed to detect expired cookies, and the `jq -e` flag converts a non-"ok" status
+      # into a non-zero exit code so the runner step actually fails.
+      - name: Verify auth (fail-fast on expired cookies)
+        env:
+          NOTEBOOKLM_AUTH_JSON: ${{ secrets.NOTEBOOKLM_AUTH_JSON }}
+        run: notebooklm auth check --test --json | jq -e '.status == "ok"'
+
       - name: List notebooks
         env:
           NOTEBOOKLM_AUTH_JSON: ${{ secrets.NOTEBOOKLM_AUTH_JSON }}
