@@ -90,14 +90,27 @@ These features are available via API/CLI but not exposed in NotebookLM's web int
 
 **For AI agents** (Claude Code, Codex — the project's primary persona):
 ```bash
+# 1. Install the package + Chromium for the login flow
 pip install "notebooklm-py[browser]"
+playwright install chromium
 
-# Register the skill — pick ONE (both write to ~/.claude/skills/ and ~/.agents/skills/):
-notebooklm skill install                  # uses the just-installed CLI
-npx skills add teng-lin/notebooklm-py     # uses the open `skills` npm ecosystem
+# 2. Optional [cookies] extra — rookiepy fails to BUILD on Python 3.13+, so gate explicitly
+#    rather than swallowing errors (a swallow would also hide typos / network failures):
+if python -c "import sys; sys.exit(0 if sys.version_info < (3, 13) else 1)"; then
+    pip install "notebooklm-py[cookies]"
+fi
 
-# Optional, for headless cookie auth (Python ≤ 3.12 — see installation guide for the 3.13+ fallback):
-pip install "notebooklm-py[cookies]"
+# 3. Register the skill so your agent harness discovers SKILL.md
+#    Both write to ~/.claude/skills/ and ~/.agents/skills/ — prefer the first if `notebooklm`
+#    is on PATH (it is, after step 1); use the npx form if not:
+notebooklm skill install
+# Alternative: npx skills add teng-lin/notebooklm-py
+
+# 4. Authenticate — cookies path is non-interactive (silent reuse); fallback opens a browser
+notebooklm login --browser-cookies auto || notebooklm login
+
+# 5. Verify — expect `"status": "ok"` in the JSON output (agent should grep this)
+notebooklm auth check --test --json
 ```
 
 **For human CLI users:**
