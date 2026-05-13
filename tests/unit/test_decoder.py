@@ -48,7 +48,7 @@ class TestParseChunkedResponse:
     @staticmethod
     def _chunk_record(data):
         chunk_json = json.dumps(data)
-        return f"{len(chunk_json)}\n{chunk_json}"
+        return f"{len(chunk_json.encode('utf-8'))}\n{chunk_json}"
 
     def test_parses_single_chunk(self):
         """Test parsing response with single chunk."""
