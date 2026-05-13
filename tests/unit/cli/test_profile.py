@@ -190,7 +190,7 @@ class TestProfileSwitchCommand:
 
         profile_module._write_config(config_path, {"profile_path": Path("profiles/work")})
 
-        assert read_config(tmp_path) == {"profile_path": "profiles/work"}
+        assert read_config(tmp_path) == {"profile_path": str(Path("profiles/work"))}
 
     def test_switch_recovers_from_corrupt_config(self, runner, tmp_path):
         make_profile(tmp_path, "work")
