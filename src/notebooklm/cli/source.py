@@ -672,13 +672,13 @@ def source_add_research(
 @click.option(
     "--format",
     "-f",
-    "content_format",
+    "output_format",
     type=click.Choice(["text", "markdown"]),
     default="text",
     help="Content format: text (default) or markdown",
 )
 @with_client
-def source_fulltext(ctx, source_id, notebook_id, json_output, output, content_format, client_auth):
+def source_fulltext(ctx, source_id, notebook_id, json_output, output, output_format, client_auth):
     """Get full content of a source.
 
     Retrieves the complete content from NotebookLM. Use --format markdown to get
@@ -701,7 +701,7 @@ def source_fulltext(ctx, source_id, notebook_id, json_output, output, content_fo
 
             with console.status("Fetching fulltext content..."):
                 fulltext = await client.sources.get_fulltext(
-                    nb_id_resolved, resolved_id, output_format=content_format
+                    nb_id_resolved, resolved_id, output_format=output_format
                 )
 
             if json_output:
@@ -722,14 +722,14 @@ def source_fulltext(ctx, source_id, notebook_id, json_output, output, content_fo
                 console.print(f"[bold]URL:[/bold] {fulltext.url}")
             console.print()
             console.print("[bold cyan]Content:[/bold cyan]")
-            # Show first 2000 chars with truncation notice
+            # markup=False so markdown links like `[text](url)` are not eaten by Rich's tag parser
             if len(fulltext.content) > 2000:
-                console.print(fulltext.content[:2000])
+                console.print(fulltext.content[:2000], markup=False, highlight=False)
                 console.print(
                     f"\n[dim]... ({fulltext.char_count - 2000:,} more chars, use -o to save full content)[/dim]"
                 )
             else:
-                console.print(fulltext.content)
+                console.print(fulltext.content, markup=False, highlight=False)
 
     return _run()
 

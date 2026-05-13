@@ -874,6 +874,17 @@ class SourcesAPI:
         if output_format not in ("text", "markdown"):
             raise ValueError(f"Invalid format: '{output_format}'. Must be 'text' or 'markdown'.")
 
+        # Fail fast on missing optional dep so CLI users don't pay for an RPC
+        # round-trip before seeing the install hint.
+        if output_format == "markdown":
+            try:
+                from markdownify import markdownify as md
+            except ImportError:
+                raise ImportError(
+                    "The 'markdown' format requires the 'markdownify' package. "
+                    "Install it with: pip install 'notebooklm-py[markdown]'"
+                ) from None
+
         # [3],[3] returns HTML at result[4][1]; [2],[2] returns plaintext at result[3][0]
         params = [[source_id], [3], [3]] if output_format == "markdown" else [[source_id], [2], [2]]
 
@@ -908,19 +919,22 @@ class SourcesAPI:
                     url = _extract_source_url(metadata, allow_bare_http=False)
 
             if output_format == "markdown":
-                # HTML content at result[4][1]
+                # HTML content at result[4][1]; may be absent for source types
+                # without an HTML rendition (e.g. youtube, pasted_text).
+                html_content = None
                 if len(result) > 4 and isinstance(result[4], list) and len(result[4]) > 1:
-                    html_content = result[4][1]
-                    if isinstance(html_content, str):
-                        try:
-                            from markdownify import markdownify as md
-                        except ImportError:
-                            raise ImportError(
-                                "The 'markdown' format requires the 'markdownify' package. "
-                                "Please install it with: pip install 'notebooklm-py[markdown]'"
-                            ) from None
-
-                        content = md(html_content, heading_style="ATX")
+                    candidate = result[4][1]
+                    if isinstance(candidate, str):
+                        html_content = candidate
+                if html_content is not None:
+                    content = md(html_content, heading_style="ATX")
+                else:
+                    logger.warning(
+                        "Source %s (type=%s) has no HTML rendition for output_format='markdown'; "
+                        "returning empty content. Retry with output_format='text'.",
+                        source_id,
+                        source_type,
+                    )
             else:
                 # Plaintext content blocks at result[3][0]
                 # Each block may be nested arrays with text strings
