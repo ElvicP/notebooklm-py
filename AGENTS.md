@@ -9,10 +9,12 @@
 
 ## Build, Test, and Development Commands
 
-Use `uv` for local work:
+Canonical contributor install (full guide: [docs/installation.md](docs/installation.md)):
 
 ```bash
-uv sync --extra dev --extra browser
+uv sync --frozen --extra browser --extra dev --extra markdown
+source .venv/bin/activate
+uv run playwright install chromium
 uv run pytest
 uv run ruff check src/ tests/
 uv run ruff format src/ tests/

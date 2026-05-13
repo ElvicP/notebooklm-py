@@ -5,19 +5,19 @@
 ### Getting Started
 
 ```bash
-# Install in development mode
-pip install -e ".[all]"
-playwright install chromium
+# Canonical contributor install (respects uv.lock)
+uv sync --frozen --extra browser --extra dev --extra markdown
+source .venv/bin/activate
+uv run playwright install chromium
+pre-commit install
 
-# Run tests
-pytest
-
-# Run linter
-ruff check src/ tests/
-
-# Run formatter
-ruff format src/ tests/
+# Run tests / lint / format
+uv run pytest
+uv run ruff check src/ tests/
+uv run ruff format src/ tests/
 ```
+
+For full prerequisites, headless setup, optional extras (`[cookies]`, `[markdown]`), and platform notes, see [docs/installation.md#e-contributor](docs/installation.md#e-contributor).
 
 ### Code Quality
 
@@ -37,10 +37,10 @@ ruff format --check src/ tests/
 ruff format src/ tests/
 ```
 
-**Pre-commit hooks** (optional but recommended):
+**Pre-commit hooks** (already installed by the canonical setup above; included in the `[dev]` extra):
 ```bash
-pip install pre-commit
-pre-commit install
+pre-commit install                              # one-time, after the canonical install
+pre-commit run --all-files                      # manual run on the whole tree
 ```
 
 ### Pull Request Process
@@ -146,6 +146,7 @@ Agents should ignore files marked `Deprecated`.
 
 ```
 docs/
+├── installation.md        # Canonical install guide (personas, extras, platform notes)
 ├── cli-reference.md       # CLI command reference
 ├── python-api.md          # Python API reference
 ├── configuration.md       # Storage and settings

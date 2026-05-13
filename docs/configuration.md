@@ -385,13 +385,7 @@ Works out of the box. Chromium is downloaded automatically by Playwright.
 
 ### Linux
 
-```bash
-# Install Playwright dependencies
-playwright install-deps chromium
-
-# Then install Chromium
-playwright install chromium
-```
+For Playwright system dependencies and the Chromium install on Debian/Ubuntu, see [docs/installation.md#platform-notes](installation.md#platform-notes) (and [troubleshooting.md#linux](troubleshooting.md#linux) if you hit `TypeError: onExit is not a function`).
 
 ### Windows
 
@@ -416,18 +410,4 @@ Browser login opens in the Windows host browser. The storage file is saved in th
 
 **Playwright is only required for the `notebooklm login` command.** All other operations use standard HTTP requests via `httpx`.
 
-This means you can run notebooklm on headless servers, Docker containers, and CI/CD environments without Playwright—just copy a valid `storage_state.json` or use `NOTEBOOKLM_AUTH_JSON`.
-
-```bash
-# On headless machine - no Playwright needed
-pip install notebooklm-py
-
-# Copy auth from local machine, or use env var
-scp ~/.notebooklm/storage_state.json user@server:~/.notebooklm/
-# OR
-export NOTEBOOKLM_AUTH_JSON='{"cookies": [...]}'
-
-# All commands work except 'login'
-notebooklm list
-notebooklm ask "Summarize the sources"
-```
+For the install + auth-bootstrap recipe (run `notebooklm login` on a workstation, copy `storage_state.json` to the server, set `NOTEBOOKLM_AUTH_JSON`), see the canonical Persona D guide: [docs/installation.md#d-headless-server-or-ci](installation.md#d-headless-server-or-ci).

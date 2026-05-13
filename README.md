@@ -88,47 +88,17 @@ These features are available via API/CLI but not exposed in NotebookLM's web int
 
 ## Installation
 
-```bash
-# Basic installation
-pip install notebooklm-py
-
-# With browser login support (required for first-time setup)
-pip install "notebooklm-py[browser]"
-playwright install chromium
-
-# Optional: import cookies from your existing browser instead of running Playwright
-pip install "notebooklm-py[cookies]"
-```
-
-If `playwright install chromium` fails with `TypeError: onExit is not a function`, see the Linux workaround in [Troubleshooting](docs/troubleshooting.md#linux).
-
-### CLI-only install (`uv tool` / `pipx`)
-
-If you only need the `notebooklm` CLI (not the Python library) and want it on your `$PATH` in an isolated environment, install with [`uv tool`](https://docs.astral.sh/uv/concepts/tools/) or [`pipx`](https://pipx.pypa.io/):
+Most users want one of three install paths:
 
 ```bash
-# uv (recommended on systems where uv is already the package manager)
-uv tool install notebooklm-py
-uv tool install "notebooklm-py[browser]"
-uv tool install "notebooklm-py[cookies]"
-
-# pipx equivalent
-pipx install notebooklm-py
-pipx install "notebooklm-py[browser]"
-pipx install "notebooklm-py[cookies]"
+pip install "notebooklm-py[browser]"             # CLI use (interactive login)
+pip install notebooklm-py                        # library use (your app's venv)
+pipx install "notebooklm-py[browser]"            # isolated CLI on $PATH
 ```
 
-This is the right path for shell scripts, cron jobs, and ad-hoc terminal use — the `notebooklm` command stays available regardless of which project venv is active.
+If `playwright install chromium` fails on Linux with `TypeError: onExit is not a function`, see the [Linux workaround](docs/troubleshooting.md#linux).
 
-### Development Installation
-
-For contributors or testing unreleased features:
-
-```bash
-pip install git+https://github.com/teng-lin/notebooklm-py@main
-```
-
-⚠️ The main branch may contain unstable changes. Use PyPI releases for production.
+**Contributors:** see [CONTRIBUTING.md](CONTRIBUTING.md). **AI agents, headless servers, all extras, and platform notes:** see [docs/installation.md](docs/installation.md).
 
 ## Quick Start
 

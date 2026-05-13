@@ -9,16 +9,28 @@ Complete programmatic access to Google NotebookLM—including capabilities not e
 
 ## Installation
 
-**From PyPI (Recommended):**
+**From PyPI (Recommended for AI agents — Python-version-aware):**
 ```bash
-pip install notebooklm-py
+pip install "notebooklm-py[browser]"   # mandatory; errors must propagate
+
+# [cookies] (rookiepy) is optional and known to FAIL TO BUILD on Python 3.13+.
+# Skip it deliberately on 3.13+ rather than swallowing the error — that lets
+# *real* install failures (typos, network, PyPI outages) surface for the agent.
+if python -c "import sys; sys.exit(0 if sys.version_info < (3, 13) else 1)"; then
+    pip install "notebooklm-py[cookies]"   # errors propagate
+else
+    echo "Skipping [cookies] on Python 3.13+ (rookiepy unavailable). Use 'notebooklm login' interactively."
+fi
 ```
+
+> Full install matrix (extras, headless servers, contributor flow): [Installation guide on GitHub](https://github.com/teng-lin/notebooklm-py/blob/main/docs/installation.md).
 
 **From GitHub (use latest release tag, NOT main branch):**
 ```bash
 # Get the latest release tag (using curl)
 LATEST_TAG=$(curl -s https://api.github.com/repos/teng-lin/notebooklm-py/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
-pip install "git+https://github.com/teng-lin/notebooklm-py@${LATEST_TAG}"
+# Includes [browser] so the interactive `notebooklm login` flow works.
+pip install "notebooklm-py[browser] @ git+https://github.com/teng-lin/notebooklm-py@${LATEST_TAG}"
 ```
 
 ⚠️ **DO NOT install from main branch** (`pip install git+https://github.com/teng-lin/notebooklm-py`). The main branch may contain unreleased/unstable changes. Always use PyPI or a specific release tag, unless you are testing unreleased features.
@@ -69,11 +81,13 @@ For automated environments, multiple accounts, or parallel agent workflows:
 
 ## Agent Setup Verification
 
-Before starting workflows, verify the CLI is ready:
+Before starting workflows, verify auth is in place:
 
-1. `notebooklm status` → Should show "Authenticated as: email@..."
-2. `notebooklm list --json` → Should return valid JSON (even if empty notebooks list)
-3. If either fails → Run `notebooklm login`
+1. `notebooklm auth check --json` → expect `{"status": "ok", ...}`. For network-validated check use `--test --json` (proves cookies still authenticate against Google, not just that the file parses).
+2. `notebooklm list --json` → expect valid JSON (may be empty for new accounts).
+3. If auth fails → `notebooklm login` (interactive) or `notebooklm login --browser-cookies <browser>` (requires `[cookies]`).
+
+> **Note:** `notebooklm status` reports *context state* (selected notebook); do not use it to verify auth.
 
 ## When This Skill Activates
 
