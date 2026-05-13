@@ -1,7 +1,6 @@
 """Unit tests for the ``notebooklm doctor`` diagnostics command."""
 
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -189,7 +188,7 @@ def test_doctor_fix_creates_missing_profile_dir(runner, isolated_notebooklm_home
     data = json.loads(result.output)
     profile_dir = home / "profiles" / "default"
     assert profile_dir.is_dir()
-    if os.name != "nt":
+    if sys.platform != "win32":
         assert profile_dir.stat().st_mode & 0o777 == 0o700
     assert data["checks"]["profile_dir"] == {"status": "pass", "detail": str(profile_dir)}
     assert data["fixes_applied"] == [f"Created profile directory: {profile_dir}"]
@@ -197,8 +196,10 @@ def test_doctor_fix_creates_missing_profile_dir(runner, isolated_notebooklm_home
 
 def test_doctor_fix_migrates_legacy_layout(runner, isolated_notebooklm_home):
     home = isolated_notebooklm_home
-    _write_json(home / "storage_state.json", _storage([{"name": "SID", "value": "x"}]))
-    _write_json(home / "context.json", {"current_notebook": "nb_123"})
+    storage_payload = _storage([{"name": "SID", "value": "x"}])
+    context_payload = {"current_notebook": "nb_123"}
+    _write_json(home / "storage_state.json", storage_payload)
+    _write_json(home / "context.json", context_payload)
 
     result = runner.invoke(
         cli,
@@ -211,6 +212,12 @@ def test_doctor_fix_migrates_legacy_layout(runner, isolated_notebooklm_home):
     assert not (home / "storage_state.json").exists()
     assert (profile_dir / "storage_state.json").exists()
     assert (profile_dir / "context.json").exists()
+    assert json.loads((profile_dir / "storage_state.json").read_text(encoding="utf-8")) == (
+        storage_payload
+    )
+    assert json.loads((profile_dir / "context.json").read_text(encoding="utf-8")) == (
+        context_payload
+    )
     assert data["checks"]["migration"] == {
         "status": "pass",
         "detail": "complete (just migrated)",
