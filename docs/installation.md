@@ -169,16 +169,22 @@ print(notebooklm.__version__)
    ```bash
    pip install "notebooklm-py[browser]"
    playwright install chromium
-   notebooklm login                              # writes ~/.notebooklm/storage_state.json
+   notebooklm login   # writes ~/.notebooklm/profiles/default/storage_state.json
    ```
-2. **Copy `storage_state.json` to the server.** Either:
+2. **Move the auth file to the server.** Either ship it as a file:
    ```bash
-   scp ~/.notebooklm/storage_state.json user@server:~/.notebooklm/
+   scp ~/.notebooklm/profiles/default/storage_state.json \
+       user@server:~/.notebooklm/profiles/default/storage_state.json
    ```
-   or set the env var in your CI / deployment:
+   or stuff the contents into a CI / deployment env var (preferred for ephemeral runners):
    ```bash
-   export NOTEBOOKLM_AUTH_JSON="$(cat ~/.notebooklm/storage_state.json)"
+   export NOTEBOOKLM_AUTH_JSON="$(cat ~/.notebooklm/profiles/default/storage_state.json)"
    ```
+
+   > **CI env-var notes:**
+   > - `storage_state.json` is typically 4–15 KB — well under GitHub Actions' 48 KB single-secret cap.
+   > - Watch for trailing newlines: pipe with `tr -d '\n'` if your secret-set tool adds one (`cat ... | tr -d '\n' | gh secret set NOTEBOOKLM_AUTH_JSON`).
+   > - For **ephemeral runners** (GitHub Actions, GitLab CI — no persistent disk between runs), the layer-5 in-process refresh from [troubleshooting.md](troubleshooting.md#authentication-errors) cannot persist rotated cookies. Run `notebooklm auth refresh` periodically on a workstation cron and push the refreshed file with `gh secret set NOTEBOOKLM_AUTH_JSON < ~/.notebooklm/profiles/default/storage_state.json`.
 3. **On the server**, run any non-`login` command:
    ```bash
    notebooklm list

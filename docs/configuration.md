@@ -296,8 +296,8 @@ jobs:
 ### Obtaining the Secret Value
 
 1. Run `notebooklm login` locally
-2. Copy the contents of `~/.notebooklm/storage_state.json`
-3. Add as a GitHub repository secret named `NOTEBOOKLM_AUTH_JSON`
+2. Copy the contents of `~/.notebooklm/profiles/default/storage_state.json` (the canonical write location; the legacy `~/.notebooklm/storage_state.json` is only read as a fallback)
+3. Add as a GitHub repository secret named `NOTEBOOKLM_AUTH_JSON` (see [installation.md#d-headless-server-or-ci](installation.md#d-headless-server-or-ci) for trailing-newline + ephemeral-runner refresh notes)
 
 ### Alternative: File-Based Auth
 
