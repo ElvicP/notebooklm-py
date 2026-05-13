@@ -133,11 +133,17 @@ playwright install chromium                       # ~170 MB download, no progres
 notebooklm login                                  # opens browser for Google OAuth
 ```
 
-**As a library** (in your app's venv): `pip install notebooklm-py`.
+**As a library** (embedding in your app — no Playwright, no Chromium download):
+```bash
+pip install notebooklm-py    # core install: httpx + click + rich (~10 MB)
+# All RPC traffic uses httpx; auth is cookie-based. Ship a pre-acquired
+# `storage_state.json` (or set NOTEBOOKLM_AUTH_JSON) and you never need
+# Playwright in your app or container. See docs/installation.md#c-library-user.
+```
 
 If `playwright install chromium` fails on Linux with `TypeError: onExit is not a function`, see the [Linux workaround](docs/troubleshooting.md#linux).
 
-**Contributors:** see [CONTRIBUTING.md](CONTRIBUTING.md). **Headless servers, all extras, and platform notes:** see [docs/installation.md](docs/installation.md).
+**Contributors:** see [CONTRIBUTING.md](CONTRIBUTING.md). **Headless servers, all extras, FastAPI/Docker patterns (follow-up issue), and platform notes:** see [docs/installation.md](docs/installation.md).
 
 ## Quick Start
 
