@@ -163,7 +163,7 @@ import notebooklm
 print(notebooklm.__version__)
 ```
 
-> **Production deployment patterns (planned follow-up).** Multi-reviewer feedback flagged that production-grade FastAPI/Django integration — client lifetime in a `lifespan` handler, httpx pool sizing, behavior under concurrent CSRF refresh, multi-tenant `storage_state.json` rotation, a service-shaped Dockerfile, and structured rate-limit/backoff patterns — is not yet covered. These belong in `docs/python-api.md` and are out of scope for this install-docs consolidation. Tracking as a follow-up.
+> **Production deployment patterns (tracked in [#417](https://github.com/teng-lin/notebooklm-py/issues/417)).** Production-grade FastAPI/Django integration — client lifetime in a `lifespan` handler, httpx pool sizing, behavior under concurrent CSRF refresh, multi-tenant `storage_state.json` rotation, a service-shaped Dockerfile, and structured rate-limit/backoff patterns — is not yet covered in `docs/python-api.md`. These were intentionally deferred from the install-docs consolidation (PR #416) to keep its scope focused. See [#417](https://github.com/teng-lin/notebooklm-py/issues/417) for the gap inventory and acceptance criteria.
 
 ### D. Headless server or CI
 
