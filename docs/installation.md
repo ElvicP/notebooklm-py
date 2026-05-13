@@ -83,15 +83,21 @@ npx skills add teng-lin/notebooklm-py
 
 If the agent is reading `SKILL.md` from inside an already-installed location (e.g. `~/.claude/skills/notebooklm/SKILL.md`), the skill is already present — you only need the Python package install + auth.
 
-**Authentication priority (agent attempts in order):**
+**Authentication — `notebooklm login` is the primary path:**
 
-1. **Reuse existing `~/.notebooklm/storage_state.json`** if present and **proven against the network**:
-   ```bash
-   notebooklm auth check --test --json   # require "status": "ok" AND "checks.token_fetch": true
-   ```
-   (Bare `auth check --json` only proves the file parses and an `SID` cookie exists — it does NOT prove the cookies still authenticate against Google.)
-2. **If file is missing or stale** → `notebooklm login --browser-cookies auto` (requires `[cookies]`).
-3. **Fallback** → ask the user to run `notebooklm login` interactively, then re-verify with step 1.
+```bash
+notebooklm login                       # primary: opens browser, user signs in to Google once
+```
+
+After login, `storage_state.json` persists at `~/.notebooklm/profiles/default/storage_state.json` and is reused on every subsequent run. **Verify with `notebooklm auth check --test --json`** (require `"status": "ok"` AND `"checks.token_fetch": true` — bare `auth check --json` only proves the file parses, not that the cookies still authenticate against Google).
+
+**Headless / sandboxed agent contexts** (no display, can't open a browser): use the cookie-extraction path instead, requires the `[cookies]` extra installed in step 2:
+
+```bash
+notebooklm login --browser-cookies auto    # rookiepy autodetects an installed browser
+```
+
+If the agent is in a no-display sandbox AND `[cookies]` isn't installed (Python 3.13+ skipped it), ask the user to run `notebooklm login` on a workstation and copy the resulting `~/.notebooklm/profiles/default/storage_state.json` to the agent's environment (or set `NOTEBOOKLM_AUTH_JSON`).
 
 **Verification (machine-parseable):**
 
