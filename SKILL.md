@@ -81,11 +81,11 @@ For automated environments, multiple accounts, or parallel agent workflows:
 
 ## Agent Setup Verification
 
-Before starting workflows, verify auth is in place:
+Before starting workflows, verify auth is in place. **Use `--test --json` (not bare `--json`)** — bare `--json` only proves the cookie file parses; `--test` makes a network call and proves the cookies still authenticate against Google.
 
-1. `notebooklm auth check --json` → expect `{"status": "ok", ...}`. For network-validated check use `--test --json` (proves cookies still authenticate against Google, not just that the file parses).
+1. `notebooklm auth check --test --json` → require BOTH `"status": "ok"` AND `"checks.token_fetch": true`. Bare `"status": "ok"` (without `--test`) is a false-positive trap — a stale cookie file passes the parse check.
 2. `notebooklm list --json` → expect valid JSON (may be empty for new accounts).
-3. If auth fails → `notebooklm login` (interactive) or `notebooklm login --browser-cookies <browser>` (requires `[cookies]`).
+3. If auth fails → `notebooklm login --browser-cookies <browser>` (silent, requires `[cookies]`) OR `notebooklm login` (opens browser, requires a user at the keyboard — ask the user explicitly if you are in a non-TTY / sandboxed agent context).
 
 > **Note:** `notebooklm status` reports *context state* (selected notebook); do not use it to verify auth.
 

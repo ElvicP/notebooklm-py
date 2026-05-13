@@ -106,10 +106,19 @@ fi
 notebooklm skill install
 # Alternative: npx skills add teng-lin/notebooklm-py
 
-# 4. Authenticate — cookies path is non-interactive (silent reuse); fallback opens a browser
-notebooklm login --browser-cookies auto || notebooklm login
+# 4. Authenticate — try cheapest first; only the last branch needs a human at the keyboard
+if notebooklm auth check --test --json | grep -q '"status": "ok"'; then
+    echo "Already authenticated."
+elif python -c "import rookiepy" 2>/dev/null && notebooklm login --browser-cookies auto; then
+    echo "Authenticated via existing browser cookies."
+else
+    # Last resort — opens a browser and waits for the user to sign in to Google.
+    # An agent in a non-TTY / sandbox should ASK THE USER to run this manually instead.
+    echo "Interactive login required:"
+    notebooklm login
+fi
 
-# 5. Verify — expect `"status": "ok"` in the JSON output (agent should grep this)
+# 5. Verify — agent should grep for `"status": "ok"` AND `"checks.token_fetch": true`
 notebooklm auth check --test --json
 ```
 
