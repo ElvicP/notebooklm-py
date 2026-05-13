@@ -91,7 +91,8 @@ These features are available via API/CLI but not exposed in NotebookLM's web int
 **For AI agents** (Claude Code, Codex — the project's primary persona):
 ```bash
 pip install "notebooklm-py[browser]"
-notebooklm skill install                # registers SKILL.md into ~/.claude/skills/, ~/.agents/skills/
+notebooklm skill install                # OR: npx skills add teng-lin/notebooklm-py
+                                        # registers SKILL.md into ~/.claude/skills/, ~/.agents/skills/
 # Optional, for headless cookie auth: pip install "notebooklm-py[cookies]" (Python ≤ 3.12 — see installation guide for the 3.13+ fallback)
 ```
 
