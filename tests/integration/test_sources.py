@@ -1026,7 +1026,7 @@ class TestGetFulltext:
     async def test_get_fulltext_invalid_format_raises(self, auth_tokens):
         """Unknown output_format must fail fast before any RPC call."""
         async with NotebookLMClient(auth_tokens) as client:
-            with pytest.raises(ValueError, match="text.*markdown"):
+            with pytest.raises(ValueError, match=r"text.*markdown"):
                 await client.sources.get_fulltext(
                     "nb_123",
                     "src_x",
