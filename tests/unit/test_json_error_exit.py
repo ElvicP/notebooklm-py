@@ -39,11 +39,31 @@ def runner() -> CliRunner:
 
 
 @pytest.fixture
-def mock_auth_env() -> Generator[None, None, None]:
-    """Stub auth loading + token fetch so --json paths run offline."""
+def mock_auth_env(monkeypatch) -> Generator[None, None, None]:
+    """Stub auth loading + token fetch so --json paths run offline.
+
+    Covers three CLI auth entry points so this test file is portable across
+    macOS/Ubuntu/Windows CI runners that have no ``~/.notebooklm`` storage:
+
+    1. ``load_auth_from_storage`` — used by ``with_client``-decorated commands
+       (source/artifact/chat/note/share/research/notebook/session).
+    2. ``fetch_tokens_with_domains`` — token fetch on the same path.
+    3. ``AuthTokens.from_storage`` — used directly by ``download`` commands,
+       which bypass ``with_client``.
+
+    Also clears ``NOTEBOOKLM_AUTH_JSON`` so a stray empty env var on the
+    runner can't trip the "set but empty" pre-flight check.
+    """
+    monkeypatch.delenv("NOTEBOOKLM_AUTH_JSON", raising=False)
+    # Stub object that download commands hand to NotebookLMClient(auth); the
+    # client itself is patched, so the auth value is never inspected.
+    stub_auth = MagicMock(name="AuthTokens-stub")
     with (
         patch("notebooklm.cli.helpers.load_auth_from_storage") as mock_load,
         patch("notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock) as mock_fetch,
+        patch(
+            "notebooklm.auth.AuthTokens.from_storage", new_callable=AsyncMock
+        ) as mock_from_storage,
     ):
         mock_load.return_value = {
             "SID": "test",
@@ -53,6 +73,7 @@ def mock_auth_env() -> Generator[None, None, None]:
             "SAPISID": "test",
         }
         mock_fetch.return_value = ("csrf_token", "session_id")
+        mock_from_storage.return_value = stub_auth
         yield
 
 
@@ -128,14 +149,28 @@ def _run_with_mock_client(runner: CliRunner, args: list[str], client: MagicMock)
             p.stop()
 
 
+def _safe_stderr(result) -> str:
+    """Read ``result.stderr`` without tripping click's ``mix_stderr`` guard.
+
+    Older clicks (<8.2) raise ``ValueError`` when accessing ``.stderr`` on a
+    ``CliRunner`` that mixed streams. Newer ones expose it unconditionally.
+    Diagnostic output should never mask the real assertion failure.
+    """
+    try:
+        return result.stderr
+    except (ValueError, AttributeError):
+        return "<stderr unavailable: mix_stderr=True>"
+
+
 def _assert_json_error_contract(result, case_id: str) -> dict:
     """Assert (1) nonzero exit, (2) stdout parses as JSON, (3) error marker present.
 
     Returns the parsed JSON document for further inspection.
     """
+    stderr = _safe_stderr(result)
     assert result.exit_code != 0, (
         f"{case_id}: expected nonzero exit, got {result.exit_code}\n"
-        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        f"stdout:\n{result.stdout}\nstderr:\n{stderr}"
     )
     assert result.stdout.strip(), f"{case_id}: empty stdout (no JSON payload emitted)"
     try:
@@ -143,7 +178,7 @@ def _assert_json_error_contract(result, case_id: str) -> dict:
     except json.JSONDecodeError as exc:
         pytest.fail(
             f"{case_id}: stdout is not valid JSON ({exc})\n"
-            f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
+            f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{stderr}"
         )
     assert isinstance(payload, dict), f"{case_id}: top-level JSON must be an object"
     # Either {"error": true, ...} (json_error_response) or {"error": "msg", ...}
@@ -400,5 +435,5 @@ def test_download_audio_non_json_mode_still_exits_nonzero(runner: CliRunner, moc
     )
     assert result.exit_code != 0, (
         f"non-JSON failure must keep exiting nonzero; got {result.exit_code}\n"
-        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        f"stdout:\n{result.stdout}\nstderr:\n{_safe_stderr(result)}"
     )
