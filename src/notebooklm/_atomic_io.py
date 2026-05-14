@@ -55,7 +55,7 @@ def atomic_write_json(path: Path, data: Any, *, mode: int = 0o600) -> None:
             # partial temp files would leak into the storage parent dir on
             # every failed save attempt.
             temp_path = Path(temp_file.name)
-            temp_file.write(json.dumps(data, indent=2, ensure_ascii=False))
+            json.dump(data, temp_file, indent=2, ensure_ascii=False)
         if sys.platform != "win32":
             # chmod is a no-op on Windows (and can confuse ACLs)
             os.chmod(temp_path, mode)

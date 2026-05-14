@@ -110,7 +110,7 @@ def test_concurrent_writers_never_corrupt(tmp_path: Path) -> None:
 
 
 def test_crash_midwrite_preserves_original(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """If json.dumps raises mid-write, the pre-existing file is untouched
+    """If json.dump raises mid-write, the pre-existing file is untouched
     and no temp file is left behind in the parent dir.
     """
     target = tmp_path / "state.json"
@@ -126,7 +126,7 @@ def test_crash_midwrite_preserves_original(tmp_path: Path, monkeypatch: pytest.M
     def explode(*args, **kwargs):  # noqa: ANN002, ANN003
         raise Boom("disk full")
 
-    monkeypatch.setattr(mod.json, "dumps", explode)
+    monkeypatch.setattr(mod.json, "dump", explode)
 
     with pytest.raises(Boom):
         atomic_write_json(target, {"new": "value"})

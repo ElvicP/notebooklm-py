@@ -393,12 +393,11 @@ def _write_extracted_cookies(
 
     try:
         storage_path.parent.mkdir(parents=True, exist_ok=True)
-        storage_path.write_text(
-            json.dumps(storage_state, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        # Atomic write with chmod 0o600 — avoids non-atomic + world-readable
+        # window from plain write_text + post-hoc chmod.
+        atomic_write_json(storage_path, storage_state)
         if sys.platform != "win32":
             storage_path.parent.chmod(0o700)
-            storage_path.chmod(0o600)
     except OSError as e:
         logger.error("Failed to save authentication to %s: %s", storage_path, e)
         console.print(f"[red]Failed to save authentication to {storage_path}.[/red]\nDetails: {e}")
@@ -742,13 +741,13 @@ def _login_with_browser_cookies(
     # Create parent directory (avoid mode= on Windows to prevent ACL issues)
     try:
         storage_path.parent.mkdir(parents=True, exist_ok=True)
-        storage_path.write_text(
-            json.dumps(storage_state, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        # Atomic write with chmod 0o600 — avoids non-atomic + world-readable
+        # window from plain write_text + post-hoc chmod.
+        atomic_write_json(storage_path, storage_state)
         if sys.platform != "win32":
-            # On Unix: ensure both directory and file have restrictive permissions
+            # On Unix: ensure directory has restrictive permissions
+            # (atomic_write_json handles the file mode).
             storage_path.parent.chmod(0o700)
-            storage_path.chmod(0o600)
     except OSError as e:
         logger.error("Failed to save authentication to %s: %s", storage_path, e)
         console.print(f"[red]Failed to save authentication to {storage_path}.[/red]\nDetails: {e}")
@@ -1300,8 +1299,7 @@ def register_session_commands(cli):
                     raise SystemExit(1)
 
                 # Atomic write with chmod 0o600 — Playwright's path= argument
-                # writes directly (non-atomic + world-readable window). See
-                # PR-T1.H2 / audit X1 #1.
+                # writes directly (non-atomic + world-readable window).
                 state = context.storage_state()
                 atomic_write_json(storage_path, state)
                 from ..auth import clear_account_metadata
