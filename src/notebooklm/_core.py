@@ -274,9 +274,8 @@ class ClientCore:
 
     @property
     def _reqid_counter(self) -> int:
-        """Current request-id counter value.
-
-        Read-only by convention. Writes go through the setter, which warns.
+        """Current request-id counter value. Read access is safe; write access
+        via the property setter emits ``DeprecationWarning``.
         """
         return self._reqid_counter_value
 
@@ -295,12 +294,27 @@ class ClientCore:
 
         Args:
             step: Increment applied to the counter. Defaults to ``100000`` to
-                match the historical bump used by ``ChatAPI.ask``.
+                match the historical bump used by ``ChatAPI.ask``. Must be a
+                positive ``int`` (not ``bool``); ``step <= 0`` would break
+                monotonicity / uniqueness guarantees that Google's chat
+                backend relies on.
 
         Returns:
             The post-increment counter value. Successive calls return strictly
             monotonic, distinct values even under ``asyncio.gather``.
+
+        Raises:
+            TypeError: If ``step`` is not an ``int`` (bool is rejected even
+                though it is a subclass of ``int``).
+            ValueError: If ``step`` is not positive.
         """
+        # ``bool`` is a subclass of ``int`` in Python — reject it explicitly so
+        # ``next_reqid(step=True)`` doesn't silently degrade to ``step=1``.
+        if not isinstance(step, int) or isinstance(step, bool):
+            raise TypeError(f"step must be int, got {type(step).__name__}")
+        if step <= 0:
+            raise ValueError(f"step must be positive, got {step!r}")
+        # Safe: no await between check and assign, so no other coroutine can race us here.
         if self._reqid_lock is None:
             # Lazy init — safe to construct here because we're already in an
             # async context (caller is awaiting us).

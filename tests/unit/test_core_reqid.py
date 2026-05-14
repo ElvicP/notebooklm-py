@@ -84,3 +84,44 @@ def test_read_modify_write_warns() -> None:
     with pytest.warns(DeprecationWarning, match="next_reqid"):
         core._reqid_counter += 100000
     assert core._reqid_counter == 200000
+
+
+@pytest.mark.asyncio
+async def test_next_reqid_rejects_zero_step() -> None:
+    """``step=0`` would break uniqueness (two callers see the same value)."""
+    core = _make_core()
+    with pytest.raises(ValueError, match="step must be positive"):
+        await core.next_reqid(step=0)
+    # Counter must not have moved.
+    assert core._reqid_counter == 100000
+
+
+@pytest.mark.asyncio
+async def test_next_reqid_rejects_negative_step() -> None:
+    """``step<0`` would break monotonicity (counter moves backwards)."""
+    core = _make_core()
+    with pytest.raises(ValueError, match="step must be positive"):
+        await core.next_reqid(step=-1)
+    assert core._reqid_counter == 100000
+
+
+@pytest.mark.asyncio
+async def test_next_reqid_rejects_non_int_step() -> None:
+    """Non-``int`` ``step`` (e.g. ``str``) must raise ``TypeError`` early."""
+    core = _make_core()
+    with pytest.raises(TypeError, match="step must be int"):
+        await core.next_reqid(step="100")  # type: ignore[arg-type]
+    assert core._reqid_counter == 100000
+
+
+@pytest.mark.asyncio
+async def test_next_reqid_rejects_bool_step() -> None:
+    """``bool`` is a subclass of ``int`` in Python; the guard must still
+    reject ``step=True`` to prevent a silent degradation to ``step=1``.
+    """
+    core = _make_core()
+    with pytest.raises(TypeError, match="step must be int"):
+        await core.next_reqid(step=True)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="step must be int"):
+        await core.next_reqid(step=False)  # type: ignore[arg-type]
+    assert core._reqid_counter == 100000
