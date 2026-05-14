@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 from urllib.parse import urlencode
 
 import httpx
@@ -119,10 +119,11 @@ class _TransportAuthExpired(Exception):
     """Raised by ``_perform_authed_post`` when the refresh callback itself
     failed during an auth recovery attempt.
 
-    ``original`` is the transport-layer exception that triggered the refresh
-    attempt (``httpx.HTTPStatusError`` for an HTTP-mapped auth failure, or
-    ``httpx.RequestError`` for a network-level one). The refresh callback's
-    error is attached via ``__cause__``.
+    ``original`` is the transport-layer ``httpx.HTTPStatusError`` that
+    triggered the refresh attempt — :func:`is_auth_error` only flags
+    ``HTTPStatusError`` responses, so network-level ``RequestError``s never
+    reach this path. The refresh callback's error is attached via
+    ``__cause__``.
 
     Callers map this onto their own error domain:
 
@@ -911,7 +912,6 @@ class ClientCore:
         source_path: str = "/",
         allow_null: bool = False,
         _is_retry: bool = False,
-        _rate_limit_retries: int = 0,
     ) -> Any:
         """Make an RPC call to the NotebookLM API.
 
@@ -923,8 +923,7 @@ class ClientCore:
             params: Parameters for the RPC call (nested list structure).
             source_path: The source path parameter (usually /notebook/{id}).
             allow_null: If True, don't raise error when response is null.
-            _is_retry: Internal flag to prevent infinite retries.
-            _rate_limit_retries: Internal counter for rate limit retries.
+            _is_retry: Internal flag to prevent infinite decode-time retries.
 
         Returns:
             Decoded response data.
@@ -937,20 +936,18 @@ class ClientCore:
         if not self._http_client:
             raise RuntimeError("Client not initialized. Use 'async with' context.")
 
-        # Only the outer rpc_call mints a request id; the recursive retry path
-        # (_is_retry=True or rate limit retry) inherits the parent's id so a
-        # single failure→refresh→retry sequence appears under one [req=<id>]
-        # in the logs.
-        if _is_retry or _rate_limit_retries > 0:
-            return await self._rpc_call_impl(
-                method, params, source_path, allow_null, _is_retry, _rate_limit_retries
-            )
+        # Only the outer rpc_call mints a request id; the decode-time retry
+        # path (``_is_retry=True``) inherits the parent's id so a single
+        # decode-error → refresh → retry sequence appears under one
+        # ``[req=<id>]`` in the logs. HTTP-status retries (auth + 429) happen
+        # inside ``_perform_authed_post`` without recursion, so they don't
+        # need this guard.
+        if _is_retry:
+            return await self._rpc_call_impl(method, params, source_path, allow_null, _is_retry)
 
         _reqid_token = set_request_id()
         try:
-            return await self._rpc_call_impl(
-                method, params, source_path, allow_null, _is_retry, _rate_limit_retries
-            )
+            return await self._rpc_call_impl(method, params, source_path, allow_null, _is_retry)
         finally:
             reset_request_id(_reqid_token)
 
@@ -961,7 +958,6 @@ class ClientCore:
         source_path: str,
         allow_null: bool,
         _is_retry: bool,
-        _rate_limit_retries: int = 0,
     ) -> Any:
         # Caller (rpc_call) has already verified self._http_client is not None;
         # re-assert for mypy narrowing through this helper.
@@ -974,14 +970,24 @@ class ClientCore:
         # refreshed CSRF and the URL with the refreshed session id /
         # authuser. Capturing ``self.auth.csrf_token`` here directly would
         # snapshot at outer-call time and replay a stale token on retry.
+        rpc_request = encode_rpc_request(method, params)
+
         def _build(snapshot: _AuthSnapshot) -> tuple[str, str, dict[str, str]]:
-            # _build_url reads ``self.auth.session_id`` / ``self.auth.authuser``
-            # / ``self.auth.account_email`` directly; those mirror the snapshot
-            # because the refresh callback mutates ``self.auth`` in place
-            # before we loop. We pass the snapshot's csrf_token into
-            # ``build_request_body`` to keep the body internally consistent.
+            # Deliberate divergence: the body uses the snapshot's csrf_token
+            # (a frozen point-in-time copy) while ``_build_url`` reads
+            # ``self.auth.session_id`` / ``self.auth.authuser`` /
+            # ``self.auth.account_email`` LIVE off ``self.auth``. The two
+            # stay consistent only because the no-await invariant between
+            # ``_snapshot()`` and the ``client.post(...)`` call inside
+            # ``_perform_authed_post`` guarantees no coroutine can mutate
+            # ``self.auth`` between snapshot capture and request build (see
+            # the AST guard in ``tests/unit/test_concurrency_refresh_race.py``
+            # — adding an ``await`` anywhere in this factory or in
+            # ``_build_url`` would silently desync URL from body across a
+            # refresh). The snapshot's session_id/authuser/account_email
+            # fields are carried for symmetry / future-proofing but are not
+            # the source of truth on this code path.
             url = self._build_url(method, source_path)
-            rpc_request = encode_rpc_request(method, params)
             body = build_request_body(rpc_request, snapshot.csrf_token)
             return url, body, {}
 
@@ -1021,9 +1027,7 @@ class ClientCore:
                 elapsed,
                 exc.response.status_code,
             )
-            return self._raise_rpc_error_from_http_status(
-                exc, method, _rate_limit_retries=_rate_limit_retries
-            )
+            self._raise_rpc_error_from_http_status(exc, method)
         except httpx.RequestError as exc:
             elapsed = time.perf_counter() - start
             logger.error("RPC %s failed after %.3fs: %s", method.name, elapsed, exc)
@@ -1065,15 +1069,12 @@ class ClientCore:
         self,
         exc: httpx.HTTPStatusError,
         method: RPCMethod,
-        *,
-        _rate_limit_retries: int = 0,
-    ) -> Any:
+    ) -> NoReturn:
         """Map an HTTP-status failure onto the RPC error hierarchy.
 
         Centralizes the status-to-exception mapping that historically lived
-        inline in ``_rpc_call_impl``. Returns ``NoReturn`` semantically (it
-        always raises), but is typed ``Any`` so callers can ``return`` it
-        from ``async`` functions for mypy.
+        inline in ``_rpc_call_impl``. Always raises — typed ``NoReturn`` so
+        mypy sees the caller's control flow terminates here.
         """
         status = exc.response.status_code
 
@@ -1112,8 +1113,13 @@ class ClientCore:
         self,
         exc: httpx.RequestError,
         method: RPCMethod,
-    ) -> None:
-        """Map a non-HTTPStatus transport failure onto NetworkError/RPCTimeoutError."""
+    ) -> NoReturn:
+        """Map a non-HTTPStatus transport failure onto NetworkError/RPCTimeoutError.
+
+        Always raises — typed ``NoReturn`` so mypy treats the caller's
+        control flow as terminating here, preventing an unbound-``response``
+        warning in the decode block of ``_rpc_call_impl``.
+        """
         # Check ConnectTimeout first (more specific than general TimeoutException)
         if isinstance(exc, httpx.ConnectTimeout):
             raise NetworkError(
@@ -1175,30 +1181,14 @@ class ClientCore:
             method.name,
         )
 
-        # This function is only called when _refresh_callback is set
-        assert self._refresh_callback is not None
-
-        # Use lock to coordinate refresh task creation
-        # Note: refresh_callback is expected to update auth headers internally
-        # Lock is always created when callback is set (see __init__)
-        assert self._refresh_lock is not None
-
-        # Determine which task to await (existing or new)
-        async with self._refresh_lock:
-            if self._refresh_task is not None and not self._refresh_task.done():
-                # Another refresh is in progress, wait on it
-                refresh_task = self._refresh_task
-                logger.debug("Waiting on existing refresh task for RPC %s", method.name)
-            else:
-                # Start a new refresh task
-                # Cast needed: Awaitable → Coroutine for create_task (async funcs return coroutines)
-                coro = cast(Coroutine[Any, Any, AuthTokens], self._refresh_callback())
-                self._refresh_task = asyncio.create_task(coro)
-                refresh_task = self._refresh_task
-
-        # Await refresh outside the lock so other callers can join
+        # Delegate the shared-task + lock dance to ``_await_refresh`` so this
+        # decode-time retry path stays in lockstep with the transport-time
+        # path inside ``_perform_authed_post``. On refresh failure, surface
+        # the *original* RPC decode error (not the refresh error) so callers
+        # see the symptom they originally hit — refresh failure is attached
+        # as ``__cause__``.
         try:
-            await refresh_task
+            await self._await_refresh()
         except Exception as refresh_error:
             logger.warning("Token refresh failed: %s", refresh_error)
             raise original_error from refresh_error
