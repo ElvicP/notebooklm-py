@@ -120,8 +120,10 @@ jobs:
       run: uv run pytest --cov=src/notebooklm --cov-report=term-missing --cov-report=json:coverage.json --cov-fail-under=90
 
     - name: Assert per-file coverage floors (T6.C)
-      # Only ubuntu-latest emits the canonical coverage.json — running this
-      # on every matrix slot would just repeat the same assertion against
-      # platform-equivalent coverage numbers.
+      # Linux-only because ``coverage.json`` on Windows records backslash
+      # paths (e.g. ``src\notebooklm\cli\doctor.py``) that won't match the
+      # forward-slash keys in ``[tool.notebooklm.per_file_coverage_floors]``
+      # in pyproject.toml. macOS uses forward slashes and would also work,
+      # but a single OS is enough — the floors are platform-independent.
       if: runner.os == 'Linux'
       run: uv run python scripts/check_coverage_thresholds.py --coverage-json coverage.json
