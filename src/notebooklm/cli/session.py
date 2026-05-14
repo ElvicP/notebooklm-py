@@ -1417,18 +1417,20 @@ def register_session_commands(cli):
     @cli.command("status")
     @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
     @click.option("--paths", "show_paths", is_flag=True, help="Show resolved file paths")
-    def status(json_output, show_paths):
+    @click.pass_context
+    def status(ctx, json_output, show_paths):
         """Show current context (active notebook and conversation).
 
         Use --paths to see where configuration files are located
         (useful for debugging NOTEBOOKLM_HOME).
         """
-        context_file = get_context_path()
+        storage_override = ctx.obj.get("storage_path") if ctx.obj else None
+        context_file = get_context_path(storage_path=storage_override)
         notebook_id = get_current_notebook()
 
         # Handle --paths flag
         if show_paths:
-            path_info = get_path_info()
+            path_info = get_path_info(storage_path=storage_override)
             if json_output:
                 json_output_response({"paths": path_info})
                 return
@@ -1542,7 +1544,8 @@ def register_session_commands(cli):
         pass
 
     @auth_group.command("logout")
-    def auth_logout():
+    @click.pass_context
+    def auth_logout(ctx):
         """Log out by clearing saved authentication.
 
         Removes both the saved cookie file (storage_state.json) and the
@@ -1611,7 +1614,8 @@ def register_session_commands(cli):
             if clear_context(clear_account=True):
                 removed_any = True
         except OSError as exc:
-            context_file = get_context_path()
+            storage_override = ctx.obj.get("storage_path") if ctx.obj else None
+            context_file = get_context_path(storage_path=storage_override)
             logger.error("Failed to remove context file %s: %s", context_file, exc)
             console.print(
                 f"[red]Cannot remove context file: {exc}[/red]\n"
