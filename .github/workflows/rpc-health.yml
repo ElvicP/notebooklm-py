@@ -84,8 +84,6 @@ jobs:
         if [ -z "$affected" ]; then
           affected="(see report)"
         fi
-        echo "affected=${affected}" >> "$GITHUB_OUTPUT"
-        echo "sha=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
         {
           echo "## Non-transient ERROR detected"
           echo ""

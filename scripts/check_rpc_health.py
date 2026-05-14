@@ -1024,9 +1024,9 @@ def print_summary(results: list[CheckResult]) -> int:
     total = len(results)
     tested = total - counts[CheckStatus.SKIPPED]
 
-    error_results = [r for r in results if r.status == CheckStatus.ERROR]
-    transient_count = sum(1 for r in error_results if is_transient_error(r.error))
-    non_transient_count = len(error_results) - transient_count
+    non_transient_errors, transient_errors = partition_errors(results)
+    non_transient_count = len(non_transient_errors)
+    transient_count = len(transient_errors)
 
     print(f"TESTED:   {tested}/{total} methods")
     print(f"OK:       {counts[CheckStatus.OK]}/{tested}")
@@ -1051,7 +1051,6 @@ def print_summary(results: list[CheckResult]) -> int:
 
     # Print details for errors, split into non-transient (real failures)
     # and transient (rate-limit) buckets so the cron output is actionable.
-    non_transient_errors, transient_errors = partition_errors(results)
     if non_transient_errors or transient_errors:
         print()
         print("ERROR DETAILS:")

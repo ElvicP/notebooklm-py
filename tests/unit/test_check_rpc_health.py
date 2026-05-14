@@ -228,10 +228,17 @@ def test_print_summary_lists_affected_methods_on_exit_three(
     ]
     assert print_summary(results) == 3
     out = capsys.readouterr().out
+    # Extract the "affected methods" header line so we only inspect the list
+    # of method names (the surrounding explanatory text legitimately mentions
+    # "rate-limit transients").
+    header_line = next(
+        line for line in out.splitlines() if "non-transient ERROR detected in methods:" in line
+    )
+    affected = header_line.split("methods:", 1)[1]
     # Both non-transient methods appear in the affected list…
-    assert "timeout" in out and "parse" in out
-    # …and the transient one does NOT trip the failure header.
-    assert "rate-limit" not in out.split("RESULT:")[1].lower() or True
+    assert "timeout" in affected and "parse" in affected
+    # …and the transient one is NOT listed as an affected method.
+    assert "rate" not in affected
 
 
 # ---------------------------------------------------------------------------
