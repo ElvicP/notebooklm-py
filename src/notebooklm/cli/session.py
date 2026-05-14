@@ -103,6 +103,15 @@ def _connection_error_help() -> str:
     )
 
 
+def _use_notebook_table() -> Table:
+    t = Table()
+    t.add_column("ID", style="cyan")
+    t.add_column("Title", style="green")
+    t.add_column("Owner")
+    t.add_column("Created", style="dim")
+    return t
+
+
 def _is_navigation_interrupted_error(error: str | Exception) -> bool:
     """Return True for Playwright navigation races that are safe to ignore."""
     error_str = str(error).lower()
@@ -1383,11 +1392,7 @@ def register_session_commands(cli):
         # Useful when the network is unavailable or for debugging.
         if force:
             set_current_notebook(notebook_id)
-            table = Table()
-            table.add_column("ID", style="cyan")
-            table.add_column("Title", style="green")
-            table.add_column("Owner")
-            table.add_column("Created", style="dim")
+            table = _use_notebook_table()
             table.add_row(notebook_id, "(not verified — --force)", "-", "-")
             console.print(table)
             return
@@ -1439,11 +1444,7 @@ def register_session_commands(cli):
         created_str = nb.created_at.strftime("%Y-%m-%d") if nb.created_at else None
         set_current_notebook(resolved_id, nb.title, nb.is_owner, created_str)
 
-        table = Table()
-        table.add_column("ID", style="cyan")
-        table.add_column("Title", style="green")
-        table.add_column("Owner")
-        table.add_column("Created", style="dim")
+        table = _use_notebook_table()
 
         created = created_str or "-"
         owner_status = "Owner" if nb.is_owner else "Shared"
