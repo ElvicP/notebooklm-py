@@ -1,8 +1,104 @@
 """RPC types and constants for NotebookLM API."""
 
+import json
+import logging
+import os
 from enum import Enum
 
 from .._env import DEFAULT_BASE_URL, get_base_url
+
+logger = logging.getLogger(__name__)
+
+# Track which override dicts we've already logged at INFO level, keyed by the
+# hash of the canonical (sorted) item tuple. This dedupes multi-client tests
+# while still emitting one INFO line per *distinct* override set in a process.
+_logged_override_hashes: set[int] = set()
+
+
+def _load_rpc_overrides() -> dict[str, str]:
+    """Parse ``NOTEBOOKLM_RPC_OVERRIDES`` into a ``{method_name: rpc_id}`` map.
+
+    The env var is a JSON object mapping :class:`RPCMethod` member names
+    (e.g. ``"LIST_NOTEBOOKS"``) to override RPC ID strings. Any malformed
+    input — invalid JSON, non-object top-level (array, string, etc.) —
+    is logged at WARNING and treated as no overrides.
+
+    Returns an empty dict when the env var is unset or invalid.
+    """
+    raw = os.environ.get("NOTEBOOKLM_RPC_OVERRIDES")
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        logger.warning("NOTEBOOKLM_RPC_OVERRIDES is not valid JSON: %s", exc)
+        return {}
+    if not isinstance(data, dict):
+        logger.warning(
+            "NOTEBOOKLM_RPC_OVERRIDES must be a JSON object mapping "
+            "method names to RPC IDs, got %s",
+            type(data).__name__,
+        )
+        return {}
+    return {str(k): str(v) for k, v in data.items()}
+
+
+def resolve_rpc_id(method_name: str, canonical_id: str) -> str:
+    """Return the override RPC id for ``method_name`` when applicable, else ``canonical_id``.
+
+    Overrides are sourced from the ``NOTEBOOKLM_RPC_OVERRIDES`` env var and
+    are gated on the configured base host being on the allowlist
+    (:data:`notebooklm._env._ALLOWED_BASE_HOSTS`). When the host is off the
+    allowlist — which the strict ``get_base_url()`` validator already
+    enforces, but we re-check here as defense in depth — overrides are
+    ignored to avoid leaking custom RPC IDs to untrusted endpoints.
+
+    The first time a distinct override set is consulted in a process, the
+    full mapping is logged at INFO level so operators can confirm the
+    config they intended is live. Subsequent calls with the same set are
+    silent to avoid spamming multi-client tests / long-running daemons.
+
+    Args:
+        method_name: The :class:`RPCMethod` enum member name
+            (e.g. ``"LIST_NOTEBOOKS"``).
+        canonical_id: The fallback RPC ID — usually
+            ``RPCMethod.<member>.value`` — returned when no override applies.
+
+    Returns:
+        Either the override RPC id (when an override is configured AND the
+        host is on the allowlist) or ``canonical_id``.
+    """
+    # Local import to avoid a circular import at module-load time —
+    # ``_env`` is dependency-free, but the public package ``notebooklm``
+    # imports ``rpc.types`` during init, and ``_env`` ships from the same
+    # package.
+    from .._env import _ALLOWED_BASE_HOSTS, get_base_host
+
+    try:
+        host = get_base_host()
+    except Exception:
+        # If the host can't even be resolved (e.g. malformed
+        # NOTEBOOKLM_BASE_URL), pretend overrides are disabled rather than
+        # crashing the resolver. The URL builder itself will surface the
+        # real error.
+        return canonical_id
+    if host not in _ALLOWED_BASE_HOSTS:
+        return canonical_id
+
+    overrides = _load_rpc_overrides()
+    if not overrides:
+        return canonical_id
+
+    key = hash(tuple(sorted(overrides.items())))
+    if key not in _logged_override_hashes:
+        _logged_override_hashes.add(key)
+        logger.info(
+            "NOTEBOOKLM_RPC_OVERRIDES applied: %s",
+            ", ".join(f"{k}={v}" for k, v in sorted(overrides.items())),
+        )
+
+    return overrides.get(method_name, canonical_id)
+
 
 # Backward-compatible default-host endpoint constants. Runtime code should use
 # the lazy get_* helpers below so NOTEBOOKLM_BASE_URL is honored after import.
