@@ -28,9 +28,9 @@ from .download_helpers import (
     resolve_partial_artifact_id,
     select_artifact,
 )
+from .error_handler import handle_errors
 from .helpers import (
     console,
-    handle_error,
     json_output_response,
     require_notebook,
     resolve_notebook_id,
@@ -685,11 +685,30 @@ def _run_artifact_download(ctx, artifact_type: str, **kwargs) -> None:
     """Execute download for a specific artifact type.
 
     Handles the common pattern across all artifact download commands.
+
+    Exception path is routed through ``cli.error_handler.handle_errors`` so
+    ``--json`` is honored on errors (typed JSON envelope on stdout),
+    ``RateLimitError.retry_after`` surfaces in the JSON body, ``AuthError``
+    shows the re-authentication hint in text mode, and exit codes follow the
+    typed policy (1 = library/user error, 2 = unexpected/system error).
+    See ``error_handler.py`` for the canonical exit-code table (audit row I14).
+
+    The "returned dict with an ``error`` field" path
+    (``_download_artifacts_generic`` → ``{"error": ...}`` for empty artifact
+    lists, name-not-found, etc.) is intentionally **not** routed through the
+    typed handler — it preserves the legacy `{"error": "<msg>"}` JSON shape
+    that scripts already depend on, and exits 1 directly.
     """
     config = ARTIFACT_CONFIGS[artifact_type]
     json_output = kwargs.get("json_output", False)
-
+    # ``--verbose`` is captured on the root group as a count; opt-in to the
+    # extra error context (RPC method_id, etc.) only when the user asks.
     try:
+        verbose = int(ctx.find_root().params.get("verbose", 0) or 0) >= 1
+    except Exception:
+        verbose = False
+
+    with handle_errors(verbose=verbose, json_output=json_output):
         result = run_async(
             _download_artifacts_generic(
                 ctx=ctx,
@@ -706,6 +725,8 @@ def _run_artifact_download(ctx, artifact_type: str, **kwargs) -> None:
             # Mirror the non-JSON exit-code behavior: any top-level "error"
             # field means the operation failed even though we returned a
             # parseable JSON document. Automation must see a nonzero exit.
+            # NOTE: this preserves the legacy returned-dict envelope shape
+            # (free-form ``error`` string, no typed ``code``) — see docstring.
             if "error" in result:
                 raise SystemExit(1)
             return
@@ -713,9 +734,6 @@ def _run_artifact_download(ctx, artifact_type: str, **kwargs) -> None:
         _display_download_result(result, artifact_type)
         if "error" in result:
             raise SystemExit(1)
-
-    except Exception as e:
-        handle_error(e)
 
 
 @download.command("report")
