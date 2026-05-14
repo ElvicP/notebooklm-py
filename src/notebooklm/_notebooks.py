@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 from ._core import ClientCore
 from ._env import get_base_url
 from ._settings import build_get_user_settings_params, extract_account_limits
-from .exceptions import NotebookLimitError, RPCError
+from .exceptions import NotebookLimitError, NotebookNotFoundError, RPCError
 from .rpc import RPCMethod, safe_index
 from .types import AccountLimits, Notebook, NotebookDescription, SuggestedTopic
 
@@ -145,6 +145,12 @@ class NotebooksAPI:
 
         Returns:
             Notebook object with details.
+
+        Raises:
+            NotebookNotFoundError: If the notebook does not exist. The backend
+                returns an empty / degenerate payload (missing ``id`` and
+                ``title``) for unknown IDs rather than a proper RPC error, so
+                this method post-validates the parsed response.
         """
         params = [notebook_id, None, [2], None, 0]
         result = await self._core.rpc_call(
@@ -154,7 +160,16 @@ class NotebooksAPI:
         )
         # get_notebook returns [nb_info, ...] where nb_info contains the notebook data
         nb_info = result[0] if result and isinstance(result, list) and len(result) > 0 else []
-        return Notebook.from_api_response(nb_info)
+        notebook = Notebook.from_api_response(nb_info)
+        # Degenerate response: empty payload, or both id+title parsed to empty
+        # strings. Either condition reliably signals an unknown notebook_id —
+        # a valid notebook always has at least one of id/title populated.
+        if not nb_info or (not notebook.id and not notebook.title):
+            raise NotebookNotFoundError(
+                notebook_id,
+                method_id=RPCMethod.GET_NOTEBOOK.value,
+            )
+        return notebook
 
     async def delete(self, notebook_id: str) -> bool:
         """Delete a notebook.
