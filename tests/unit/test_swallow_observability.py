@@ -169,7 +169,12 @@ async def test_description_partial_summary_logs_debug(caplog):
 
 
 def test_migration_config_unparseable_logs_debug(caplog, tmp_path, monkeypatch):
-    """migration.py:133 — unparseable migration config logs at DEBUG."""
+    """migration.py — unparseable migration config logs at DEBUG.
+
+    After T3.E the lock-protected ``atomic_update_json`` surfaces the
+    parse failure as a ``json.JSONDecodeError`` which the helper catches
+    and reports as "Migration config update failed".
+    """
     import notebooklm.migration as mig
 
     bad = tmp_path / "config.json"
@@ -180,7 +185,7 @@ def test_migration_config_unparseable_logs_debug(caplog, tmp_path, monkeypatch):
         mig._set_default_profile_in_config()
 
     assert any(
-        "Migration config unparseable" in r.message and r.levelno == logging.DEBUG
+        "Migration config update failed" in r.message and r.levelno == logging.DEBUG
         for r in caplog.records
     )
 
@@ -227,10 +232,13 @@ def _file_contains_best_effort_after_except(filepath: Path, except_line: int) ->
 
 # (relative-to-SRC_ROOT path, except-line). Lines refer to the `except ...:`
 # statement; the helper scans the 4 lines following it for `# best-effort:`.
+# Note: the previous ``cli/helpers.py:596`` site (``set_current_notebook``'s
+# best-effort rewrite-from-scratch) was retired in T3.E — that branch now
+# uses :func:`notebooklm._atomic_io.atomic_update_json` with explicit
+# JSONDecodeError handling that re-runs the mutator on an empty dict.
 _SILENT_SITES = [
     ("cli/_firefox_containers.py", 133),
     ("cli/_firefox_containers.py", 364),
-    ("cli/helpers.py", 596),
     ("notebooklm_cli.py", 66),
 ]
 

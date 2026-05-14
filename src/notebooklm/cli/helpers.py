@@ -21,11 +21,13 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit, urlunsplit
 
 import click
+from filelock import FileLock
 from rich.console import Console
 from rich.table import Table
 
 from ..auth import AuthTokens, build_cookie_jar, load_auth_from_storage
 from ..exceptions import NetworkError, RPCError, RPCTimeoutError
+from ..io import atomic_update_json, atomic_write_json
 from ..paths import get_context_path
 from ..research import select_cited_sources
 from ..types import ArtifactType, CitedSourceSelection
@@ -547,17 +549,24 @@ def _get_context_value(key: str) -> str | None:
 
 
 def _set_context_value(key: str, value: str | None) -> None:
-    """Set or clear a single value in context.json."""
+    """Set or clear a single value in context.json.
+
+    Uses ``atomic_update_json`` so concurrent CLI invocations cannot lose
+    updates by interleaving read-modify-write cycles.
+    """
     context_file = get_context_path()
     if not context_file.exists():
         return
-    try:
-        data = json.loads(context_file.read_text(encoding="utf-8"))
+
+    def _mutate(data: dict[str, Any]) -> dict[str, Any]:
         if value is not None:
             data[key] = value
         elif key in data:
             del data[key]
-        context_file.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        return data
+
+    try:
+        atomic_update_json(context_file, _mutate)
     except json.JSONDecodeError:
         logger.warning(
             "Context file %s is corrupted; cannot update '%s'. Run 'notebooklm clear' to reset.",
@@ -583,29 +592,37 @@ def set_current_notebook(
 
     conversation_id is never preserved — the server owns the canonical ID per
     notebook, and a stale local value would silently use the wrong UUID.
+
+    Uses ``atomic_update_json`` so the account-metadata preservation and the
+    notebook-context overwrite happen as one lock-protected critical section.
     """
     context_file = get_context_path()
-    context_file.parent.mkdir(parents=True, exist_ok=True)
 
-    data: dict[str, Any] = {}
-    if context_file.exists():
+    def _mutate(existing: dict[str, Any]) -> dict[str, Any]:
+        data: dict[str, Any] = {}
+        # Preserve account metadata used for multi-account auth routing.
+        if isinstance(existing.get("account"), dict):
+            data["account"] = existing["account"]
+        data["notebook_id"] = notebook_id
+        if title:
+            data["title"] = title
+        if is_owner is not None:
+            data["is_owner"] = is_owner
+        if created_at:
+            data["created_at"] = created_at
+        return data
+
+    try:
+        atomic_update_json(context_file, _mutate)
+    except json.JSONDecodeError:
+        # Existing context file is unparseable — drop it so the retry's read
+        # sees a missing file (mutator runs on the empty-dict path), then
+        # rewrite from scratch. Account metadata is unrecoverable here.
         try:
-            existing = json.loads(context_file.read_text(encoding="utf-8"))
-            if isinstance(existing, dict) and isinstance(existing.get("account"), dict):
-                data["account"] = existing["account"]
-        except (json.JSONDecodeError, OSError):
-            # best-effort: existing config unreadable; rewrite from scratch.
+            context_file.unlink()
+        except OSError:
             pass
-
-    data["notebook_id"] = notebook_id
-    if title:
-        data["title"] = title
-    if is_owner is not None:
-        data["is_owner"] = is_owner
-    if created_at:
-        data["created_at"] = created_at
-
-    context_file.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        atomic_update_json(context_file, _mutate)
 
 
 def clear_context(*, clear_account: bool = False) -> bool:
@@ -615,10 +632,21 @@ def clear_context(*, clear_account: bool = False) -> bool:
     metadata used for multi-account auth routing is preserved. ``auth logout``
     passes ``clear_account=True`` to remove the whole file.
 
+    Holds the same sibling ``.lock`` file used by :func:`atomic_update_json`
+    so concurrent writers don't lose updates against our clear-and-delete.
+
     Returns True if a context file was changed or removed, False if none existed.
     """
     context_file = get_context_path()
-    if context_file.exists():
+    if not context_file.exists():
+        return False
+    lock_path = context_file.with_suffix(context_file.suffix + ".lock")
+    context_file.parent.mkdir(parents=True, exist_ok=True)
+    with FileLock(str(lock_path), timeout=10.0):
+        # Re-check existence under the lock — another writer may have
+        # removed it between the early-return check and the lock acquire.
+        if not context_file.exists():
+            return False
         if clear_account:
             context_file.unlink()
             return True
@@ -637,12 +665,11 @@ def clear_context(*, clear_account: bool = False) -> bool:
             context_file.unlink()
             return True
         if data != original:
-            context_file.write_text(
-                json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
-            )
+            # atomic_update_json would re-acquire the lock; instead use the
+            # atomic write directly since we already hold the lock here.
+            atomic_write_json(context_file, data)
             return True
         return False
-    return False
 
 
 def get_current_conversation() -> str | None:

@@ -185,12 +185,16 @@ class TestProfileSwitchCommand:
         if sys.platform != "win32":
             assert (tmp_path.stat().st_mode & 0o777) == 0o700
 
-    def test_write_config_serializes_path_values(self, tmp_path):
+    def test_atomic_write_config_roundtrips_payload(self, tmp_path):
+        """The lock-protected wrapper writes whatever the mutator returns and
+        the next reader sees the exact same dict. Paths are no longer auto-
+        stringified — callers must pass JSON-serializable types directly.
+        """
         config_path = tmp_path / "config.json"
 
-        profile_module._write_config(config_path, {"profile_path": Path("profiles/work")})
+        profile_module._atomic_write_config(config_path, lambda d: {**d, "default_profile": "work"})
 
-        assert read_config(tmp_path) == {"profile_path": str(Path("profiles/work"))}
+        assert read_config(tmp_path) == {"default_profile": "work"}
 
     def test_switch_recovers_from_corrupt_config(self, runner, tmp_path):
         make_profile(tmp_path, "work")
@@ -206,7 +210,7 @@ class TestProfileSwitchCommand:
         config_path = tmp_path / "config.json"
 
         with patch.object(
-            profile_module, "_write_config", side_effect=OSError("permission denied")
+            profile_module, "_atomic_write_config", side_effect=OSError("permission denied")
         ):
             result = runner.invoke(
                 cli,

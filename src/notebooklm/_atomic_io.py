@@ -8,6 +8,11 @@ pattern (NamedTemporaryFile in the same directory, ``chmod 0o600``, then
 Default permission mode is ``0o600`` because the primary caller writes
 Playwright storage state containing session cookies, which are credential-
 equivalent secrets.
+
+For read-modify-write workflows on shared JSON state (``context.json``,
+``config.json``), use :func:`atomic_update_json` — it wraps the read, mutate,
+and atomic write inside a cross-process file lock (via the ``filelock``
+library) so that two concurrent CLI invocations never lose updates.
 """
 
 from __future__ import annotations
@@ -17,8 +22,11 @@ import logging
 import os
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+from filelock import FileLock
 
 logger = logging.getLogger(__name__)
 
@@ -67,3 +75,49 @@ def atomic_write_json(path: Path, data: Any, *, mode: int = 0o600) -> None:
             except Exception as cleanup_err:
                 logger.debug("Failed to clean up temp file %s: %s", temp_path, cleanup_err)
         raise
+
+
+def atomic_update_json(
+    path: Path,
+    mutator: Callable[[dict[str, Any]], dict[str, Any]],
+    *,
+    mode: int = 0o600,
+    timeout: float = 10.0,
+) -> None:
+    """Lock + read + mutate + atomic write of a JSON file.
+
+    Acquires a sibling ``<path>.lock`` file via :class:`filelock.FileLock`
+    (cross-platform: POSIX + macOS + Windows), reads the current JSON contents
+    (or an empty dict if the file does not exist), passes them to ``mutator``,
+    and writes the result back via :func:`atomic_write_json`.
+
+    The lock is held across the entire read-modify-write sequence so that
+    two concurrent CLI invocations cannot lose updates by writing stale
+    snapshots over each other. The default ``timeout`` is generous enough to
+    survive normal contention but bounded so a crashed holder cannot wedge
+    the next caller forever — exceeding it raises :class:`filelock.Timeout`.
+
+    Args:
+        path: Target JSON file. Parent directory is created if missing.
+        mutator: Pure function ``current -> updated``. Must return a dict.
+            Callers may mutate ``current`` in place and return it.
+        mode: POSIX permission bits for the written file (default ``0o600``).
+        timeout: Seconds to wait for the lock before raising.
+
+    Raises:
+        filelock.Timeout: If the lock cannot be acquired within ``timeout``.
+        json.JSONDecodeError: If the existing file is not valid JSON. Callers
+            wanting recovery-on-corruption should pre-clean the file.
+        OSError: From filesystem operations (mkdir, write, replace).
+    """
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with FileLock(str(lock_path), timeout=timeout):
+        if path.exists():
+            current = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(current, dict):
+                current = {}
+        else:
+            current = {}
+        updated = mutator(current)
+        atomic_write_json(path, updated, mode=mode)
