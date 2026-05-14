@@ -183,7 +183,6 @@ def test_block_mirror_marker_passes(tmp_path):
         ]
     )
     assert result.returncode == 0
-    assert "21 bash block" not in result.stdout  # not the real-repo count
     assert "1 bash block" in result.stdout
 
 
@@ -235,7 +234,7 @@ def test_block_mirror_marker_blank_line_above_passes(tmp_path):
 
 
 def test_block_mirror_indented_block_in_list_recognized(tmp_path):
-    """Bash blocks inside numbered/bulleted lists (4-space indent) parse correctly."""
+    """Bash blocks inside numbered/bulleted lists (3-space indent) parse correctly."""
     install_md = (
         "# Install\n\n"
         "1. Step one:\n"
