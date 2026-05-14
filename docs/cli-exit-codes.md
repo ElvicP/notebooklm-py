@@ -8,9 +8,11 @@ scripts, CI pipelines, and AI-agent automations should rely on these codes for
 control flow rather than scraping stdout/stderr text — the text is intended for
 humans and may evolve, but the exit-code contract is stable.
 
-For the canonical implementation, see
+For the canonical implementation, see the `handle_errors` context manager in
 [`src/notebooklm/cli/error_handler.py`](../src/notebooklm/cli/error_handler.py)
-(lines 64-67 for the policy table, line 81 for the SIGINT handler).
+— the policy table lives in its docstring and the `KeyboardInterrupt` clause
+sits immediately below (at the time of writing, around lines 64-67 and :81;
+rely on the symbol names rather than the line numbers if they drift).
 
 ## Standard exit codes
 
@@ -47,11 +49,17 @@ mapping in `error_handler.py`:
 | `NotebookLMError` (other) | `NOTEBOOKLM_ERROR` | `1` |
 | `KeyboardInterrupt`     | `CANCELLED`         | `130` |
 | Anything else (`Exception`) | `UNEXPECTED_ERROR` | `2` |
-| `click.ClickException` (e.g. bad CLI args) | — | re-raised; Click exits `2` |
+| `click.UsageError` / `click.BadParameter` (bad CLI args) | — | re-raised; Click exits `2` |
+| Other `click.ClickException` subclasses                  | — | re-raised; Click exits `1` |
 
-`click.ClickException` (raised by `click.UsageError` / `click.BadParameter` and
-the like) is intentionally re-raised so Click can render its own
-`Usage: ...` error and exit with its standard code (`2` for usage errors).
+`click.ClickException` and its subclasses are intentionally re-raised so
+Click can render its own `Usage: ...` / `Error: ...` message. The exit code
+is whatever Click's own `exit_code` class attribute provides — `2` for
+`UsageError` (and `BadParameter`, which subclasses it), `1` for the base
+`ClickException` and other non-usage subclasses. This aligns Click's "bad
+arguments" exit (`2`) with our "system/unexpected" code, and Click's other
+exceptions with our "user/app error" code, so callers can branch on the
+exit code without distinguishing the two sources.
 
 ## JSON output mode (`--json`)
 
@@ -81,9 +89,9 @@ change.** Code referencing them should comment the inverted semantics.
 
 ### `notebooklm source stale <SOURCE_ID>` — inverted
 
-Implemented at
-[`src/notebooklm/cli/source.py`](../src/notebooklm/cli/source.py) lines
-1056-1082.
+Implemented by `source_stale` in
+[`src/notebooklm/cli/source.py`](../src/notebooklm/cli/source.py) (around
+lines 1056-1082 at the time of writing).
 
 | Exit | Meaning |
 |------|---------|
@@ -101,15 +109,26 @@ fi
 A `0` exit reads as "yes, the predicate (stale) holds, run the body" — the
 same convention as `test`, `grep -q`, etc.
 
+> **Important — exit-1 ambiguity.** `source stale` is wrapped by the
+> standard `handle_errors` context, so `AuthError`, `NetworkError`,
+> `ValidationError`, an unresolvable source ID, etc. *also* exit `1` and are
+> indistinguishable from "source is fresh" by exit code alone. The naive
+> `if`-chain above will silently skip the refresh body on an auth/network
+> outage. For unattended scripts, validate the session first
+> (`notebooklm status` or `notebooklm auth check`), wrap with `|| die "..."`
+> on the predicate, or check `source get` succeeds before relying on the
+> staleness verdict.
+
 Note: under `set -e` the `1` exit when the source is fresh will abort the
 script. Use the predicate inside an `if`/`elif`/`||` (as above), which
 shell's errexit explicitly excludes, or `set +e` around the call.
 
 ### `notebooklm source wait <SOURCE_ID>` — three-way
 
-Implemented at
-[`src/notebooklm/cli/source.py`](../src/notebooklm/cli/source.py) lines
-1113-1116.
+Implemented by `source_wait` in
+[`src/notebooklm/cli/source.py`](../src/notebooklm/cli/source.py) (the
+exit-code table is in the command's docstring, around lines 1113-1116 at
+the time of writing).
 
 | Exit | Meaning |
 |------|---------|
@@ -178,10 +197,10 @@ elif result.returncode == 130:
 
 ## Migration notes
 
-The following shifts will land in **Phase 3** of the
-[`cli-ux-remediation`](../.sisyphus/plans/cli-ux-remediation.md) plan and are
-documented here so callers can prepare. The current behavior is described
-above; these notes describe the upcoming change.
+The following shifts will land in **Phase 3** of the internal
+`cli-ux-remediation` plan and are documented here so callers can prepare.
+The current behavior is described above; these notes describe the upcoming
+change.
 
 ### C1 — `get`-on-not-found will exit `1` (currently `0`)
 
