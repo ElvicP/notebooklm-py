@@ -183,6 +183,7 @@ async def test_make_rpc_request_uses_flat_cookie_header_and_auth_route() -> None
     assert query["rpcids"] == [check_rpc_health.RPCMethod.CREATE_NOTEBOOK.value]
     assert query["source-path"] == ["/notebook/nb_123"]
     assert query["f.sid"] == ["session"]
+    assert query["hl"] == [check_rpc_health.get_default_language()]
     assert query["rt"] == ["c"]
     assert query["authuser"] == ["bob@example.com"]
     assert "at=csrf" in captured["content"]
