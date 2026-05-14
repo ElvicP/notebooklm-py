@@ -67,7 +67,7 @@ class TestSelectArtifactFiltering:
             candidates,
             artifact_id=None,
             type_name="Video",
-            empty_list_error_key="video",
+            no_result_error_key="video",
             type_code=ArtifactTypeCode.VIDEO,
         )
 
@@ -86,7 +86,7 @@ class TestSelectArtifactFiltering:
             candidates,
             artifact_id=None,
             type_name="Audio",
-            empty_list_error_key="audio",
+            no_result_error_key="audio",
             type_code=ArtifactTypeCode.AUDIO,
         )
 
@@ -106,7 +106,7 @@ class TestSelectArtifactFiltering:
                 candidates,
                 artifact_id=None,
                 type_name="Audio",
-                empty_list_error_key="audio",
+                no_result_error_key="audio",
                 type_code=ArtifactTypeCode.AUDIO,
             )
 
@@ -123,7 +123,7 @@ class TestSelectArtifactFiltering:
             candidates,
             artifact_id=None,
             type_name="Audio",
-            empty_list_error_key="audio",
+            no_result_error_key="audio",
             type_code=ArtifactTypeCode.AUDIO,
         )
 
@@ -144,7 +144,7 @@ class TestSelectArtifactExplicitId:
             candidates,
             artifact_id="b",
             type_name="Audio",
-            empty_list_error_key="audio",
+            no_result_error_key="audio",
             type_code=ArtifactTypeCode.AUDIO,
         )
 
@@ -161,7 +161,7 @@ class TestSelectArtifactExplicitId:
                 candidates,
                 artifact_id="nonexistent",
                 type_name="Audio",
-                empty_list_error_key="audio",
+                no_result_error_key="audio",
                 type_code=ArtifactTypeCode.AUDIO,
             )
 
@@ -178,7 +178,7 @@ class TestSelectArtifactExplicitId:
                 candidates,
                 artifact_id="shared_id",
                 type_name="Audio",
-                empty_list_error_key="audio",
+                no_result_error_key="audio",
                 type_code=ArtifactTypeCode.AUDIO,
             )
 
@@ -199,7 +199,7 @@ class TestSelectArtifactSortByTimestamp:
             candidates,
             artifact_id=None,
             type_name="Audio",
-            empty_list_error_key="audio",
+            no_result_error_key="audio",
             type_code=ArtifactTypeCode.AUDIO,
         )
 
@@ -234,7 +234,7 @@ class TestSelectArtifactSortByTimestamp:
             candidates,
             artifact_id=None,
             type_name="Audio",
-            empty_list_error_key="audio",
+            no_result_error_key="audio",
             type_code=ArtifactTypeCode.AUDIO,
         )
 
@@ -260,7 +260,7 @@ class TestSelectArtifactSortByTimestamp:
             candidates,
             artifact_id=None,
             type_name="Audio",
-            empty_list_error_key="audio",
+            no_result_error_key="audio",
             type_code=ArtifactTypeCode.AUDIO,
         )
 
@@ -274,7 +274,7 @@ class TestSelectArtifactErrorKeys:
     This locks in the asymmetry that ``download_video`` relies on: the
     explicit-id-miss path derives its key from ``type_name`` (lowercased,
     spaces->underscores) while the empty-list path uses the caller-supplied
-    ``empty_list_error_key`` verbatim.
+    ``no_result_error_key`` verbatim.
     """
 
     def test_explicit_id_miss_error_key_derived_from_type_name(self, api: ArtifactsAPI) -> None:
@@ -288,7 +288,7 @@ class TestSelectArtifactErrorKeys:
                 candidates,
                 artifact_id="nonexistent",
                 type_name="Video",
-                empty_list_error_key="video_overview",
+                no_result_error_key="video_overview",
                 type_code=ArtifactTypeCode.VIDEO,
             )
 
@@ -306,14 +306,14 @@ class TestSelectArtifactErrorKeys:
                 candidates,
                 artifact_id="nonexistent",
                 type_name="Slide deck",
-                empty_list_error_key="slide_deck",
+                no_result_error_key="slide_deck",
                 type_code=ArtifactTypeCode.SLIDE_DECK,
             )
 
         assert exc_info.value.artifact_type == "slide_deck"
 
-    def test_empty_list_error_key_used_verbatim(self, api: ArtifactsAPI) -> None:
-        """Empty-list path: ``artifact_type == empty_list_error_key`` verbatim.
+    def test_no_result_error_key_used_verbatim(self, api: ArtifactsAPI) -> None:
+        """Empty-list path: ``artifact_type == no_result_error_key`` verbatim.
 
         ``download_video`` exploits this to raise ``video_overview`` for the
         empty-list case while still raising ``video`` for explicit-id miss.
@@ -323,12 +323,45 @@ class TestSelectArtifactErrorKeys:
                 [],
                 artifact_id=None,
                 type_name="Video",
-                empty_list_error_key="video_overview",
+                no_result_error_key="video_overview",
                 type_code=ArtifactTypeCode.VIDEO,
             )
 
         assert exc_info.value.artifact_type == "video_overview"
         assert exc_info.value.artifact_id is None
+
+    def test_error_type_for_id_miss_vs_empty_list(self, api: ArtifactsAPI) -> None:
+        """End-to-end asymmetry: id-miss uses ``type_name``, empty-list uses key.
+
+        Locks in the contract ``download_video`` depends on:
+        same call shape, same ``type_name`` / ``no_result_error_key`` pair,
+        but the raised ``artifact_type`` differs between the two paths.
+        """
+        candidates = [
+            _artifact("a", ArtifactTypeCode.VIDEO, ArtifactStatus.COMPLETED, 100),
+        ]
+
+        # Path 1: explicit-id miss — derived from type_name ("Video" -> "video").
+        with pytest.raises(ArtifactNotReadyError) as exc_info:
+            api._select_artifact(
+                candidates,
+                artifact_id="nonexistent",
+                type_name="Video",
+                no_result_error_key="video_overview",
+                type_code=ArtifactTypeCode.VIDEO,
+            )
+        assert exc_info.value.artifact_type == "video"
+
+        # Path 2: empty list — uses ``no_result_error_key`` verbatim.
+        with pytest.raises(ArtifactNotReadyError) as exc_info:
+            api._select_artifact(
+                [],
+                artifact_id=None,
+                type_name="Video",
+                no_result_error_key="video_overview",
+                type_code=ArtifactTypeCode.VIDEO,
+            )
+        assert exc_info.value.artifact_type == "video_overview"
 
 
 class TestSelectArtifactDoesNotMutateInput:
@@ -348,7 +381,7 @@ class TestSelectArtifactDoesNotMutateInput:
             original,
             artifact_id=None,
             type_name="Audio",
-            empty_list_error_key="audio",
+            no_result_error_key="audio",
             type_code=ArtifactTypeCode.AUDIO,
         )
 

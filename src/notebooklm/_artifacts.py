@@ -2093,7 +2093,7 @@ class ArtifactsAPI:
         candidates: builtins.list[Any],
         artifact_id: str | None,
         type_name: str,
-        empty_list_error_key: str,
+        no_result_error_key: str,
         *,
         type_code: ArtifactTypeCode,
     ) -> Any:
@@ -2121,10 +2121,13 @@ class ArtifactsAPI:
             type_name: Display name (e.g., "Audio", "Slide deck"). Used for
                 the explicit-id-miss error key — lowercased with spaces turned
                 into underscores (e.g., "Slide deck" -> "slide_deck").
-            empty_list_error_key: Error key used when no candidate survives
+            no_result_error_key: Error key used when no candidate survives
                 filtering. Most callers pass ``type_name.lower()`` but some
                 (e.g. ``download_video``) intentionally pass a distinct key
                 (``"video_overview"``) to preserve historical exception keys.
+                Named ``no_result_error_key`` (rather than something like
+                ``type_name_lower``) because it is not in general the
+                lowercase of ``type_name`` — see ``download_video``.
             type_code: ArtifactTypeCode used to filter candidates by type.
 
         Returns:
@@ -2155,7 +2158,7 @@ class ArtifactsAPI:
             return artifact
 
         if not filtered:
-            raise ArtifactNotReadyError(empty_list_error_key)
+            raise ArtifactNotReadyError(no_result_error_key)
 
         # Sort by creation timestamp (descending) to get the latest.
         # Timestamp is the raw API field at index 15, position 0. Falsy
