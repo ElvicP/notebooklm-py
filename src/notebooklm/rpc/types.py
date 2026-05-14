@@ -4,6 +4,7 @@ import json
 import logging
 import os
 from enum import Enum
+from functools import lru_cache
 
 from .._env import DEFAULT_BASE_URL, get_base_url
 
@@ -13,6 +14,32 @@ logger = logging.getLogger(__name__)
 # hash of the canonical (sorted) item tuple. This dedupes multi-client tests
 # while still emitting one INFO line per *distinct* override set in a process.
 _logged_override_hashes: set[int] = set()
+
+
+@lru_cache(maxsize=8)
+def _parse_rpc_overrides(raw: str | None) -> tuple[tuple[str, str], ...]:
+    """Parse and validate the raw env-var string, returning an immutable mapping.
+
+    Cached on the raw string so JSON parsing — and the WARNING emitted for
+    malformed input — happens once per distinct env value rather than once
+    per RPC call. Returns a tuple-of-pairs (immutable, hashable) so the
+    caller can rebuild a fresh dict without mutating cached state.
+    """
+    if not raw:
+        return ()
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        logger.warning("NOTEBOOKLM_RPC_OVERRIDES is not valid JSON: %s", exc)
+        return ()
+    if not isinstance(data, dict):
+        logger.warning(
+            "NOTEBOOKLM_RPC_OVERRIDES must be a JSON object mapping "
+            "method names to RPC IDs, got %s",
+            type(data).__name__,
+        )
+        return ()
+    return tuple((str(k), str(v)) for k, v in data.items())
 
 
 def _load_rpc_overrides() -> dict[str, str]:
@@ -25,22 +52,7 @@ def _load_rpc_overrides() -> dict[str, str]:
 
     Returns an empty dict when the env var is unset or invalid.
     """
-    raw = os.environ.get("NOTEBOOKLM_RPC_OVERRIDES")
-    if not raw:
-        return {}
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        logger.warning("NOTEBOOKLM_RPC_OVERRIDES is not valid JSON: %s", exc)
-        return {}
-    if not isinstance(data, dict):
-        logger.warning(
-            "NOTEBOOKLM_RPC_OVERRIDES must be a JSON object mapping "
-            "method names to RPC IDs, got %s",
-            type(data).__name__,
-        )
-        return {}
-    return {str(k): str(v) for k, v in data.items()}
+    return dict(_parse_rpc_overrides(os.environ.get("NOTEBOOKLM_RPC_OVERRIDES")))
 
 
 def resolve_rpc_id(method_name: str, canonical_id: str) -> str:

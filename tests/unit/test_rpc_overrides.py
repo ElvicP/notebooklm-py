@@ -19,7 +19,18 @@ from notebooklm._core import ClientCore
 from notebooklm.auth import AuthTokens
 from notebooklm.rpc import RPCMethod
 from notebooklm.rpc import types as rpc_types
-from notebooklm.rpc.types import _load_rpc_overrides, resolve_rpc_id
+from notebooklm.rpc.types import _load_rpc_overrides, _parse_rpc_overrides, resolve_rpc_id
+
+
+@pytest.fixture(autouse=True)
+def _clear_override_caches():
+    """Clear parser cache + INFO-dedup set between tests so warnings reproduce."""
+    _parse_rpc_overrides.cache_clear()
+    rpc_types._logged_override_hashes.clear()
+    yield
+    _parse_rpc_overrides.cache_clear()
+    rpc_types._logged_override_hashes.clear()
+
 
 # ---------------------------------------------------------------------------
 # _load_rpc_overrides — env-var parsing
