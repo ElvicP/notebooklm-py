@@ -103,10 +103,13 @@ def test_log_shim_exposes_install_redaction():
 #   4. ``__all__`` is sorted case-insensitively (drift catcher).
 #   5. ``__all__`` matches the actual re-exported public surface — no orphans,
 #      no missing entries.
+#   6. ``__all__`` contains no duplicate entries.
 # ---------------------------------------------------------------------------
 
 
 # (shim_module_name, internal_module_name)
+# Note: notebooklm.research has targeted smoke tests in the PR-A section above
+# and is intentionally excluded from this generic contract sweep.
 _SHIM_PAIRS = [
     ("notebooklm.config", "notebooklm._env"),
     ("notebooklm.urls", "notebooklm._url_utils"),
@@ -120,6 +123,10 @@ def _actual_reexports(shim: ModuleType, internal: ModuleType) -> set[str]:
     A name is considered "re-exported" when both modules expose an attribute
     of the same identity. This catches accidental shadowing (a shim defining
     its own value) as well as truly re-exported symbols.
+
+    Note: names imported under ``typing.TYPE_CHECKING`` are not visible to
+    ``dir()`` at runtime, so type-only re-exports won't be detected. None of
+    the current shims use TYPE_CHECKING re-exports.
     """
     sentinel = object()
     names: set[str] = set()
@@ -180,7 +187,7 @@ def test_public_shim_all_contract(shim_name: str, internal_name: str) -> None:
         f"{sorted(orphans)}"
     )
 
-    # Length sanity: no duplicates in __all__.
+    # 6. Length sanity: no duplicates in __all__.
     assert len(all_list) == len(declared), (
         f"{shim_name}.__all__ contains duplicates: {sorted(all_list)}"
     )
