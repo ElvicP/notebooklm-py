@@ -24,10 +24,22 @@ def _violations(tree: ast.AST) -> list[str]:
                 parts = mod.split(".")
                 if len(parts) >= 2 and parts[0] == "notebooklm" and parts[1].startswith("_"):
                     bad.append(f"from {mod} import ...")
+                # `from notebooklm import _foo` — private module via imported names.
+                # Dunders like `__version__` are public package attrs by convention.
+                if mod == "notebooklm":
+                    for alias in node.names:
+                        if alias.name.startswith("_") and not alias.name.startswith("__"):
+                            bad.append(f"from notebooklm import {alias.name}")
             elif node.level >= 2:
                 # `from .._foo import ...` (parent-package private)
                 if mod.startswith("_"):
                     bad.append(f"from {'.' * node.level}{mod} import ...")
+                # `from .. import _foo` — private parent module via imported names.
+                # Dunders like `__version__` are public package attrs by convention.
+                if mod == "":
+                    for alias in node.names:
+                        if alias.name.startswith("_") and not alias.name.startswith("__"):
+                            bad.append(f"from {'.' * node.level} import {alias.name}")
             # level == 1 is intra-cli; underscore there is fine (cli's own private modules)
         # `import X` / `import X as Y`
         elif isinstance(node, ast.Import):
