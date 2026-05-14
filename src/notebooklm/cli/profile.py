@@ -98,24 +98,17 @@ def _atomic_write_config(config_path: Path, mutator) -> None:
     invocations cannot lose updates.
 
     If the existing config is unparseable (corrupted on disk), the mutator
-    runs on an empty dict instead — matching the recovery behavior of the
-    legacy ``_read_config(suppress_errors=True)`` + ``_write_config`` pair.
+    runs on an empty dict instead — recovery happens **inside** the lock via
+    ``recover_from_corrupt=True``. An outside-the-lock unlink-and-retry would
+    race a concurrent process that wrote a valid payload between our raise
+    and our retry, causing us to delete their good write (see PR #465).
     """
     if sys.platform == "win32":
         config_path.parent.mkdir(parents=True, exist_ok=True)
     else:
         config_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         config_path.parent.chmod(0o700)
-    try:
-        atomic_update_json(config_path, mutator)
-    except json.JSONDecodeError:
-        # Corrupt existing config — drop it and retry. The second call sees
-        # a missing file, so the mutator runs on the empty-dict path.
-        try:
-            config_path.unlink()
-        except OSError:
-            pass
-        atomic_update_json(config_path, mutator)
+    atomic_update_json(config_path, mutator, recover_from_corrupt=True)
 
 
 @click.group("profile")
@@ -305,37 +298,37 @@ def rename_cmd(old_name, new_name):
 
     os.rename(old_dir, new_dir)
 
-    # Update config if renamed profile was the effective default.
-    # This handles both: config.json exists with default_profile=old_name,
-    # AND config.json doesn't exist (implicit "default" fallback).
+    # Update config if renamed profile was the effective default. This is
+    # always serialized through the locked mutator — there is NO pre-read
+    # early-return optimization, because a concurrent ``profile switch``
+    # could win between any pre-read and the lock acquire, leading us to
+    # skip the write that was correct at the moment we observed it. The
+    # mutator below is the single source of truth and recovers from a
+    # corrupt config under the same lock (``recover_from_corrupt=True``
+    # inside ``_atomic_write_config``).
     config_path = get_config_path()
+    updated = False
+
+    def _retarget_default(current: dict) -> dict:
+        nonlocal updated
+        # Decide under the lock — this is the only read of
+        # ``default_profile`` that matters. Treat a missing key as the
+        # implicit "default" so a fresh install with no config.json still
+        # picks up the rename when the user renamed the default profile.
+        if (current.get("default_profile") or "default") == old_name:
+            current["default_profile"] = new_name
+            updated = True
+        return current
+
     try:
-        # Read once outside the lock to decide whether the rename even
-        # affects the config. The mutator below re-checks under the lock
-        # so a concurrent ``profile switch`` can't be silently clobbered.
-        data = _read_config(config_path, suppress_errors=False)
-        configured_default = data.get("default_profile") or "default"
-        if configured_default == old_name:
-            updated = False
-
-            def _retarget_default(current: dict) -> dict:
-                nonlocal updated
-                # Re-check under the lock; another writer may have changed
-                # default_profile between the early-return check and now.
-                if (current.get("default_profile") or "default") == old_name:
-                    current["default_profile"] = new_name
-                    updated = True
-                return current
-
-            _atomic_write_config(config_path, _retarget_default)
-            if updated:
-                console.print(
-                    f"[dim]Updated default profile in config: {old_name} → {new_name}[/dim]"
-                )
-    except (json.JSONDecodeError, OSError) as e:
+        _atomic_write_config(config_path, _retarget_default)
+    except OSError as e:
         console.print(
             f"[yellow]Warning: profile renamed but config.json update failed: {e}[/yellow]\n"
             f"[yellow]Run 'notebooklm profile switch {new_name}' to fix.[/yellow]"
         )
+    else:
+        if updated:
+            console.print(f"[dim]Updated default profile in config: {old_name} → {new_name}[/dim]")
 
     console.print(f"[green]Profile renamed: {old_name} → {new_name}[/green]")

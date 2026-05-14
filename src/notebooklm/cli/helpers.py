@@ -553,6 +553,12 @@ def _set_context_value(key: str, value: str | None) -> None:
 
     Uses ``atomic_update_json`` so concurrent CLI invocations cannot lose
     updates by interleaving read-modify-write cycles.
+
+    Note: the ``context_file.exists()`` pre-check below is a TOCTOU window —
+    a concurrent ``clear`` could delete the file between this check and the
+    lock acquire, but the worst case is one unnecessary lock + create cycle,
+    not data loss. We accept the minor inefficiency to keep the early-return
+    fast path: most invocations have no context file at all.
     """
     context_file = get_context_path()
     if not context_file.exists():
@@ -612,17 +618,11 @@ def set_current_notebook(
             data["created_at"] = created_at
         return data
 
-    try:
-        atomic_update_json(context_file, _mutate)
-    except json.JSONDecodeError:
-        # Existing context file is unparseable — drop it so the retry's read
-        # sees a missing file (mutator runs on the empty-dict path), then
-        # rewrite from scratch. Account metadata is unrecoverable here.
-        try:
-            context_file.unlink()
-        except OSError:
-            pass
-        atomic_update_json(context_file, _mutate)
+    # ``recover_from_corrupt=True`` keeps the empty-dict fallback **inside**
+    # the file lock. An outside-the-lock unlink-and-retry would race a
+    # concurrent process that wrote a valid payload between our raise and
+    # our retry, causing us to delete their good write (see PR #465 review).
+    atomic_update_json(context_file, _mutate, recover_from_corrupt=True)
 
 
 def clear_context(*, clear_account: bool = False) -> bool:

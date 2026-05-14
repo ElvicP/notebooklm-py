@@ -221,3 +221,97 @@ def test_existing_non_dict_resets_to_empty(tmp_path: Path) -> None:
     atomic_update_json(target, mutator)
     assert received == [{}]
     assert json.loads(target.read_text(encoding="utf-8")) == {"reset": True}
+
+
+def test_corrupt_json_raises_by_default(tmp_path: Path) -> None:
+    """``recover_from_corrupt=False`` (default) propagates ``JSONDecodeError``."""
+    target = tmp_path / "state.json"
+    target.write_text("{ not json", encoding="utf-8")
+
+    def mutator(current: dict) -> dict:
+        current["should_not"] = "run"
+        return current
+
+    with pytest.raises(json.JSONDecodeError):
+        atomic_update_json(target, mutator)
+
+    # Nothing was written — the corrupt file is untouched (no unlink, no
+    # overwrite). The caller decides what to do next.
+    assert target.read_text(encoding="utf-8") == "{ not json"
+
+
+def test_corrupt_json_recovers_with_flag(tmp_path: Path) -> None:
+    """``recover_from_corrupt=True`` silently treats corrupt JSON as ``{}``."""
+    target = tmp_path / "state.json"
+    target.write_text("{ not json", encoding="utf-8")
+
+    received: list[dict] = []
+
+    def mutator(current: dict) -> dict:
+        received.append(dict(current))
+        current["recovered"] = True
+        return current
+
+    atomic_update_json(target, mutator, recover_from_corrupt=True)
+
+    assert received == [{}]
+    assert json.loads(target.read_text(encoding="utf-8")) == {"recovered": True}
+
+
+def test_concurrent_corrupt_recovery_does_not_lose_valid_write(tmp_path: Path) -> None:
+    """CRITICAL race: a peer's valid write must survive a corrupt-recovery call.
+
+    This is the regression test for the PR #465 review threads. Previously,
+    callers caught ``JSONDecodeError`` outside the lock, then unlinked and
+    retried. A peer that wrote a valid payload between the raise and the
+    unlink would lose its write to the unlink. With recovery inside the lock,
+    only one of these orderings is possible per lock acquisition:
+
+    * Peer wins the lock first → writes valid JSON → recovery caller sees
+      the valid JSON and mutates from there (recovery branch never runs).
+    * Recovery caller wins → reads corrupt → writes recovered payload →
+      peer then sees the recovered payload (no data lost).
+
+    Either way, the peer's key cannot vanish.
+    """
+    target = tmp_path / "state.json"
+    # Start corrupt so the recovery thread has something to recover from.
+    target.write_text("{ corrupt", encoding="utf-8")
+
+    barrier = threading.Barrier(2)
+
+    def recovery_worker() -> None:
+        barrier.wait()
+        # Slight sleep so the peer has a real chance to race us.
+        time.sleep(0.02)
+
+        def _mutate(current: dict) -> dict:
+            current["recovered_by"] = "A"
+            return current
+
+        atomic_update_json(target, _mutate, recover_from_corrupt=True)
+
+    def peer_worker() -> None:
+        barrier.wait()
+
+        def _mutate(current: dict) -> dict:
+            current["peer_wrote"] = "B"
+            return current
+
+        # Peer also opts into recovery — it doesn't care whether its read
+        # sees corrupt content or the recovered dict.
+        atomic_update_json(target, _mutate, recover_from_corrupt=True)
+
+    threads = [
+        threading.Thread(target=recovery_worker),
+        threading.Thread(target=peer_worker),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    final = json.loads(target.read_text(encoding="utf-8"))
+    # Both writers' keys must be present — neither lost the other's update.
+    assert final.get("recovered_by") == "A", f"recovery worker lost: {final}"
+    assert final.get("peer_wrote") == "B", f"peer worker lost: {final}"

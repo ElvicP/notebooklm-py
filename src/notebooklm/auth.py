@@ -1230,20 +1230,13 @@ def write_account_metadata(storage_path: Path, *, authuser: int, email: str | No
         data[_ACCOUNT_CONTEXT_KEY] = payload
         return data
 
-    try:
-        atomic_update_json(context_path, _set_account)
-    except json.JSONDecodeError as e:
-        # Existing file is unparseable — overwrite from scratch since the
-        # account-metadata key is the canonical state we care about. The
-        # legacy behavior silently kept going with an empty dict here.
-        logger.debug("Account context unreadable; rewriting from scratch: %s", e)
-        # Drop the corrupt file so the retry's read sees a missing file
-        # (mutator gets the empty-dict path) instead of re-raising.
-        try:
-            context_path.unlink()
-        except OSError:
-            pass
-        atomic_update_json(context_path, _set_account)
+    # ``recover_from_corrupt=True`` keeps the empty-dict fallback **inside**
+    # the file lock. An outside-the-lock unlink-and-retry would race a
+    # concurrent process that wrote a valid payload between our raise and
+    # our retry, causing us to delete their good write (see PR #465 review).
+    # Account metadata is unrecoverable from corrupt JSON, so silent reset
+    # under the lock is the right behaviour.
+    atomic_update_json(context_path, _set_account, recover_from_corrupt=True)
 
 
 def clear_account_metadata(storage_path: Path | None) -> None:
