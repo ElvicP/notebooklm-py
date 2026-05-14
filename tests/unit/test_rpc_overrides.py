@@ -94,6 +94,26 @@ def test_load_rpc_overrides_coerces_values_to_str(monkeypatch):
     assert _load_rpc_overrides() == {"LIST_NOTEBOOKS": "12345"}
 
 
+def test_load_rpc_overrides_drops_unknown_keys_with_warning(monkeypatch, caplog):
+    """Keys not matching an RPCMethod member are dropped + warned, not silently kept.
+
+    Without this gate, a typo (``"LIST_NOTEBOOK"``) would silently no-op
+    while the INFO line still claimed the override was applied — exactly
+    the failure mode the escape hatch is supposed to prevent.
+    """
+    monkeypatch.setenv(
+        "NOTEBOOKLM_RPC_OVERRIDES",
+        '{"LIST_NOTEBOOK": "typo", "LIST_NOTEBOOKS": "real"}',
+    )
+    with caplog.at_level("WARNING", logger="notebooklm.rpc.types"):
+        result = _load_rpc_overrides()
+    assert result == {"LIST_NOTEBOOKS": "real"}
+    assert "LIST_NOTEBOOK" not in result
+    assert any(
+        "Ignoring unknown" in r.message and "LIST_NOTEBOOK" in r.message for r in caplog.records
+    )
+
+
 # ---------------------------------------------------------------------------
 # resolve_rpc_id — host-gate + override application
 # ---------------------------------------------------------------------------

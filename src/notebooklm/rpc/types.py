@@ -39,7 +39,22 @@ def _parse_rpc_overrides(raw: str | None) -> tuple[tuple[str, str], ...]:
             type(data).__name__,
         )
         return ()
-    return tuple((str(k), str(v)) for k, v in data.items())
+    # Reject keys that don't match an RPCMethod enum member. Without this
+    # gate, a typo like ``"LIST_NOTEBOOK"`` would silently no-op (resolver
+    # only matches exact enum names) while the INFO log line proudly claims
+    # the override was applied — making the escape hatch look live while
+    # calls keep using canonical IDs. ``RPCMethod`` is defined later in this
+    # module; the lookup is deferred to call time so the forward reference
+    # is resolved by the time any caller invokes us.
+    valid_methods = set(RPCMethod.__members__)
+    normalized = [(str(k), str(v)) for k, v in data.items()]
+    unknown = sorted(k for k, _ in normalized if k not in valid_methods)
+    if unknown:
+        logger.warning(
+            "Ignoring unknown NOTEBOOKLM_RPC_OVERRIDES method names (not in RPCMethod): %s",
+            ", ".join(unknown),
+        )
+    return tuple((k, v) for k, v in normalized if k in valid_methods)
 
 
 def _load_rpc_overrides() -> dict[str, str]:
