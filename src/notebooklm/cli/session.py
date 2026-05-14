@@ -40,6 +40,7 @@ from ..auth import (
 )
 from ..client import NotebookLMClient
 from ..config import get_base_host, get_base_url
+from ..io import atomic_write_json
 from ..paths import (
     get_browser_profile_dir,
     get_context_path,
@@ -1298,7 +1299,11 @@ def register_session_commands(cli):
                     )
                     raise SystemExit(1)
 
-                context.storage_state(path=str(storage_path))
+                # Atomic write with chmod 0o600 — Playwright's path= argument
+                # writes directly (non-atomic + world-readable window). See
+                # PR-T1.H2 / audit X1 #1.
+                state = context.storage_state()
+                atomic_write_json(storage_path, state)
                 from ..auth import clear_account_metadata
 
                 try:
@@ -1309,10 +1314,6 @@ def register_session_commands(cli):
                         storage_path,
                         exc,
                     )
-                # Restrict permissions to owner only (contains sensitive cookies)
-                if sys.platform != "win32":
-                    # chmod is a no-op on Windows (and can confuse ACLs)
-                    storage_path.chmod(0o600)
 
             except Exception as e:
                 # Handle browser launch errors specially (context will be None if launch failed)
