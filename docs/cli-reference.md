@@ -571,7 +571,7 @@ notebooklm source add ./report.pdf --type file
 
 To suppress the stderr notice (useful for CI logs where the message would
 repeat across pipeline invocations), set `NOTEBOOKLM_QUIET_DEPRECATIONS=1`
-(any non-empty value). See
+(exactly `1` — other values like `0` or `false` keep the notice on). See
 [configuration.md#notebooklm_quiet_deprecations](configuration.md#notebooklm_quiet_deprecations).
 
 > **Note:** The same `--mime-type` flag on `notebooklm source add-drive`
