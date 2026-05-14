@@ -512,25 +512,51 @@ def _discover_notebook_commands():
 _NOTEBOOK_COMMAND_TRIPLES = _discover_notebook_commands()
 
 
+def _canonical_notebook_help() -> str:
+    """Return the canonical help string by introspecting the actual decorator
+    in `cli/options.py`, so tests can never silently drift from the source of
+    truth. We apply `notebook_option` to a throwaway probe function and read
+    back the `help=` Click stored on the resulting Option.
+    """
+    from click import Option
+
+    from notebooklm.cli.options import notebook_option
+
+    @notebook_option
+    def _probe(notebook_id):  # pragma: no cover — never invoked
+        pass
+
+    for param in _probe.__click_params__:  # type: ignore[attr-defined]
+        if isinstance(param, Option) and "--notebook" in param.opts:
+            assert param.help is not None, (
+                "cli/options.py:notebook_option must declare a help= string"
+            )
+            return param.help
+    raise RuntimeError("Failed to introspect cli/options.py:notebook_option help text")
+
+
+_CANONICAL_NOTEBOOK_HELP = _canonical_notebook_help()
+
+
 class TestNotebookOptionConsistency:
     """Every command exposing -n/--notebook must do so via the canonical
     `cli/options.py:notebook_option` decorator. We assert via Click's introspection
     that both the short/long flag pair and the canonical help text are present.
     """
 
-    # Canonical help string from `cli/options.py:notebook_option`. Tests assert this
-    # substring appears in the help; the source of truth is the decorator itself.
-    CANONICAL_HELP = "Notebook ID (uses current if not set)"
-
     def test_some_commands_expose_notebook_flag(self):
-        """Sanity check that the discovery walk found something. If this drops to
-        zero we silently lose all coverage from the parametrized test below.
+        """Sanity check that the discovery walk found a substantial fraction of
+        the known commands. If this falls far below the live count we silently
+        lose coverage from the parametrized test below — and an entire CLI
+        group could be dropped without tripping the gate.
         """
-        # Lower bound chosen to be well below the actual count (~46) but high enough
-        # to catch a regression that drops most groups from discovery.
-        assert len(_NOTEBOOK_COMMAND_TRIPLES) >= 30, (
-            f"Expected ≥30 -n/--notebook commands discovered, got "
-            f"{len(_NOTEBOOK_COMMAND_TRIPLES)} — discovery walk is broken"
+        # As of this PR, discovery finds ~65 commands across all groups + top-level.
+        # The bound is set tight enough that losing one full group (e.g. `source`,
+        # ~13 commands) trips this guard immediately.
+        assert len(_NOTEBOOK_COMMAND_TRIPLES) >= 55, (
+            f"Expected ≥55 -n/--notebook commands discovered, got "
+            f"{len(_NOTEBOOK_COMMAND_TRIPLES)} — discovery walk is broken or "
+            f"a CLI group lost its -n/--notebook surface"
         )
 
     @pytest.mark.parametrize(
@@ -540,16 +566,18 @@ class TestNotebookOptionConsistency:
     )
     def test_subcommand_uses_canonical_notebook_option(self, group_label, subcommand, param):
         """Every subcommand exposing -n/--notebook must use the canonical
-        decorator (asserted via canonical help text and the `notebook_id` kwarg name).
+        decorator (asserted via canonical help text — derived live from
+        `cli/options.py` — and the `notebook_id` kwarg name).
         """
         assert param.name == "notebook_id", (
             f"{group_label}/{subcommand} -n/--notebook must bind to kwarg "
             f"'notebook_id' (the canonical decorator's kwarg name), got "
             f"{param.name!r}"
         )
-        assert self.CANONICAL_HELP in (param.help or ""), (
-            f"{group_label}/{subcommand} -n/--notebook help must contain "
-            f"{self.CANONICAL_HELP!r}, got {param.help!r}"
+        assert (param.help or "") == _CANONICAL_NOTEBOOK_HELP, (
+            f"{group_label}/{subcommand} -n/--notebook help must equal the "
+            f"canonical string {_CANONICAL_NOTEBOOK_HELP!r} (from "
+            f"cli/options.py:notebook_option), got {param.help!r}"
         )
 
 
