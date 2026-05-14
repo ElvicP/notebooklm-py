@@ -1546,8 +1546,13 @@ class ArtifactsAPI:
             mind_map = mind_maps[0]
 
         try:
-            json_string = mind_map[1][1]
-            if not isinstance(json_string, str):
+            # Use the shared extractor so legacy ``[id, content_str]`` rows
+            # work too — direct ``[1][1]`` indexing into a legacy item would
+            # string-index the content (``"…"[1] == "…"`` of length 1) and
+            # then fail downstream JSON parsing instead of returning the real
+            # payload.
+            json_string = _mind_map.extract_content(mind_map)
+            if json_string is None:
                 raise ArtifactParseError("mind_map_content", details="Invalid structure")
 
             json_data = json.loads(json_string)

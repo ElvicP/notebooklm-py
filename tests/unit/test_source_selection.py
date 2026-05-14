@@ -84,13 +84,18 @@ def mock_core():
 
 @pytest.fixture
 def mock_notes_api():
-    """Create a mock NotesAPI."""
-    notes = MagicMock()
-    notes.list_mind_maps = AsyncMock(return_value=[])
-    mock_note = MagicMock()
-    mock_note.id = "created_note_123"
-    notes.create = AsyncMock(return_value=mock_note)
-    return notes
+    """Placeholder for the legacy ``ArtifactsAPI(core, notes_api)`` signature.
+
+    After T6.F, ``ArtifactsAPI`` no longer reads ``notes_api`` (it consumes
+    the shared ``_mind_map`` module directly). The arg is still accepted for
+    backward compatibility and immediately discarded inside ``__init__``, so
+    this fixture intentionally returns a bare mock — no method stubs, since
+    none of the downstream code paths under test invoke any methods on it.
+    Future readers: if you find yourself adding ``AsyncMock`` setup here,
+    you probably want to drop the second positional arg from the call sites
+    instead.
+    """
+    return MagicMock()
 
 
 class TestChatSourceSelection:
