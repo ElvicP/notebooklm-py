@@ -151,7 +151,11 @@ async def create_note(
         The created :class:`Note` with the assigned ID.
     """
     logger.debug("Creating note in notebook %s: %s", notebook_id, title)
-    params = [notebook_id, "", [1], None, "New Note"]
+    # The server currently ignores this slot (the follow-up UPDATE_NOTE is
+    # what actually persists the title) but pass the caller-supplied title
+    # rather than a hardcoded literal so the wire payload reflects the user
+    # intent if Google ever starts honoring it.
+    params = [notebook_id, "", [1], None, title]
     result = await core.rpc_call(
         RPCMethod.CREATE_NOTE,
         params,
