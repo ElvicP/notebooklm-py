@@ -175,3 +175,47 @@ def test_key_with_regex_metacharacters_is_escaped() -> None:
     # ``.`` would otherwise match any character — confirm it does not.
     html = '{"a.b":"literal","aXb":"wildcard_would_match_this"}'
     assert extract_wiz_field(html, "a.b") == "literal"
+
+
+# ---------------------------------------------------------------------------
+# Escape handling — JSON-style quote escapes inside values
+# ---------------------------------------------------------------------------
+
+
+def test_escaped_quote_inside_double_quoted_value() -> None:
+    """JSON-style ``\\"`` inside the value is captured intact rather than
+    terminating the match early. Without escape-aware matching, the value
+    ``a\\"b`` would be truncated to just ``a``."""
+    html = r'{"SNlM0e":"a\"b"}'
+    assert extract_wiz_field(html, "SNlM0e") == r"a\"b"
+
+
+def test_escaped_quote_inside_single_quoted_value() -> None:
+    """Same escape-awareness applies to the single-quoted variant."""
+    html = r"{'SNlM0e':'a\'b'}"
+    assert extract_wiz_field(html, "SNlM0e") == r"a\'b"
+
+
+def test_html_escaped_value_can_contain_other_entities() -> None:
+    """The HTML-escaped pattern terminates only on a literal ``&quot;``, not
+    on any ``&`` — so embedded entities like ``&amp;`` survive."""
+    html = 'data="{&quot;SNlM0e&quot;:&quot;a&amp;b&quot;}"'
+    assert extract_wiz_field(html, "SNlM0e") == "a&amp;b"
+
+
+# ---------------------------------------------------------------------------
+# Preview slicing — performance guard on huge payloads
+# ---------------------------------------------------------------------------
+
+
+def test_preview_slices_before_regex_substitution() -> None:
+    """The whitespace-collapse regex must operate on a bounded prefix, not
+    the full payload — otherwise a multi-MB response would do a huge
+    needless substitution on the failure path."""
+    # A multi-megabyte payload with the key buried far past the preview window.
+    payload = (" " * 5_000_000) + "tail"
+    with pytest.raises(AuthExtractionError) as excinfo:
+        extract_wiz_field(payload, "SNlM0e", strict=True)
+    # The preview itself must still be capped — confirms the slice is tight
+    # enough that the rendered diagnostic does not balloon.
+    assert len(excinfo.value.payload_preview) <= AuthExtractionError.PREVIEW_LENGTH

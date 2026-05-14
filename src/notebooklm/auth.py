@@ -813,17 +813,29 @@ def _build_wiz_field_patterns(key: str) -> list[re.Pattern[str]]:
     then single-quoted, then HTML-escaped. Each pattern captures the value
     (which may be empty — empty tokens are legitimate, not a drift signal).
 
+    All three variants tolerate backslash-escaped delimiters inside the value
+    so JSON-style escapes like ``"key":"a\\"b"`` parse correctly. The inner
+    character class ``[^"\\\\]*(?:\\\\.[^"\\\\]*)*`` is the standard
+    "string with escapes" idiom: consume runs of non-quote/non-backslash
+    chars, optionally followed by an escape pair (``\\.``) and another run.
+
+    The HTML-escaped variant uses a tempered-dot lookahead so the capture
+    stops only at a literal ``&quot;`` terminator (not at any ``&`` — values
+    legitimately contain ``&amp;`` and similar entities).
+
     Whitespace tolerance (``\\s*``) around the colon mirrors the original
     ``extract_csrf_from_html`` regex so we don't regress.
     """
     escaped = re.escape(key)
     return [
         # 1. Canonical double-quoted: "key":"value"  (or  "key" : "value")
-        re.compile(rf'"{escaped}"\s*:\s*"([^"]*)"'),
-        # 2. Single-quoted variant: 'key':'value'
-        re.compile(rf"'{escaped}'\s*:\s*'([^']*)'"),
+        #    Captures escaped quotes: "key":"a\"b" -> a\"b
+        re.compile(rf'"{escaped}"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"'),
+        # 2. Single-quoted variant: 'key':'value' with escaped-quote support.
+        re.compile(rf"'{escaped}'\s*:\s*'([^'\\]*(?:\\.[^'\\]*)*)'"),
         # 3. HTML-escaped: &quot;key&quot;:&quot;value&quot;
-        re.compile(rf"&quot;{escaped}&quot;\s*:\s*&quot;([^&]*)&quot;"),
+        #    Tempered dot so the value can contain other entities like &amp;.
+        re.compile(rf"&quot;{escaped}&quot;\s*:\s*&quot;((?:(?!&quot;).)*)&quot;"),
     ]
 
 

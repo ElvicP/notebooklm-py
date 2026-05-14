@@ -306,9 +306,15 @@ class AuthExtractionError(RPCError):
         message: str | None = None,
     ):
         self.key = key
+        # Slice before substituting so we don't run the regex over a multi-MB
+        # response body just to throw away most of it. A 5x headroom over
+        # PREVIEW_LENGTH guarantees we still have enough non-whitespace
+        # characters left after collapsing runs of whitespace, even on heavily
+        # indented HTML where ~80% of the prefix may be indentation.
+        head = payload_preview[: self.PREVIEW_LENGTH * 5]
         # Collapse runs of whitespace so the preview stays compact and useful
         # even when the upstream HTML is heavily indented or contains newlines.
-        collapsed = re.sub(r"\s+", " ", payload_preview).strip()
+        collapsed = re.sub(r"\s+", " ", head).strip()
         self.payload_preview = collapsed[: self.PREVIEW_LENGTH]
         # Default message is human-readable and includes both the failing key
         # and the sanitized preview — this is the diagnostic that operators
