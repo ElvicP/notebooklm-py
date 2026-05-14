@@ -172,6 +172,50 @@ def test_coverage_json_missing_returns_2(tmp_path, capsys, script):
     assert rc == 2
 
 
+def test_per_file_floors_non_table_returns_2(tmp_path, capsys, script):
+    """A non-table ``per_file_coverage_floors`` (string, list, etc.) is a
+    misconfiguration that must not silently bypass enforcement."""
+    pp = tmp_path / "pyproject.toml"
+    pp.write_text(
+        "[tool.coverage.report]\nfail_under = 90\n\n"
+        '[tool.notebooklm]\nper_file_coverage_floors = "oops"\n',
+        encoding="utf-8",
+    )
+    yml = _write_workflow(tmp_path, threshold=90)
+    cov = _write_coverage_json(tmp_path, {"src/notebooklm/cli/doctor.py": 50.0})
+    rc = script.main(["--pyproject", str(pp), "--workflow", str(yml), "--coverage-json", str(cov)])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "must be a TOML table" in err
+
+
+def test_per_file_floor_non_numeric_returns_2(tmp_path, capsys, script):
+    """A non-numeric floor value (string, etc.) yields exit 2 with context, not a crash."""
+    pp = _write_pyproject(
+        tmp_path,
+        fail_under=90,
+        per_file={"src/notebooklm/cli/doctor.py": '"sixty"'},  # raw TOML — string value
+    )
+    yml = _write_workflow(tmp_path, threshold=90)
+    cov = _write_coverage_json(tmp_path, {"src/notebooklm/cli/doctor.py": 70.0})
+    rc = script.main(["--pyproject", str(pp), "--workflow", str(yml), "--coverage-json", str(cov)])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "could not be compared" in err
+    assert "src/notebooklm/cli/doctor.py" in err
+
+
+def test_coverage_json_files_wrong_shape_returns_2(tmp_path, capsys, script):
+    """``coverage.json`` with ``files`` as something other than an object → exit 2."""
+    pp = _write_pyproject(tmp_path, fail_under=90, per_file={"foo.py": 0})
+    yml = _write_workflow(tmp_path, threshold=90)
+    bad = tmp_path / "coverage.json"
+    bad.write_text(json.dumps({"files": []}), encoding="utf-8")  # list, not dict
+    rc = script.main(["--pyproject", str(pp), "--workflow", str(yml), "--coverage-json", str(bad)])
+    assert rc == 2
+    assert "'files' must be an object map" in capsys.readouterr().err
+
+
 def test_coverage_json_malformed_returns_2(tmp_path, capsys, script):
     pp = _write_pyproject(tmp_path, fail_under=90, per_file={"foo.py": 0})
     yml = _write_workflow(tmp_path, threshold=90)

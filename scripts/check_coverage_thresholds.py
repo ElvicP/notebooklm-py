@@ -110,9 +110,22 @@ def _check_per_file_floors(pyproject_path: str, coverage_json_path: str) -> int:
         print(f"pyproject.toml not found: {pyproject_path}", file=sys.stderr)
         return 2
 
-    floors = pp.get("tool", {}).get("notebooklm", {}).get("per_file_coverage_floors", {})
-    if not isinstance(floors, dict) or not floors:
-        # Empty or missing table is fine — nothing to enforce.
+    floors = pp.get("tool", {}).get("notebooklm", {}).get("per_file_coverage_floors")
+    if floors is None:
+        # Missing table is fine — nothing to enforce.
+        print(f"OK: no [tool.notebooklm.per_file_coverage_floors] in {pyproject_path}")
+        return 0
+    if not isinstance(floors, dict):
+        # Misconfiguration (e.g. someone wrote a string or list instead of a
+        # table). Fail fast rather than silently returning OK.
+        print(
+            f"[tool.notebooklm.per_file_coverage_floors] must be a TOML table in "
+            f"{pyproject_path}, got {type(floors).__name__}",
+            file=sys.stderr,
+        )
+        return 2
+    if not floors:
+        # Empty table — explicitly opted into "enforce nothing right now".
         print(f"OK: no [tool.notebooklm.per_file_coverage_floors] in {pyproject_path}")
         return 0
 
@@ -126,9 +139,17 @@ def _check_per_file_floors(pyproject_path: str, coverage_json_path: str) -> int:
         print(f"coverage.json malformed: {exc}", file=sys.stderr)
         return 2
 
-    files = cov.get("files", {})
+    files = cov.get("files")
     if not isinstance(files, dict):
-        print(f"coverage.json missing 'files' map: {coverage_json_path}", file=sys.stderr)
+        # Includes both the missing-key case (``cov.get`` returns None) and
+        # the wrong-shape case (e.g. accidentally a list); both indicate a
+        # malformed ``coverage.json`` and should fail before any per-file
+        # comparison runs.
+        print(
+            f"coverage.json 'files' must be an object map in {coverage_json_path}, "
+            f"got {type(files).__name__}",
+            file=sys.stderr,
+        )
         return 2
 
     failures: list[str] = []
@@ -143,13 +164,16 @@ def _check_per_file_floors(pyproject_path: str, coverage_json_path: str) -> int:
             continue
         try:
             actual = float(entry["summary"]["percent_covered"])
+            target = float(floor)
         except (KeyError, TypeError, ValueError) as exc:
             print(
-                f"coverage.json entry for {path!r} missing summary.percent_covered: {exc}",
+                f"coverage.json entry for {path!r} could not be compared "
+                f"(actual={entry.get('summary', {}).get('percent_covered')!r}, "
+                f"floor={floor!r}): {exc}",
                 file=sys.stderr,
             )
             return 2
-        if actual < float(floor):
+        if actual < target:
             failures.append(f"  {path}: {actual:.2f}% < floor {floor}%")
 
     if missing:
