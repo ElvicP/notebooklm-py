@@ -10,6 +10,7 @@ Commands:
 """
 
 from dataclasses import asdict
+from typing import Any
 
 import click
 from rich.table import Table
@@ -186,10 +187,16 @@ def note_get(ctx, note_id, notebook_id, json_output, client_auth):
             n = await client.notes.get(nb_id_resolved, resolved_id)
 
             if json_output:
-                if n and isinstance(n, Note):
+                if isinstance(n, Note):
                     # Mirror the Note dataclass shape; ``json_output_response``
                     # uses ``default=str`` which handles ``datetime`` fields.
-                    json_output_response(asdict(n))
+                    # Inject ``found: True`` so callers can disambiguate the
+                    # success and failure shapes by a single key (the failure
+                    # path emits ``found: False``); without it both shapes
+                    # would be falsy on ``data.get("found")``.
+                    payload = asdict(n)
+                    payload["found"] = True
+                    json_output_response(payload)
                 else:
                     json_output_response(
                         {
@@ -201,7 +208,7 @@ def note_get(ctx, note_id, notebook_id, json_output, client_auth):
                     )
                 return
 
-            if n and isinstance(n, Note):
+            if isinstance(n, Note):
                 console.print(f"[bold cyan]ID:[/bold cyan] {n.id}")
                 console.print(f"[bold cyan]Title:[/bold cyan] {n.title or 'Untitled'}")
                 console.print(f"[bold cyan]Content:[/bold cyan]\n{n.content or ''}")
@@ -232,9 +239,14 @@ def note_save(ctx, note_id, notebook_id, title, content, json_output, client_aut
 
         async def _no_changes():
             if json_output:
+                # ``notebook_id`` is the raw CLI argument here (may be ``None``
+                # when the user relies on context); we include it for shape
+                # parity with every other ``--json`` response in this module
+                # so callers can rely on the key always being present.
                 json_output_response(
                     {
                         "id": note_id,
+                        "notebook_id": notebook_id,
                         "saved": False,
                         "error": "Provide --title and/or --content",
                     }
@@ -255,7 +267,7 @@ def note_save(ctx, note_id, notebook_id, title, content, json_output, client_aut
             await client.notes.update(nb_id_resolved, resolved_id, content=content, title=title)
 
             if json_output:
-                payload: dict = {
+                payload: dict[str, Any] = {
                     "id": resolved_id,
                     "notebook_id": nb_id_resolved,
                     "saved": True,
@@ -293,7 +305,7 @@ def note_rename(ctx, note_id, new_title, notebook_id, json_output, client_auth):
             )
             # Get current note to preserve content
             n = await client.notes.get(nb_id_resolved, resolved_id)
-            if not n or not isinstance(n, Note):
+            if not isinstance(n, Note):
                 if json_output:
                     json_output_response(
                         {
@@ -347,16 +359,23 @@ def note_delete(ctx, note_id, notebook_id, yes, json_output, client_auth):
                 client, nb_id_resolved, note_id, json_output=json_output
             )
 
+            # In JSON mode, refuse to prompt: ``click.confirm`` writes to
+            # stdout, which would corrupt the parseable JSON contract callers
+            # rely on (a `subprocess.check_output(...) -> json.loads(...)`
+            # script would silently hang waiting for stdin). Surface a typed
+            # error and exit cleanly so the caller can re-run with ``--yes``.
+            if json_output and not yes:
+                json_output_response(
+                    {
+                        "id": resolved_id,
+                        "notebook_id": nb_id_resolved,
+                        "deleted": False,
+                        "error": "Pass --yes to confirm deletion in --json mode",
+                    }
+                )
+                return
+
             if not yes and not click.confirm(f"Delete note {resolved_id}?"):
-                if json_output:
-                    json_output_response(
-                        {
-                            "id": resolved_id,
-                            "notebook_id": nb_id_resolved,
-                            "deleted": False,
-                            "error": "Cancelled by user",
-                        }
-                    )
                 return
 
             await client.notes.delete(nb_id_resolved, resolved_id)
