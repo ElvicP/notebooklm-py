@@ -67,6 +67,34 @@ def test_research_api_reexports_cited_source_selection_for_back_compat():
 
 
 # ---------------------------------------------------------------------------
+# PR-T4.2 section: RPC enums re-exported via notebooklm.types
+#
+# CLI modules import these enums from ``notebooklm.types`` (the public surface)
+# rather than reaching into ``notebooklm.rpc`` directly. The re-exports must be
+# the exact same objects as the canonical definitions in ``notebooklm.rpc.types``
+# (identity, not just equality), so isinstance checks and equality both work
+# regardless of which import path callers use.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "enum_name",
+    ["ChatGoal", "ChatResponseLength", "DriveMimeType", "ExportType"],
+)
+def test_rpc_enum_reexports_are_identical(enum_name: str) -> None:
+    """notebooklm.types.<Enum> is the same object as notebooklm.rpc.types.<Enum>."""
+    import notebooklm.rpc.types as rpc_types
+    import notebooklm.types as public_types
+
+    public_enum = getattr(public_types, enum_name)
+    canonical_enum = getattr(rpc_types, enum_name)
+    assert public_enum is canonical_enum, (
+        f"notebooklm.types.{enum_name} must be the same object as "
+        f"notebooklm.rpc.types.{enum_name} (identity, not equality)"
+    )
+
+
+# ---------------------------------------------------------------------------
 # PR-D section: notebooklm.config / notebooklm.urls / notebooklm.log public shims
 # ---------------------------------------------------------------------------
 
