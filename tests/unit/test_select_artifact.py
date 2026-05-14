@@ -67,7 +67,7 @@ class TestSelectArtifactFiltering:
             candidates,
             artifact_id=None,
             type_name="Video",
-            type_name_lower="video",
+            empty_list_error_key="video",
             type_code=ArtifactTypeCode.VIDEO,
         )
 
@@ -86,7 +86,7 @@ class TestSelectArtifactFiltering:
             candidates,
             artifact_id=None,
             type_name="Audio",
-            type_name_lower="audio",
+            empty_list_error_key="audio",
             type_code=ArtifactTypeCode.AUDIO,
         )
 
@@ -106,7 +106,7 @@ class TestSelectArtifactFiltering:
                 candidates,
                 artifact_id=None,
                 type_name="Audio",
-                type_name_lower="audio",
+                empty_list_error_key="audio",
                 type_code=ArtifactTypeCode.AUDIO,
             )
 
@@ -123,7 +123,7 @@ class TestSelectArtifactFiltering:
             candidates,
             artifact_id=None,
             type_name="Audio",
-            type_name_lower="audio",
+            empty_list_error_key="audio",
             type_code=ArtifactTypeCode.AUDIO,
         )
 
@@ -144,7 +144,7 @@ class TestSelectArtifactExplicitId:
             candidates,
             artifact_id="b",
             type_name="Audio",
-            type_name_lower="audio",
+            empty_list_error_key="audio",
             type_code=ArtifactTypeCode.AUDIO,
         )
 
@@ -161,7 +161,7 @@ class TestSelectArtifactExplicitId:
                 candidates,
                 artifact_id="nonexistent",
                 type_name="Audio",
-                type_name_lower="audio",
+                empty_list_error_key="audio",
                 type_code=ArtifactTypeCode.AUDIO,
             )
 
@@ -178,7 +178,7 @@ class TestSelectArtifactExplicitId:
                 candidates,
                 artifact_id="shared_id",
                 type_name="Audio",
-                type_name_lower="audio",
+                empty_list_error_key="audio",
                 type_code=ArtifactTypeCode.AUDIO,
             )
 
@@ -199,7 +199,7 @@ class TestSelectArtifactSortByTimestamp:
             candidates,
             artifact_id=None,
             type_name="Audio",
-            type_name_lower="audio",
+            empty_list_error_key="audio",
             type_code=ArtifactTypeCode.AUDIO,
         )
 
@@ -234,9 +234,97 @@ class TestSelectArtifactSortByTimestamp:
             candidates,
             artifact_id=None,
             type_name="Audio",
-            type_name_lower="audio",
+            empty_list_error_key="audio",
             type_code=ArtifactTypeCode.AUDIO,
         )
 
         # The only artifact with a real timestamp wins.
         assert result[0] == "with_ts"
+
+
+class TestSelectArtifactErrorKeys:
+    """Verify ``ArtifactNotReadyError.artifact_type`` for both raise paths.
+
+    This locks in the asymmetry that ``download_video`` relies on: the
+    explicit-id-miss path derives its key from ``type_name`` (lowercased,
+    spaces->underscores) while the empty-list path uses the caller-supplied
+    ``empty_list_error_key`` verbatim.
+    """
+
+    def test_explicit_id_miss_error_key_derived_from_type_name(self, api: ArtifactsAPI) -> None:
+        """ID-miss path: ``artifact_type == type_name.lower().replace(' ', '_')``."""
+        candidates = [
+            _artifact("real_id", ArtifactTypeCode.VIDEO, ArtifactStatus.COMPLETED, 100),
+        ]
+
+        with pytest.raises(ArtifactNotReadyError) as exc_info:
+            api._select_artifact(
+                candidates,
+                artifact_id="nonexistent",
+                type_name="Video",
+                empty_list_error_key="video_overview",
+                type_code=ArtifactTypeCode.VIDEO,
+            )
+
+        assert exc_info.value.artifact_type == "video"
+        assert exc_info.value.artifact_id == "nonexistent"
+
+    def test_explicit_id_miss_with_space_in_type_name(self, api: ArtifactsAPI) -> None:
+        """Spaces in ``type_name`` become underscores (e.g. "Slide deck" -> "slide_deck")."""
+        candidates = [
+            _artifact("real_id", ArtifactTypeCode.SLIDE_DECK, ArtifactStatus.COMPLETED, 100),
+        ]
+
+        with pytest.raises(ArtifactNotReadyError) as exc_info:
+            api._select_artifact(
+                candidates,
+                artifact_id="nonexistent",
+                type_name="Slide deck",
+                empty_list_error_key="slide_deck",
+                type_code=ArtifactTypeCode.SLIDE_DECK,
+            )
+
+        assert exc_info.value.artifact_type == "slide_deck"
+
+    def test_empty_list_error_key_used_verbatim(self, api: ArtifactsAPI) -> None:
+        """Empty-list path: ``artifact_type == empty_list_error_key`` verbatim.
+
+        ``download_video`` exploits this to raise ``video_overview`` for the
+        empty-list case while still raising ``video`` for explicit-id miss.
+        """
+        with pytest.raises(ArtifactNotReadyError) as exc_info:
+            api._select_artifact(
+                [],
+                artifact_id=None,
+                type_name="Video",
+                empty_list_error_key="video_overview",
+                type_code=ArtifactTypeCode.VIDEO,
+            )
+
+        assert exc_info.value.artifact_type == "video_overview"
+        assert exc_info.value.artifact_id is None
+
+
+class TestSelectArtifactDoesNotMutateInput:
+    """The helper must not mutate the caller's candidate list."""
+
+    def test_input_list_unchanged_after_selection(self, api: ArtifactsAPI) -> None:
+        """The raw artifact list passed in must be unchanged (order preserved)."""
+        original = [
+            _artifact("old", ArtifactTypeCode.AUDIO, ArtifactStatus.COMPLETED, 100),
+            _artifact("newest", ArtifactTypeCode.AUDIO, ArtifactStatus.COMPLETED, 999),
+            _artifact("middle", ArtifactTypeCode.AUDIO, ArtifactStatus.COMPLETED, 500),
+        ]
+        # Snapshot of (id, timestamp) tuples in input order.
+        snapshot = [(a[0], a[15][0]) for a in original]
+
+        api._select_artifact(
+            original,
+            artifact_id=None,
+            type_name="Audio",
+            empty_list_error_key="audio",
+            type_code=ArtifactTypeCode.AUDIO,
+        )
+
+        after = [(a[0], a[15][0]) for a in original]
+        assert after == snapshot

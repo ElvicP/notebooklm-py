@@ -1572,7 +1572,11 @@ class ArtifactsAPI:
             artifacts_data,
             artifact_id,
             "Data table",
-            "data table",
+            # Unified to "data_table" so both empty-list and explicit-id-miss
+            # paths raise ArtifactNotReadyError with the same artifact_type
+            # key. The pre-refactor inline code used "data table" (space) for
+            # the empty case, which made `except` filtering inconsistent.
+            "data_table",
             type_code=ArtifactTypeCode.DATA_TABLE,
         )
 
@@ -2089,7 +2093,7 @@ class ArtifactsAPI:
         candidates: builtins.list[Any],
         artifact_id: str | None,
         type_name: str,
-        type_name_lower: str,
+        empty_list_error_key: str,
         *,
         type_code: ArtifactTypeCode,
     ) -> Any:
@@ -2101,18 +2105,34 @@ class ArtifactsAPI:
         ``COMPLETED`` before applying the explicit-ID or latest-timestamp
         rules.
 
+        Note on the length guard: the filter only requires ``len(a) > 4`` —
+        the minimum needed to read ``a[2]`` (type) and ``a[4]`` (status). The
+        old inline filters in ``download_report`` and ``download_data_table``
+        used stricter length checks (``> 7`` / ``> 18``). A completed-but-too-
+        short artifact now passes this filter and surfaces as
+        ``ArtifactParseError`` from the downstream extractor instead of
+        ``ArtifactNotReadyError`` from the candidate filter. In practice the
+        API returns consistent structures, and downstream paths already wrap
+        ``IndexError``/``TypeError`` into ``ArtifactParseError``.
+
         Args:
             candidates: Raw artifact list (typically from ``_list_raw``).
             artifact_id: Specific artifact ID to select, or None for latest.
-            type_name: Display name for error messages (e.g., "Report").
-            type_name_lower: Lowercase name for error messages (e.g., "report").
+            type_name: Display name (e.g., "Audio", "Slide deck"). Used for
+                the explicit-id-miss error key — lowercased with spaces turned
+                into underscores (e.g., "Slide deck" -> "slide_deck").
+            empty_list_error_key: Error key used when no candidate survives
+                filtering. Most callers pass ``type_name.lower()`` but some
+                (e.g. ``download_video``) intentionally pass a distinct key
+                (``"video_overview"``) to preserve historical exception keys.
             type_code: ArtifactTypeCode used to filter candidates by type.
 
         Returns:
             Selected artifact data.
 
         Raises:
-            ArtifactNotReadyError: If artifact not found or no candidates available.
+            ArtifactNotReadyError: If artifact not found or no candidates
+                available after filtering.
         """
         # Filter by type + completed-status. Requires at least 5 elements so
         # we can read a[2] (type) and a[4] (status); downstream parsers raise
@@ -2135,7 +2155,7 @@ class ArtifactsAPI:
             return artifact
 
         if not filtered:
-            raise ArtifactNotReadyError(type_name_lower)
+            raise ArtifactNotReadyError(empty_list_error_key)
 
         # Sort by creation timestamp (descending) to get the latest.
         # Timestamp is the raw API field at index 15, position 0.
