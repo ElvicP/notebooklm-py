@@ -1505,8 +1505,10 @@ class TestSourceAddPathShapedMissing:
         mock_client.sources.add_text.assert_called_once()
         # Click's CliRunner mixes stderr into ``result.output`` by default;
         # both the path-shape phrasing and the original argument should
-        # surface so a user can see what triggered the heuristic.
-        assert "looks like a path" in result.output or "does not exist" in result.output
+        # surface so a user can see what triggered the heuristic. Assert
+        # the full phrase (not an OR) so a future edit that drops "looks
+        # like a path" or "does not exist" individually still trips this.
+        assert "looks like a path but does not exist" in result.output
         assert "./missing.md" in result.output
 
     def test_path_shaped_missing_with_extension_only_warns(self, runner, mock_auth):
@@ -1530,7 +1532,8 @@ class TestSourceAddPathShapedMissing:
 
         assert result.exit_code == 0
         mock_client.sources.add_text.assert_called_once()
-        assert "looks like a path" in result.output or "does not exist" in result.output
+        # Tight full-phrase match — see the slash-case test above for rationale.
+        assert "looks like a path but does not exist" in result.output
         assert "missing.md" in result.output
 
     def test_explicit_type_text_suppresses_warning(self, runner, mock_auth):
