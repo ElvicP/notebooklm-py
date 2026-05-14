@@ -47,7 +47,22 @@ def _parse_rpc_overrides(raw: str | None) -> tuple[tuple[str, str], ...]:
     # module; the lookup is deferred to call time so the forward reference
     # is resolved by the time any caller invokes us.
     valid_methods = set(RPCMethod.__members__)
-    normalized = [(str(k), str(v)) for k, v in data.items()]
+    normalized: list[tuple[str, str]] = []
+    null_keys: list[str] = []
+    for k, v in data.items():
+        if v is None:
+            # ``json.loads('{"X": null}')`` would coerce to ``str(None) ==
+            # "None"`` — a literal four-character string on the wire, almost
+            # certainly not what the user meant. Drop and warn loudly.
+            null_keys.append(str(k))
+            continue
+        normalized.append((str(k), str(v)))
+    if null_keys:
+        logger.warning(
+            "Ignoring NOTEBOOKLM_RPC_OVERRIDES entries with null values "
+            "(provide a non-null RPC id string): %s",
+            ", ".join(sorted(null_keys)),
+        )
     unknown = sorted(k for k, _ in normalized if k not in valid_methods)
     if unknown:
         logger.warning(
@@ -103,11 +118,13 @@ def resolve_rpc_id(method_name: str, canonical_id: str) -> str:
 
     try:
         host = get_base_host()
-    except Exception:
-        # If the host can't even be resolved (e.g. malformed
-        # NOTEBOOKLM_BASE_URL), pretend overrides are disabled rather than
-        # crashing the resolver. The URL builder itself will surface the
-        # real error.
+    except ValueError:
+        # ``get_base_host()`` raises ``ValueError`` for a malformed
+        # ``NOTEBOOKLM_BASE_URL`` (the only failure mode it documents).
+        # Treat overrides as disabled in that case rather than crashing the
+        # resolver — the URL builder itself will surface the real error to
+        # the caller. A broader ``except Exception`` would mask unrelated
+        # bugs in ``get_base_host`` during development.
         return canonical_id
     if host not in _ALLOWED_BASE_HOSTS:
         return canonical_id

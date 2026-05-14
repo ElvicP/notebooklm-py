@@ -94,6 +94,24 @@ def test_load_rpc_overrides_coerces_values_to_str(monkeypatch):
     assert _load_rpc_overrides() == {"LIST_NOTEBOOKS": "12345"}
 
 
+def test_load_rpc_overrides_drops_null_values_with_warning(monkeypatch, caplog):
+    """JSON ``null`` values are dropped + warned, never coerced to ``"None"``.
+
+    Without this gate, ``str(None)`` would put the literal four-character
+    string ``"None"`` on the wire as the override RPC id — almost certainly
+    not what the user intended.
+    """
+    monkeypatch.setenv(
+        "NOTEBOOKLM_RPC_OVERRIDES",
+        '{"LIST_NOTEBOOKS": null, "CREATE_NOTEBOOK": "valid"}',
+    )
+    with caplog.at_level("WARNING", logger="notebooklm.rpc.types"):
+        result = _load_rpc_overrides()
+    assert result == {"CREATE_NOTEBOOK": "valid"}
+    assert "LIST_NOTEBOOKS" not in result
+    assert any("null values" in r.message and "LIST_NOTEBOOKS" in r.message for r in caplog.records)
+
+
 def test_load_rpc_overrides_drops_unknown_keys_with_warning(monkeypatch, caplog):
     """Keys not matching an RPCMethod member are dropped + warned, not silently kept.
 
