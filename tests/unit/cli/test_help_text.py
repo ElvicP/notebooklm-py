@@ -19,6 +19,8 @@ to be listed in the docstring too — adjust the comprehension to filter
 
 from __future__ import annotations
 
+import re
+
 import click
 import pytest
 from click.testing import CliRunner
@@ -44,26 +46,41 @@ GROUPS: list[tuple[str, click.Group]] = [
 ]
 
 
+def _contains_command_entry(text: str, command: str) -> bool:
+    """Whole-token match for ``command`` as a left-column entry in ``text``.
+
+    Plain ``in`` matches substrings — ``"add" in "add-drive"`` is True — so
+    using it for command-presence checks lets a missing ``add`` slip through
+    unnoticed if ``add-drive`` is registered. Match the command at the start
+    of a line followed by ≥2 spaces (Click's column gap in ``--help`` /
+    docstring tables) or end-of-line.
+    """
+    return re.search(rf"(?m)^\s*{re.escape(command)}(?:\s{{2,}}|\s*$)", text) is not None
+
+
 @pytest.mark.parametrize("group_name,group", GROUPS, ids=[g[0] for g in GROUPS])
 def test_group_help_lists_every_subcommand(
     group_name: str,
     group: click.Group,
     runner: CliRunner,
 ) -> None:
-    """Every subcommand registered on a group must appear in its help output.
+    """Every subcommand registered on a group must appear in its rendered ``--help``.
 
-    Walks ``group.commands`` and asserts each name is present in the rendered
-    ``--help`` output. Click already auto-generates a "Commands:" table at the
-    bottom of help, so this is a belt-and-suspenders check that also catches
-    drift in the hand-written docstring "Commands:" block at the top of each
-    group.
+    Click auto-generates a "Commands:" table at the bottom of ``--help``, so
+    this test almost always passes by virtue of that table alone. It exists
+    as a tripwire for the rare case where the group is configured to suppress
+    the auto-table or a subcommand is registered with ``hidden=True`` (which
+    would also need filtering — see module docstring). The stricter
+    docstring-only check is :func:`test_group_docstring_lists_every_subcommand`.
     """
     result = runner.invoke(group, ["--help"])
     assert result.exit_code == 0, (
         f"`{group_name} --help` failed with exit {result.exit_code}: {result.output}"
     )
 
-    missing = [subcmd for subcmd in group.commands if subcmd not in result.output]
+    missing = [
+        subcmd for subcmd in group.commands if not _contains_command_entry(result.output, subcmd)
+    ]
     assert not missing, (
         f"`{group_name} --help` is missing subcommand(s): {missing}. "
         f"Update the group docstring 'Commands:' block in "
@@ -75,7 +92,6 @@ def test_group_help_lists_every_subcommand(
 def test_group_docstring_lists_every_subcommand(
     group_name: str,
     group: click.Group,
-    runner: CliRunner,
 ) -> None:
     """Each subcommand must appear in the group's hand-written docstring.
 
@@ -88,7 +104,9 @@ def test_group_docstring_lists_every_subcommand(
     docstring = group.help or ""
     assert docstring, f"`{group_name}` group has no docstring"
 
-    missing = [subcmd for subcmd in group.commands if subcmd not in docstring]
+    missing = [
+        subcmd for subcmd in group.commands if not _contains_command_entry(docstring, subcmd)
+    ]
     assert not missing, (
         f"`{group_name}` group docstring is missing subcommand(s): {missing}. "
         f"Update the docstring 'Commands:' / 'Types:' block in "
