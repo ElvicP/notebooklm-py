@@ -558,7 +558,7 @@ class SourcesAPI:
         # parameter" under ``[Unreleased]`` for the planned removal release.
         if mime_type is not None:
             warnings.warn(
-                "mime_type parameter is unused and will be removed in v0.X; "
+                "mime_type parameter is unused and will be removed in v0.X.0; "
                 "rely on filename extension instead",
                 DeprecationWarning,
                 stacklevel=2,

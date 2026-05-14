@@ -390,7 +390,14 @@ def source_list(ctx, notebook_id, json_output, client_auth):
 # the filename extension). A deprecation note is echoed to stderr when the flag
 # is used with a file source. The separate Drive-source ``--mime-type`` on the
 # ``add-drive`` command remains live and IS NOT affected by this deprecation.
-@click.option("--mime-type", help="MIME type for file sources")
+@click.option(
+    "--mime-type",
+    help=(
+        "[Deprecated] MIME type for file sources — unused; the server "
+        "derives MIME from the filename extension. Drive sources retain "
+        "this option (see ``source add-drive``)."
+    ),
+)
 @click.option(
     "--timeout",
     default=None,
@@ -480,7 +487,7 @@ def source_add(
     if (
         mime_type is not None
         and detected_type == "file"
-        and not os.environ.get("NOTEBOOKLM_QUIET_DEPRECATIONS")
+        and os.environ.get("NOTEBOOKLM_QUIET_DEPRECATIONS") != "1"
     ):
         click.echo(
             "--mime-type is unused for file sources; remove the flag "

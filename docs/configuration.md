@@ -180,8 +180,10 @@ notebooklm source add ./report.pdf --type file --mime-type application/pdf
 # (no "--mime-type is unused for file sources" notice on stderr)
 ```
 
-Any non-empty value suppresses the notice. The underlying behavior — that
-the deprecated flag remains a no-op — is unchanged; only the user-facing
+Set the value to ``1`` to suppress the notice; any other value (including
+``0`` or ``false``) leaves the deprecation notice enabled. The underlying
+behavior — that the deprecated flag remains a no-op — is unchanged; only
+the user-facing
 warning text is silenced. Library-level `DeprecationWarning`s emitted from
 the Python API (e.g. `client.sources.add_file(..., mime_type=...)`) are
 **not** affected by this variable; use standard `warnings.filterwarnings`
