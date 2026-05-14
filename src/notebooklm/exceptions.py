@@ -326,9 +326,6 @@ class AuthExtractionError(RPCError):
         )
         super().__init__(rendered)
 
-    def __str__(self) -> str:
-        return super().__str__()
-
 
 class RateLimitError(RPCError):
     """Rate limit exceeded.
