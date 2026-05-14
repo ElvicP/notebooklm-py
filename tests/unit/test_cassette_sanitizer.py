@@ -32,6 +32,17 @@ from vcr_config import scrub_string  # noqa: E402
 
 SCRIPT_PATH = TESTS_DIR / "check_cassettes_clean.sh"
 
+# The shell-script-driven subprocess tests need a POSIX shell + GNU grep.
+# Windows CI runners have git-bash but POSIX-quoting + grep ``-rnE`` semantics
+# don't round-trip cleanly there (path separators, line endings). The shell
+# script is also skipped in CI on Windows (see ``.github/workflows/test.yml``),
+# so we skip the matching subprocess tests here.
+_skip_on_windows = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="check_cassettes_clean.sh is a POSIX shell script; the Windows CI"
+    " step is gated off and we skip its driver tests in lockstep.",
+)
+
 
 # ---------------------------------------------------------------------------
 # Structural display-name scrub
@@ -81,15 +92,21 @@ def test_structural_display_name_scrub_negative_sibling_keys() -> None:
 
 
 def test_structural_display_name_no_match_on_substring_keys() -> None:
-    """The anchor is the exact JSON key. Keys like ``userDisplayName`` should
-    still match because they end with ``displayName`` — but a key like
-    ``displayNamespace`` must NOT match.
+    """The regex requires the JSON key to be exactly ``displayName`` (the
+    opening quote is part of the match). So keys that *contain* the substring
+    ``displayName`` but are not equal to it MUST NOT match:
 
-    The current regex requires the closing quote immediately after the key
-    name, so ``displayName`` is required to be the full key. Confirm.
+    - ``displayNamespace`` — extra trailing characters before the closing quote
+    - ``userDisplayName`` — extra leading characters after the opening quote
+
+    Confirms the anchor is exact-key on both sides, not a substring match.
+    (Claude review on PR #477, #6 — earlier docstring claimed
+    ``userDisplayName`` would still match, which was wrong.)
     """
-    safe = '{"displayNamespace":"keep-me"}'
-    assert scrub_string(safe) == safe
+    extra_trailing = '{"displayNamespace":"keep-me"}'
+    extra_leading = '{"userDisplayName":"Alice Example"}'
+    assert scrub_string(extra_trailing) == extra_trailing
+    assert scrub_string(extra_leading) == extra_leading
 
 
 # ---------------------------------------------------------------------------
@@ -118,20 +135,20 @@ def test_two_capital_word_in_html_text_not_scrubbed() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "provider",
-    [
-        "gmail",
-        "googlemail",
-        "google",
-        "anthropic",
-        "outlook",
-        "hotmail",
-        "yahoo",
-        "icloud",
-        "protonmail",
-    ],
-)
+_EMAIL_PROVIDERS = [
+    "gmail",
+    "googlemail",
+    "google",
+    "anthropic",
+    "outlook",
+    "hotmail",
+    "yahoo",
+    "icloud",
+    "protonmail",
+]
+
+
+@pytest.mark.parametrize("provider", _EMAIL_PROVIDERS)
 def test_broadened_email_scrub_positive(provider: str) -> None:
     """Quoted emails at any of the supported providers get scrubbed."""
     text = f'{{"email":"alice.example+tag@{provider}.com"}}'
@@ -139,6 +156,21 @@ def test_broadened_email_scrub_positive(provider: str) -> None:
     assert provider not in scrubbed
     assert "alice.example" not in scrubbed
     assert '"SCRUBBED_EMAIL@example.com"' in scrubbed
+
+
+@pytest.mark.parametrize("provider", _EMAIL_PROVIDERS)
+def test_broadened_email_scrub_unquoted_context(provider: str) -> None:
+    """Unquoted emails in raw HTML/JS contexts get scrubbed too.
+
+    Addresses gemini-code-assist review feedback on PR #477: the legacy
+    unquoted-context fallback was Gmail-only; it now covers the full provider
+    list, mirroring the JSON-quoted pattern.
+    """
+    text = f'<a href="mailto:alice.example+tag@{provider}.com">Mail me</a>'
+    scrubbed = scrub_string(text)
+    assert provider not in scrubbed
+    assert "alice.example" not in scrubbed
+    assert "SCRUBBED_EMAIL@example.com" in scrubbed
 
 
 def test_email_scrub_idempotent_on_example_com() -> None:
@@ -157,6 +189,10 @@ def test_email_scrub_negative_unrelated_text() -> None:
 
 # ---------------------------------------------------------------------------
 # CI grep guard script: clean vs. leak cases
+#
+# All tests below shell out to ``bash`` + ``grep -rnE``; we skip them on
+# Windows in lockstep with the CI workflow (``runner.os != 'Windows'`` on the
+# guard step in .github/workflows/test.yml).
 # ---------------------------------------------------------------------------
 
 
@@ -186,6 +222,7 @@ def _run_guard(repo: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
+@_skip_on_windows
 def test_guard_script_exits_zero_on_clean_cassettes(fake_repo: Path) -> None:
     cassette = fake_repo / "tests" / "cassettes" / "clean.yaml"
     cassette.write_text(
@@ -197,6 +234,7 @@ def test_guard_script_exits_zero_on_clean_cassettes(fake_repo: Path) -> None:
     assert "OK: cassettes are sanitized" in result.stdout
 
 
+@_skip_on_windows
 def test_guard_script_exits_one_on_email_leak(fake_repo: Path) -> None:
     cassette = fake_repo / "tests" / "cassettes" / "leak.yaml"
     cassette.write_text('{"email":"realname@gmail.com"}\n')
@@ -205,19 +243,99 @@ def test_guard_script_exits_one_on_email_leak(fake_repo: Path) -> None:
     assert "unsanitized email" in result.stderr
 
 
-def test_guard_script_exits_one_on_cookie_leak(fake_repo: Path) -> None:
+@_skip_on_windows
+def test_guard_script_exits_one_on_cookie_json_key_leak(fake_repo: Path) -> None:
+    """Shape B — JSON dict with the cookie name as a top-level key."""
     cassette = fake_repo / "tests" / "cassettes" / "leak.yaml"
     # Cookie value starts with something other than 'S' so it is NOT the
     # canonical "SCRUBBED" sentinel; the guard regex requires ``[^S][^"]+``.
     cassette.write_text('{"SAPISID": "abcdef1234567890"}\n')
     result = _run_guard(fake_repo)
     assert result.returncode == 1
-    assert "unsanitized cookie" in result.stderr
+    assert "JSON-key" in result.stderr or "cookie" in result.stderr
 
 
+@_skip_on_windows
+def test_guard_script_exits_one_on_cookie_header_leak(fake_repo: Path) -> None:
+    """Shape A — HTTP ``Cookie:`` / ``Set-Cookie:`` header form."""
+    cassette = fake_repo / "tests" / "cassettes" / "leak.yaml"
+    cassette.write_text("Set-Cookie: SID=abc1234567xyz; Path=/\n")
+    result = _run_guard(fake_repo)
+    assert result.returncode == 1
+    assert "cookie header" in result.stderr
+
+
+@_skip_on_windows
+def test_guard_script_exits_one_on_storage_state_leak_name_first(fake_repo: Path) -> None:
+    """Shape C — Playwright ``storage_state.json``, ``name`` before ``value``."""
+    cassette = fake_repo / "tests" / "cassettes" / "leak.yaml"
+    cassette.write_text(
+        '{"name":"SID","value":"abc1234567","domain":".google.com"}\n',
+    )
+    result = _run_guard(fake_repo)
+    assert result.returncode == 1
+    assert "storage_state" in result.stderr
+
+
+@_skip_on_windows
+def test_guard_script_exits_one_on_storage_state_leak_value_first(fake_repo: Path) -> None:
+    """Shape C — Playwright ``storage_state.json``, ``value`` before ``name``."""
+    cassette = fake_repo / "tests" / "cassettes" / "leak.yaml"
+    cassette.write_text(
+        '{"value":"abc1234567","name":"__Secure-1PSID","domain":".google.com"}\n',
+    )
+    result = _run_guard(fake_repo)
+    assert result.returncode == 1
+    assert "storage_state" in result.stderr
+
+
+@_skip_on_windows
+def test_guard_script_catches_single_char_cookie_leak(fake_repo: Path) -> None:
+    """A 1-character cookie value (``"SID": "x"``) still trips the guard.
+
+    Earlier the cookie-value regex was ``[^S][^"]+`` which required two-or-more
+    characters; a single-character non-scrubbed leak slipped through. The
+    regex was tightened to ``[^S"][^"]*`` (Claude review on PR #477, #7).
+    """
+    cassette = fake_repo / "tests" / "cassettes" / "leak.yaml"
+    cassette.write_text('{"SID": "x"}\n')
+    result = _run_guard(fake_repo)
+    assert result.returncode == 1
+
+
+@_skip_on_windows
+def test_guard_script_exits_zero_when_cassettes_directory_missing(tmp_path: Path) -> None:
+    """Fresh checkouts with no recorded cassettes must not fail the guard.
+
+    Addresses gemini-code-assist review feedback on PR #477.
+    """
+    dest = tmp_path / "tests" / "check_cassettes_clean.sh"
+    dest.parent.mkdir()
+    shutil.copy2(SCRIPT_PATH, dest)
+    dest.chmod(dest.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    # NOTE: deliberately do NOT create tests/cassettes/.
+    result = subprocess.run(
+        ["bash", str(dest)],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "no cassettes" in result.stdout
+
+
+@_skip_on_windows
 def test_guard_script_allows_scrubbed_cookie_sentinel(fake_repo: Path) -> None:
-    """``"SID": "SCRUBBED"`` must NOT trip the guard."""
+    """All three cookie shapes with the ``SCRUBBED`` sentinel must NOT trip the guard."""
     cassette = fake_repo / "tests" / "cassettes" / "ok.yaml"
-    cassette.write_text('{"SID": "SCRUBBED", "__Secure-1PSID": "SCRUBBED"}\n')
+    cassette.write_text(
+        # Shape B — JSON dict, cookie name as key
+        '{"SID": "SCRUBBED", "__Secure-1PSID": "SCRUBBED"}\n'
+        # Shape A — HTTP header
+        "Set-Cookie: SID=SCRUBBED; Path=/\n"
+        # Shape C — Playwright storage_state
+        '{"name":"SAPISID","value":"SCRUBBED","domain":".google.com"}\n',
+    )
     result = _run_guard(fake_repo)
     assert result.returncode == 0, result.stderr
