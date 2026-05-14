@@ -102,6 +102,15 @@ class TestGetPathInfoStorageOverride:
         # No --storage means we don't claim "CLI flag (--storage)" as source.
         assert info["profile_source"] != "CLI flag (--storage)"
 
+    def test_storage_with_profile_marks_profile_ignored(self, tmp_path, isolated_home):
+        """When --storage and --profile both set, label is explicit."""
+        storage = tmp_path / "explicit.json"
+        info = get_path_info(profile="work", storage_path=storage)
+        # ``--profile work`` is shadowed by ``--storage`` for auth/context, so
+        # the source label must communicate that to avoid confusion in
+        # ``status --paths``.
+        assert info["profile_source"] == "CLI flag (--storage, profile ignored)"
+
 
 # =============================================================================
 # CLI-level isolation tests

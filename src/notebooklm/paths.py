@@ -352,9 +352,21 @@ def get_path_info(
     home_from_env = os.environ.get("NOTEBOOKLM_HOME")
     resolved = resolve_profile(profile)
 
-    # Determine profile source
+    # Determine profile source. When --storage is set, profile resolution is
+    # effectively bypassed for the auth + context paths — but we still resolve
+    # ``profile`` because consumers may want to know what profile *would* be
+    # active otherwise. Make the override clear in the label so ``status
+    # --paths`` doesn't claim "CLI flag (--storage)" set the profile.
+    other_profile_set = (
+        profile
+        or _active_profile
+        or os.environ.get("NOTEBOOKLM_PROFILE")
+        or _read_default_profile()
+    )
     if storage_path is not None:
-        profile_source = "CLI flag (--storage)"
+        profile_source = (
+            "CLI flag (--storage, profile ignored)" if other_profile_set else "CLI flag (--storage)"
+        )
     elif profile:
         profile_source = "CLI flag"
     elif _active_profile:

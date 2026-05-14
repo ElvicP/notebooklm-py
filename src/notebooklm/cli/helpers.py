@@ -532,19 +532,26 @@ def _current_storage_override() -> Path | None:
     """Resolve the active ``--storage`` override from the current Click context.
 
     Returns the explicit storage path stored in ``ctx.obj["storage_path"]`` by
-    the root CLI group (see ``notebooklm_cli.cli``). When no Click context is
-    active (e.g., library usage) or no override was passed, returns ``None``.
-    Context-touching helpers thread this through ``get_context_path`` so that
-    ``--storage <path>`` isolates context into a sibling ``<path>.context.json``.
+    the root CLI group (see ``notebooklm_cli.cli``), canonicalized via
+    ``expanduser().resolve()`` so two representations of the same file (e.g.,
+    ``~/foo.json`` and ``/home/user/foo.json``) share one sibling-context
+    namespace. When no Click context is active (library usage) or no override
+    was passed, returns ``None``.
+
+    ``click.get_current_context(silent=True)`` already returns ``None`` outside
+    of a Click invocation, so no try/except is needed.
     """
-    try:
-        ctx = click.get_current_context(silent=True)
-    except RuntimeError:
-        return None
+    ctx = click.get_current_context(silent=True)
     if ctx is None or not ctx.obj:
         return None
     storage = ctx.obj.get("storage_path")
-    return storage if isinstance(storage, Path) else None
+    if storage is None:
+        return None
+    # Defensive normalization: ``notebooklm_cli`` already wraps strings via
+    # ``Path(storage)``, but accept either form so future callers (tests,
+    # library wrappers populating ``ctx.obj`` directly) don't get a
+    # string-vs-``Path`` mismatch crash inside ``get_context_path``.
+    return Path(storage).expanduser().resolve()
 
 
 def _get_context_value(key: str) -> str | None:

@@ -48,6 +48,7 @@ from ..paths import (
     get_storage_path,
 )
 from .helpers import (
+    _current_storage_override,
     clear_context,
     console,
     get_auth_tokens,
@@ -1417,14 +1418,18 @@ def register_session_commands(cli):
     @cli.command("status")
     @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
     @click.option("--paths", "show_paths", is_flag=True, help="Show resolved file paths")
-    @click.pass_context
-    def status(ctx, json_output, show_paths):
+    def status(json_output, show_paths):
         """Show current context (active notebook and conversation).
 
         Use --paths to see where configuration files are located
         (useful for debugging NOTEBOOKLM_HOME).
         """
-        storage_override = ctx.obj.get("storage_path") if ctx.obj else None
+        # Reuse the shared helper so the same ``--storage`` resolution + path
+        # canonicalization runs here as in ``_get_context_value`` and friends.
+        # Keeps a single source of truth for "which context file does
+        # ``--storage`` map to?" and avoids duplicating the normalization
+        # logic (string→Path, expanduser, resolve) at every call site.
+        storage_override = _current_storage_override()
         context_file = get_context_path(storage_path=storage_override)
         notebook_id = get_current_notebook()
 
@@ -1544,8 +1549,7 @@ def register_session_commands(cli):
         pass
 
     @auth_group.command("logout")
-    @click.pass_context
-    def auth_logout(ctx):
+    def auth_logout():
         """Log out by clearing saved authentication.
 
         Removes both the saved cookie file (storage_state.json) and the
@@ -1554,8 +1558,9 @@ def register_session_commands(cli):
 
         \b
         Examples:
-          notebooklm auth logout           # Clear auth for active profile
-          notebooklm -p work auth logout   # Clear auth for 'work' profile
+          notebooklm auth logout                       # Clear auth for active profile
+          notebooklm -p work auth logout               # Clear auth for 'work' profile
+          notebooklm --storage A.json auth logout      # Clear the override auth file
         """
         # Warn if env-based auth will remain active after logout
         if os.environ.get("NOTEBOOKLM_AUTH_JSON"):
@@ -1564,7 +1569,11 @@ def register_session_commands(cli):
                 "remain active after logout. Unset it to fully log out.[/yellow]"
             )
 
-        storage_path = get_storage_path()
+        # When ``--storage <path>`` is active, that path IS the auth file. Using
+        # the profile's storage_state.json instead would silently leave the
+        # actual session credentials in place — see coderabbit feedback on #467.
+        storage_override = _current_storage_override()
+        storage_path = storage_override if storage_override is not None else get_storage_path()
         browser_profile = get_browser_profile_dir()
 
         removed_any = False
@@ -1614,7 +1623,9 @@ def register_session_commands(cli):
             if clear_context(clear_account=True):
                 removed_any = True
         except OSError as exc:
-            storage_override = ctx.obj.get("storage_path") if ctx.obj else None
+            # Reuse the storage_override computed above so the diagnostic line
+            # points at the actual sibling-context file when ``--storage`` is
+            # active (matches the path that ``clear_context`` just tried).
             context_file = get_context_path(storage_path=storage_override)
             logger.error("Failed to remove context file %s: %s", context_file, exc)
             console.print(
