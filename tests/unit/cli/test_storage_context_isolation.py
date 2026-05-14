@@ -121,10 +121,11 @@ class TestUseWritesSiblingContext:
     """``--storage A use nb1`` must write to ``A.context.json``, not default."""
 
     def test_use_writes_sibling_not_default(self, runner, tmp_path, isolated_home):
+        # ``use --force`` skips both auth loading and the existence-check RPC,
+        # so the storage file does NOT need to exist on disk — the only thing
+        # that matters for this test is the ``--storage`` flag value, which
+        # drives the sibling-path resolution in ``get_context_path``.
         storage_a = tmp_path / "A.json"
-        # Pre-populate a fake storage file so existence checks pass; the CLI's
-        # `use --force` path persists the ID locally without an RPC round-trip.
-        storage_a.write_text(json.dumps({"cookies": [], "origins": []}))
 
         # Place a default-profile context file so we can detect accidental writes.
         default_context = isolated_home / "context.json"
@@ -133,14 +134,14 @@ class TestUseWritesSiblingContext:
         sibling_context = tmp_path / "A.json.context.json"
         assert not sibling_context.exists()
 
-        # ``use --force`` skips the existence-check RPC and writes context
-        # immediately — that's the right primitive for an isolation test that
-        # doesn't care whether the notebook exists, only WHERE the write lands.
-        # Post-T3.D, the unverified-but-saved fallback no longer exists; we
-        # use ``--force`` to express the same intent explicitly.
+        # ``use --force`` is the right primitive for an isolation test that
+        # cares about *where* the write lands, not about whether the notebook
+        # exists. Post-T3.D, ``use`` without ``--force`` fails closed; this
+        # path is the documented escape hatch for "persist without RPC".
         result = runner.invoke(
             cli, ["--storage", str(storage_a), "use", "--force", "nb_abc123def456"]
         )
+        assert result.exit_code == 0, result.output
 
         assert sibling_context.exists(), (
             f"sibling context not written: stdout={result.output} exit={result.exit_code}"
