@@ -241,6 +241,32 @@ class TestSelectArtifactSortByTimestamp:
         # The only artifact with a real timestamp wins.
         assert result[0] == "with_ts"
 
+    def test_handles_none_at_timestamp_position_without_typeerror(self, api: ArtifactsAPI) -> None:
+        """``a[15][0] is None`` must not crash the sort with ``TypeError``.
+
+        Python 3 refuses to compare ``None`` against ``int``; if the API
+        ever emits ``[null, ...]`` at index 15 the sort must coerce that
+        to ``0`` rather than blow up at runtime.
+        """
+        # Artifact with a real timestamp.
+        with_ts = _artifact("with_ts", ArtifactTypeCode.AUDIO, ArtifactStatus.COMPLETED, 100)
+        # Artifact with a None timestamp at position 0 of index 15.
+        none_ts: list = _artifact("none_ts", ArtifactTypeCode.AUDIO, ArtifactStatus.COMPLETED, 0)
+        none_ts[15] = [None, "extra"]
+
+        candidates = [with_ts, none_ts]
+
+        result = api._select_artifact(
+            candidates,
+            artifact_id=None,
+            type_name="Audio",
+            empty_list_error_key="audio",
+            type_code=ArtifactTypeCode.AUDIO,
+        )
+
+        # The artifact with a real timestamp wins (None coerces to 0).
+        assert result[0] == "with_ts"
+
 
 class TestSelectArtifactErrorKeys:
     """Verify ``ArtifactNotReadyError.artifact_type`` for both raise paths.

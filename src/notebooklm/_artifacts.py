@@ -2158,9 +2158,13 @@ class ArtifactsAPI:
             raise ArtifactNotReadyError(empty_list_error_key)
 
         # Sort by creation timestamp (descending) to get the latest.
-        # Timestamp is the raw API field at index 15, position 0.
+        # Timestamp is the raw API field at index 15, position 0. Falsy
+        # values at that position (``None``, ``0``) fall back to ``0`` so we
+        # never compare ``None`` against ``int`` during the sort.
         filtered.sort(
-            key=lambda a: a[15][0] if len(a) > 15 and isinstance(a[15], list) and a[15] else 0,
+            key=lambda a: (
+                (a[15][0] or 0) if len(a) > 15 and isinstance(a[15], list) and a[15] else 0
+            ),
             reverse=True,
         )
 
