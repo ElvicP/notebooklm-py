@@ -251,9 +251,9 @@ def delete_cmd(name, confirm):
         raise click.ClickException(str(e)) from None
 
     # Block deletion of active or configured default profile
-    from ..paths import _read_default_profile
+    from ..paths import read_default_profile
 
-    configured_default = _read_default_profile() or "default"
+    configured_default = read_default_profile() or "default"
     effective_active = resolve_profile()
     if name in (configured_default, effective_active):
         raise click.ClickException(
