@@ -453,3 +453,332 @@ class TestNoteCommandsExist:
         result = runner.invoke(cli, ["note", "list", "--help"])
         assert result.exit_code == 0
         assert "--json" in result.output
+
+
+# =============================================================================
+# JSON OUTPUT TESTS (P2.T1 — I3)
+# =============================================================================
+#
+# Each mutating subcommand (create/save/rename/delete) emits a structured
+# ``{"id": ..., "<verb>ed": true}`` shape on success and ``{..., "error": ...}``
+# on failure. ``note get`` mirrors the underlying ``Note`` dataclass via
+# ``dataclasses.asdict`` so callers can round-trip the value through automation
+# without needing to introspect Rich-formatted text.
+#
+# Smoke level only: each test asserts ``json.loads(stdout)`` is parseable and
+# carries the contract keys. Behavioural coverage of the underlying flows lives
+# in the existing per-command test classes above.
+
+
+class TestNoteJsonFlagsRegistered:
+    """Verify --json appears in --help for every note subcommand (I3)."""
+
+    @pytest.mark.parametrize("subcommand", ["get", "save", "create", "delete", "rename"])
+    def test_json_flag_in_help(self, runner, subcommand):
+        result = runner.invoke(cli, ["note", subcommand, "--help"])
+        assert result.exit_code == 0, result.output
+        assert "--json" in result.output
+
+
+class TestNoteCreateJson:
+    """JSON shape for ``note create``."""
+
+    def test_create_success(self, runner, mock_auth):
+        import json
+
+        with patch_client_for_module("note") as mock_client_cls:
+            mock_client = create_mock_client()
+            mock_client.notes.create = AsyncMock(
+                return_value=["note_new", ["note_new", "Hello", None, None, "My Note"]]
+            )
+            mock_client_cls.return_value = mock_client
+
+            with patch(
+                "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+            ) as mock_fetch:
+                mock_fetch.return_value = ("csrf", "session")
+                result = runner.invoke(
+                    cli,
+                    [
+                        "note",
+                        "create",
+                        "Hello",
+                        "--title",
+                        "My Note",
+                        "-n",
+                        "nb_123",
+                        "--json",
+                    ],
+                )
+
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert data["id"] == "note_new"
+            assert data["created"] is True
+            assert data["title"] == "My Note"
+            assert data["notebook_id"] == "nb_123"
+
+    def test_create_failure(self, runner, mock_auth):
+        import json
+
+        with patch_client_for_module("note") as mock_client_cls:
+            mock_client = create_mock_client()
+            mock_client.notes.create = AsyncMock(return_value=None)
+            mock_client_cls.return_value = mock_client
+
+            with patch(
+                "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+            ) as mock_fetch:
+                mock_fetch.return_value = ("csrf", "session")
+                result = runner.invoke(cli, ["note", "create", "X", "-n", "nb_123", "--json"])
+
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert data["created"] is False
+            assert "error" in data
+
+
+class TestNoteGetJson:
+    """JSON shape for ``note get`` (mirrors Note dataclass)."""
+
+    def test_get_success(self, runner, mock_auth):
+        import json
+
+        with patch_client_for_module("note") as mock_client_cls:
+            mock_client = create_mock_client()
+            mock_client.notes.list = AsyncMock(return_value=[make_note("note_123", "T", "Body")])
+            mock_client.notes.get = AsyncMock(return_value=make_note("note_123", "T", "Body"))
+            mock_client_cls.return_value = mock_client
+
+            with patch(
+                "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+            ) as mock_fetch:
+                mock_fetch.return_value = ("csrf", "session")
+                result = runner.invoke(cli, ["note", "get", "note_123", "-n", "nb_123", "--json"])
+
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            # Note dataclass mirror: id, notebook_id, title, content, created_at
+            assert data["id"] == "note_123"
+            assert data["notebook_id"] == "nb_123"
+            assert data["title"] == "T"
+            assert data["content"] == "Body"
+            assert "created_at" in data
+
+    def test_get_resolves_but_returns_none(self, runner, mock_auth):
+        """When resolve succeeds but the GET returns None, JSON reports ``found: false``.
+
+        The orchestrator pinned exit-code semantics for this edge case to Phase
+        3 (C1). For now the command stays exit 0 to preserve backward
+        compatibility with shell-script callers.
+        """
+        import json
+
+        with patch_client_for_module("note") as mock_client_cls:
+            mock_client = create_mock_client()
+            mock_client.notes.list = AsyncMock(return_value=[make_note("note_123", "T", "B")])
+            mock_client.notes.get = AsyncMock(return_value=None)
+            mock_client_cls.return_value = mock_client
+
+            with patch(
+                "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+            ) as mock_fetch:
+                mock_fetch.return_value = ("csrf", "session")
+                result = runner.invoke(cli, ["note", "get", "note_123", "-n", "nb_123", "--json"])
+
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert data["found"] is False
+            assert "error" in data
+
+
+class TestNoteSaveJson:
+    """JSON shape for ``note save``."""
+
+    def test_save_content(self, runner, mock_auth):
+        import json
+
+        with patch_client_for_module("note") as mock_client_cls:
+            mock_client = create_mock_client()
+            mock_client.notes.list = AsyncMock(return_value=[make_note("note_123", "T", "Old")])
+            mock_client.notes.update = AsyncMock(return_value=None)
+            mock_client_cls.return_value = mock_client
+
+            with patch(
+                "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+            ) as mock_fetch:
+                mock_fetch.return_value = ("csrf", "session")
+                result = runner.invoke(
+                    cli,
+                    [
+                        "note",
+                        "save",
+                        "note_123",
+                        "--content",
+                        "New body",
+                        "-n",
+                        "nb_123",
+                        "--json",
+                    ],
+                )
+
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert data["id"] == "note_123"
+            assert data["saved"] is True
+            assert data["content"] == "New body"
+
+    def test_save_no_changes(self, runner, mock_auth):
+        """No --title/--content with --json still emits parseable JSON."""
+        import json
+
+        with patch_client_for_module("note") as mock_client_cls:
+            mock_client = create_mock_client()
+            mock_client_cls.return_value = mock_client
+
+            with patch(
+                "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+            ) as mock_fetch:
+                mock_fetch.return_value = ("csrf", "session")
+                result = runner.invoke(cli, ["note", "save", "note_123", "-n", "nb_123", "--json"])
+
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert data["saved"] is False
+            assert "error" in data
+
+
+class TestNoteRenameJson:
+    """JSON shape for ``note rename``."""
+
+    def test_rename_success(self, runner, mock_auth):
+        import json
+
+        with patch_client_for_module("note") as mock_client_cls:
+            mock_client = create_mock_client()
+            mock_client.notes.list = AsyncMock(return_value=[make_note("note_123", "Old", "Body")])
+            mock_client.notes.get = AsyncMock(return_value=make_note("note_123", "Old", "Body"))
+            mock_client.notes.update = AsyncMock(return_value=None)
+            mock_client_cls.return_value = mock_client
+
+            with patch(
+                "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+            ) as mock_fetch:
+                mock_fetch.return_value = ("csrf", "session")
+                result = runner.invoke(
+                    cli,
+                    [
+                        "note",
+                        "rename",
+                        "note_123",
+                        "New Title",
+                        "-n",
+                        "nb_123",
+                        "--json",
+                    ],
+                )
+
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert data["id"] == "note_123"
+            assert data["title"] == "New Title"
+            assert data["renamed"] is True
+
+    def test_rename_target_missing_after_resolve(self, runner, mock_auth):
+        """When resolve succeeds but the GET returns None, JSON reports ``renamed: false``."""
+        import json
+
+        with patch_client_for_module("note") as mock_client_cls:
+            mock_client = create_mock_client()
+            mock_client.notes.list = AsyncMock(return_value=[make_note("note_123", "Old", "Body")])
+            mock_client.notes.get = AsyncMock(return_value=None)
+            mock_client.notes.update = AsyncMock(return_value=None)
+            mock_client_cls.return_value = mock_client
+
+            with patch(
+                "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+            ) as mock_fetch:
+                mock_fetch.return_value = ("csrf", "session")
+                result = runner.invoke(
+                    cli,
+                    [
+                        "note",
+                        "rename",
+                        "note_123",
+                        "New",
+                        "-n",
+                        "nb_123",
+                        "--json",
+                    ],
+                )
+
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert data["renamed"] is False
+            assert "error" in data
+
+
+class TestNoteDeleteJson:
+    """JSON shape for ``note delete``."""
+
+    def test_delete_success(self, runner, mock_auth):
+        import json
+
+        with patch_client_for_module("note") as mock_client_cls:
+            mock_client = create_mock_client()
+            mock_client.notes.list = AsyncMock(return_value=[make_note("note_123", "T", "Body")])
+            mock_client.notes.delete = AsyncMock(return_value=None)
+            mock_client_cls.return_value = mock_client
+
+            with patch(
+                "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+            ) as mock_fetch:
+                mock_fetch.return_value = ("csrf", "session")
+                result = runner.invoke(
+                    cli,
+                    [
+                        "note",
+                        "delete",
+                        "note_123",
+                        "-n",
+                        "nb_123",
+                        "-y",
+                        "--json",
+                    ],
+                )
+
+            assert result.exit_code == 0, result.output
+            data = json.loads(result.output)
+            assert data["id"] == "note_123"
+            assert data["deleted"] is True
+
+    def test_delete_cancelled(self, runner, mock_auth):
+        """Declining the confirm prompt still emits parseable JSON in --json mode."""
+        import json
+
+        with patch_client_for_module("note") as mock_client_cls:
+            mock_client = create_mock_client()
+            mock_client.notes.list = AsyncMock(return_value=[make_note("note_123", "T", "Body")])
+            mock_client.notes.delete = AsyncMock(return_value=None)
+            mock_client_cls.return_value = mock_client
+
+            with patch(
+                "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+            ) as mock_fetch:
+                mock_fetch.return_value = ("csrf", "session")
+                # Pipe "n\n" to decline the confirm prompt; do NOT pass -y.
+                result = runner.invoke(
+                    cli,
+                    ["note", "delete", "note_123", "-n", "nb_123", "--json"],
+                    input="n\n",
+                )
+
+            assert result.exit_code == 0, result.output
+            # The confirm prompt itself ("Delete note ... [y/N]:") prints to
+            # stdout via click.confirm, so we cannot json.loads(result.output)
+            # directly. Instead, locate the JSON object by its leading brace.
+            brace = result.output.find("{")
+            assert brace != -1, result.output
+            data = json.loads(result.output[brace:])
+            assert data["deleted"] is False
+            assert "error" in data
