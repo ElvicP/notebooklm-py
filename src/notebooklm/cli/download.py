@@ -31,6 +31,7 @@ from .download_helpers import (
 from .error_handler import handle_errors
 from .helpers import (
     console,
+    handle_auth_error,
     json_output_response,
     require_notebook,
     resolve_notebook_id,
@@ -698,6 +699,17 @@ def _run_artifact_download(ctx, artifact_type: str, **kwargs) -> None:
     lists, name-not-found, etc.) is intentionally **not** routed through the
     typed handler — it preserves the legacy `{"error": "<msg>"}` JSON shape
     that scripts already depend on, and exits 1 directly.
+
+    Missing storage file is routed through ``handle_auth_error`` (exit 1)
+    rather than being misclassified as ``UNEXPECTED_ERROR`` (exit 2). This
+    mirrors the canonical ``with_client`` decorator pattern in
+    ``helpers.py:1079-1084`` — a missing ``storage_state.json`` is a typed
+    auth condition, not a system bug, and deserves the rich "Run
+    'notebooklm login'" UX. The narrow ``FileNotFoundError`` catch ensures
+    a ``FileNotFoundError`` raised *inside* the download body (e.g. a
+    user-supplied path that doesn't exist — see issue #153) is NOT
+    misclassified as auth failure; it propagates through ``handle_errors``'
+    UNEXPECTED_ERROR branch instead.
     """
     config = ARTIFACT_CONFIGS[artifact_type]
     json_output = kwargs.get("json_output", False)
@@ -709,16 +721,22 @@ def _run_artifact_download(ctx, artifact_type: str, **kwargs) -> None:
         verbose = False
 
     with handle_errors(verbose=verbose, json_output=json_output):
-        result = run_async(
-            _download_artifacts_generic(
-                ctx=ctx,
-                artifact_type_name=artifact_type,
-                artifact_kind=config["kind"],
-                file_extension=config["extension"],
-                default_output_dir=config["default_dir"],
-                **kwargs,
+        try:
+            result = run_async(
+                _download_artifacts_generic(
+                    ctx=ctx,
+                    artifact_type_name=artifact_type,
+                    artifact_kind=config["kind"],
+                    file_extension=config["extension"],
+                    default_output_dir=config["default_dir"],
+                    **kwargs,
+                )
             )
-        )
+        except FileNotFoundError:
+            # Auth bootstrap missing storage_state.json — surface the rich
+            # "Not logged in" UX instead of a generic UNEXPECTED_ERROR.
+            handle_auth_error(json_output)
+            return  # unreachable — handle_auth_error raises SystemExit
 
         if json_output:
             json_output_response(result)

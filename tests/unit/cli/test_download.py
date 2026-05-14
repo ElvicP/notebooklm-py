@@ -1782,3 +1782,47 @@ class TestDownloadTypedErrorPath:
         # Legacy returned-dict shape: free-form "error" string, no "code" envelope.
         assert "error" in data
         assert "No completed audio artifacts" in data["error"]
+
+    # ----- Missing-storage auth bootstrap (regression guard) ---------------
+
+    def test_missing_storage_routes_to_auth_error_exit_1(self, runner):
+        """A missing ``storage_state.json`` exits 1 via ``handle_auth_error``.
+
+        Regression guard for the integration-test failure that surfaced after
+        the typed-handler swap: ``AuthTokens.from_storage`` raises
+        ``FileNotFoundError`` when no auth file exists, and the typed handler
+        would otherwise classify it as ``UNEXPECTED_ERROR`` (exit 2). The
+        canonical ``with_client`` decorator catches this exact case and routes
+        it through ``handle_auth_error`` — ``download`` must do the same so
+        ``tests/integration/cli_vcr/test_downloads.py`` (which asserts
+        ``exit_code in (0, 1)`` for unauth invocations) keeps passing.
+        """
+        from notebooklm.auth import AuthTokens
+
+        with patch.object(AuthTokens, "from_storage", new_callable=AsyncMock) as mock_from_storage:
+            mock_from_storage.side_effect = FileNotFoundError(
+                "Storage file not found: /tmp/missing/storage_state.json"
+            )
+            result = runner.invoke(cli, ["download", "audio", "-n", "nb_123"])
+
+        assert result.exit_code == 1, result.output
+        # Rich auth UX (from handle_auth_error) — the literal "Not logged in"
+        # header plus the "notebooklm login" remediation hint.
+        assert "Not logged in" in result.output
+        assert "notebooklm login" in result.output
+
+    def test_missing_storage_json_emits_auth_required_envelope(self, runner):
+        """Missing storage in --json mode emits AUTH_REQUIRED envelope, exit 1."""
+        from notebooklm.auth import AuthTokens
+
+        with patch.object(AuthTokens, "from_storage", new_callable=AsyncMock) as mock_from_storage:
+            mock_from_storage.side_effect = FileNotFoundError("Storage file not found")
+            result = runner.invoke(cli, ["download", "audio", "--json", "-n", "nb_123"])
+
+        assert result.exit_code == 1, result.output
+        data = json.loads(result.output)
+        # `helpers.json_error_response` ships shape:
+        # {"error": True, "code": "AUTH_REQUIRED", "message": "...", ...}
+        assert data["error"] is True
+        assert data["code"] == "AUTH_REQUIRED"
+        assert "notebooklm login" in data["message"]
