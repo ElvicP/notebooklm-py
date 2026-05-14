@@ -11,6 +11,7 @@ import logging
 
 import pytest
 
+import notebooklm.rpc as rpc_pkg
 from notebooklm.exceptions import (
     DecodingError,
     RPCError,
@@ -23,6 +24,9 @@ from notebooklm.rpc.decoder import safe_index as safe_index_via_decoder
 def test_safe_index_helper_is_reexported_via_decoder():
     """Helper is importable from both _safe_index and decoder modules."""
     assert safe_index is safe_index_via_decoder
+    # Also pinned through the rpc package namespace so all three import paths
+    # resolve to the same object.
+    assert rpc_pkg.safe_index is safe_index
 
 
 def test_happy_three_level_descent_returns_leaf():
@@ -136,3 +140,27 @@ def test_data_at_failure_is_truncated(monkeypatch):
         safe_index(huge, 0, 99, method_id="abc", source="test")
     assert exc_info.value.data_at_failure is not None
     assert len(exc_info.value.data_at_failure) <= 210  # 200 + ellipsis margin
+
+
+def test_unknown_rpc_method_error_truncates_string_raw_response():
+    """Regression: ``UnknownRPCMethodError`` must honor RPCError's 500-char cap.
+
+    Previously the subclass unconditionally reassigned ``self.raw_response``
+    after the base class truncated, bypassing the contract.
+    """
+    huge = "x" * 5000
+    err = UnknownRPCMethodError("boom", raw_response=huge)
+    assert err.raw_response is not None
+    assert isinstance(err.raw_response, str)
+    assert len(err.raw_response) == 500
+
+
+def test_unknown_rpc_method_error_preserves_non_string_raw_response():
+    """Non-string raw_response (dict/list) is preserved as-is.
+
+    The subclass widens the type to ``Any`` to support structured payloads;
+    truncation only applies to strings.
+    """
+    payload = {"chunk": ["a", "b"], "meta": {"k": "v"}}
+    err = UnknownRPCMethodError("boom", raw_response=payload)
+    assert err.raw_response is payload

@@ -14,6 +14,7 @@ hand-rolling ``try/except IndexError`` blocks.
 from __future__ import annotations
 
 import logging
+import reprlib
 from typing import Any
 
 from .._env import is_strict_decode_enabled
@@ -25,10 +26,29 @@ logger = logging.getLogger(__name__)
 
 _REPR_TRUNCATE = 200
 
+# Use reprlib so we never materialize a huge repr just to slice it. Tune the
+# knobs so the resulting representation stays close to ``repr(value)[:200]``
+# semantics without recursing into giant inner structures.
+_REPR = reprlib.Repr()
+_REPR.maxstring = _REPR_TRUNCATE
+_REPR.maxother = _REPR_TRUNCATE
+_REPR.maxlist = 10
+_REPR.maxtuple = 10
+_REPR.maxdict = 10
+_REPR.maxarray = 10
+_REPR.maxset = 10
+_REPR.maxfrozenset = 10
+_REPR.maxdeque = 10
+_REPR.maxlevel = 4
+
 
 def _truncate(value: Any) -> str:
-    """Return a length-bounded repr suitable for logs/exception attributes."""
-    text = repr(value)
+    """Return a length-bounded repr suitable for logs/exception attributes.
+
+    Uses ``reprlib`` to avoid materialising the full repr of pathologically
+    large/deep payloads before slicing.
+    """
+    text = _REPR.repr(value)
     if len(text) <= _REPR_TRUNCATE:
         return text
     return text[:_REPR_TRUNCATE] + "..."
@@ -68,9 +88,11 @@ def safe_index(
             failing_path = tuple(path[:i])
             data_repr = _truncate(current)
             if is_strict_decode_enabled():
+                # method_id/source are appended by UnknownRPCMethodError.__str__
+                # via its structured fields — don't duplicate them in the
+                # message text.
                 raise UnknownRPCMethodError(
-                    f"safe_index drift at path {failing_path}[{key}] "
-                    f"(method_id={method_id!r}, source={source!r})",
+                    f"safe_index drift at path {failing_path}[{key}]",
                     method_id=method_id,
                     path=failing_path,
                     source=source,

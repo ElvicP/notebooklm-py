@@ -231,7 +231,10 @@ class UnknownRPCMethodError(DecodingError):
         # Override base found_ids with the typed list (may contain ints).
         if found_ids is not None:
             self.found_ids = found_ids  # type: ignore[assignment]
-        self.raw_response = raw_response
+        # Honor RPCError's 500-char truncation contract for stringy
+        # raw_response while preserving non-string payloads (dict/list/etc)
+        # supported by this subclass's widened ``Any`` type.
+        self.raw_response = raw_response[:500] if isinstance(raw_response, str) else raw_response
         self.data_at_failure = data_at_failure
 
     def __str__(self) -> str:
