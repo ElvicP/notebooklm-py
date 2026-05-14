@@ -987,9 +987,17 @@ class TestLoginNoTraceback:
     exception instead of a ``SystemExit``.
     """
 
-    def test_login_unexpected_exception_no_traceback(self, runner, tmp_path, monkeypatch):
-        """An unexpected error inside the Playwright block exits cleanly with
-        a SystemExit (not a raw exception that would print a traceback)."""
+    @pytest.fixture
+    def mock_login_crash(self, tmp_path, monkeypatch):
+        """Set up a Playwright environment where ``launch_persistent_context``
+        raises an arbitrary exception, exercising the catch-all path at the
+        end of login's ``except Exception`` block. Yields the
+        ``launch_persistent_context`` mock so each test can install its own
+        ``side_effect``.
+
+        Hermetic: ``NOTEBOOKLM_HOME=tmp_path`` so the test never touches the
+        real ``~/.notebooklm/`` (would fail with PermissionError in sandboxes).
+        """
         monkeypatch.setenv("NOTEBOOKLM_HOME", str(tmp_path))
         with (
             patch("notebooklm.cli.session._ensure_chromium_installed"),
@@ -1003,15 +1011,20 @@ class TestLoginNoTraceback:
             ),
             patch("notebooklm.cli.session._sync_server_language_to_config"),
         ):
-            # An arbitrary RuntimeError surfaces from a Playwright internal —
-            # this is the catch-all path at the end of the ``except Exception``
-            # block (after the channel-browser-not-found short-circuit).
             mock_launch = (
                 mock_pw.return_value.__enter__.return_value.chromium.launch_persistent_context
             )
-            mock_launch.side_effect = RuntimeError("internal playwright crash xyz")
+            yield mock_launch
 
-            result = runner.invoke(cli, ["login"])
+    def test_login_unexpected_exception_no_traceback(self, runner, mock_login_crash):
+        """An unexpected error inside the Playwright block exits cleanly with
+        a SystemExit (not a raw exception that would print a traceback)."""
+        # An arbitrary RuntimeError surfaces from a Playwright internal —
+        # this is the catch-all path at the end of the ``except Exception``
+        # block (after the channel-browser-not-found short-circuit).
+        mock_login_crash.side_effect = RuntimeError("internal playwright crash xyz")
+
+        result = runner.invoke(cli, ["login"])
 
         # (a) No raw exception should escape — handle_errors converts it to SystemExit.
         # If this fires with ``RuntimeError`` (or any non-SystemExit), it means
@@ -1033,28 +1046,10 @@ class TestLoginNoTraceback:
         # And the literal traceback marker must not appear in output.
         assert "Traceback (most recent call last)" not in result.output
 
-    def test_login_unexpected_exception_includes_bug_report_hint(
-        self, runner, tmp_path, monkeypatch
-    ):
+    def test_login_unexpected_exception_includes_bug_report_hint(self, runner, mock_login_crash):
         """handle_errors' UNEXPECTED_ERROR branch should include the bug-report URL."""
-        monkeypatch.setenv("NOTEBOOKLM_HOME", str(tmp_path))
-        with (
-            patch("notebooklm.cli.session._ensure_chromium_installed"),
-            patch("playwright.sync_api.sync_playwright") as mock_pw,
-            patch(
-                "notebooklm.cli.session.get_storage_path", return_value=tmp_path / "storage.json"
-            ),
-            patch(
-                "notebooklm.cli.session.get_browser_profile_dir",
-                return_value=tmp_path / "profile",
-            ),
-            patch("notebooklm.cli.session._sync_server_language_to_config"),
-        ):
-            mock_launch = (
-                mock_pw.return_value.__enter__.return_value.chromium.launch_persistent_context
-            )
-            mock_launch.side_effect = RuntimeError("xyz")
-            result = runner.invoke(cli, ["login"])
+        mock_login_crash.side_effect = RuntimeError("xyz")
+        result = runner.invoke(cli, ["login"])
         assert "github.com/teng-lin/notebooklm-py/issues" in result.output
 
 
