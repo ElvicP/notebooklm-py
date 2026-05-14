@@ -211,10 +211,6 @@ class NotebooksAPI:
             source_path=f"/notebook/{notebook_id}",
         )
         # Response structure: [[[summary_string, ...], topics, ...]]
-        # Summary is at result[0][0][0]. ``safe_index`` enforces shape under
-        # ``NOTEBOOKLM_STRICT_DECODE=1`` (raising ``UnknownRPCMethodError`` on
-        # drift) and falls back to warn-and-return-None in the default soft
-        # rollout — preserving the legacy ``""`` return.
         summary = safe_index(
             result,
             0,
