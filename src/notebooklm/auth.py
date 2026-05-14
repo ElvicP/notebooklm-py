@@ -2347,7 +2347,14 @@ async def _fetch_tokens_with_refresh(
             err,
             NOTEBOOKLM_REFRESH_CMD_ENV,
         )
-        refresh_storage_path = storage_path or get_storage_path(profile=profile)
+        # Canonicalize the storage path so different representations of the
+        # same physical file (relative vs absolute, with or without symlinks,
+        # ``~`` shorthand) hash to the same lock-registry / generation key.
+        # ``get_storage_path`` already returns a resolved path, but a
+        # caller-supplied ``storage_path`` may be relative or a symlink.
+        refresh_storage_path = (
+            (storage_path or get_storage_path(profile=profile)).expanduser().resolve()
+        )
         refresh_key = str(refresh_storage_path)
         # Snapshot the generation BEFORE acquiring the async lock so we can
         # detect whether a concurrent refresh (potentially on a different

@@ -32,20 +32,34 @@ def _clear_refresh_state():
 
 class TestPerLoopLockIdentity:
     def test_different_loops_get_different_locks(self):
-        """A lock created in loop X must NOT be returned to loop Y."""
+        """A lock created in loop X must NOT be returned to loop Y.
+
+        Both loops must be kept alive simultaneously so the WeakKeyDictionary
+        entries survive long enough to compare the locks by identity. Using
+        ``asyncio.run`` for each loop in turn allows Python 3.13's GC to
+        reclaim the first loop's entry before the second is created, after
+        which ``id()`` of the second lock can collide with the recycled
+        memory address of the first.
+        """
         path = Path("/tmp/notebooklm-test/storage_state.json")
 
-        async def capture_lock_id():
-            lock = auth_mod._get_refresh_lock(path)
-            # The lock id() identifies the asyncio.Lock instance.
-            return id(lock)
+        loop_a = asyncio.new_event_loop()
+        loop_b = asyncio.new_event_loop()
+        try:
 
-        first_id = asyncio.run(capture_lock_id())
-        second_id = asyncio.run(capture_lock_id())
+            async def _grab():
+                return auth_mod._get_refresh_lock(path)
 
-        assert first_id != second_id, (
-            "Different event loops must produce distinct asyncio.Lock instances"
-        )
+            lock_a = loop_a.run_until_complete(_grab())
+            lock_b = loop_b.run_until_complete(_grab())
+            # Hold strong references to both locks AND both loops until
+            # after the assertion so neither can be GC'd / address-recycled.
+            assert lock_a is not lock_b, (
+                "Different event loops must produce distinct asyncio.Lock instances"
+            )
+        finally:
+            loop_a.close()
+            loop_b.close()
 
     def test_same_loop_same_path_returns_same_lock(self):
         """Repeated calls within one loop for the same path return the same lock."""
@@ -94,6 +108,86 @@ class TestResolvedPathEquivalence:
 
         a, b = asyncio.run(capture())
         assert a == b, "Equal Path values must hash to the same registry slot"
+
+    def test_symlink_and_real_path_share_lock_via_refresh(self, monkeypatch, tmp_path):
+        """Two different surface representations of the same physical file
+        (symlink vs canonical absolute path, and relative vs absolute) must
+        flow through ``_fetch_tokens_with_refresh``'s path canonicalization
+        and end up sharing a single lock / generation-key.
+
+        The production fix is ``.expanduser().resolve()`` applied to
+        ``refresh_storage_path`` before it is used as a key. Without that
+        normalization, two callers referring to the same on-disk file by
+        different paths would each get their own lock — defeating the
+        cross-loop / cross-thread refresh coalescing.
+        """
+        # Set up a real file plus a symlink pointing at it.
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        real_path = real_dir / "storage_state.json"
+        real_path.write_text('{"cookies": [], "origins": []}')
+
+        link_dir = tmp_path / "via_link"
+        link_dir.symlink_to(real_dir, target_is_directory=True)
+        symlinked_path = link_dir / "storage_state.json"
+
+        # Sanity: surface paths differ, resolved targets match.
+        assert symlinked_path != real_path
+        assert symlinked_path.resolve() == real_path.resolve()
+
+        captured_keys: list[str] = []
+        original_get_refresh_lock = auth_mod._get_refresh_lock
+
+        def spy_get_refresh_lock(p):
+            captured_keys.append(str(p))
+            return original_get_refresh_lock(p)
+
+        # Force a refresh attempt and short-circuit downstream side effects.
+        monkeypatch.setenv(auth_mod.NOTEBOOKLM_REFRESH_CMD_ENV, "dummy")
+        monkeypatch.setattr(auth_mod, "_get_refresh_lock", spy_get_refresh_lock)
+
+        call_phase = {"first": True}
+
+        async def fake_fetch_tokens_with_jar(jar, path, **kwargs):
+            if call_phase["first"]:
+                call_phase["first"] = False
+                raise ValueError("Authentication expired. Run 'notebooklm login'.")
+            return "csrf-token", "session-id"
+
+        async def fake_run_refresh_cmd(storage_path, profile):
+            return None
+
+        import httpx
+
+        def fake_build(_p):
+            return httpx.Cookies()
+
+        def fake_snapshot(_j):
+            return None
+
+        monkeypatch.setattr(auth_mod, "_fetch_tokens_with_jar", fake_fetch_tokens_with_jar)
+        monkeypatch.setattr(auth_mod, "_run_refresh_cmd", fake_run_refresh_cmd)
+        monkeypatch.setattr(auth_mod, "build_httpx_cookies_from_storage", fake_build)
+        monkeypatch.setattr(auth_mod, "snapshot_cookie_jar", fake_snapshot)
+
+        async def drive(path: Path):
+            jar = httpx.Cookies()
+            return await auth_mod._fetch_tokens_with_refresh(jar, storage_path=path)
+
+        # First caller uses the symlinked path.
+        asyncio.run(drive(symlinked_path))
+        # Reset phase so the second caller also triggers the refresh branch.
+        call_phase["first"] = True
+        # Second caller uses the canonical real path.
+        asyncio.run(drive(real_path))
+
+        # Both calls must have canonicalized to the same key.
+        assert len(captured_keys) == 2
+        assert captured_keys[0] == captured_keys[1], (
+            f"Symlinked and direct paths produced distinct keys: {captured_keys!r}"
+        )
+        # And the canonical key must equal the resolved real path.
+        assert captured_keys[0] == str(real_path.resolve())
 
 
 class TestWeakKeyDictionaryCleanup:
