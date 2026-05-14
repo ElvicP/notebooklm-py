@@ -257,6 +257,12 @@ async def import_with_retry(
                                 f"verified {len(requested_urls_norm)} requested "
                                 f"sources — skipping retry.[/yellow]"
                             )
+                        else:
+                            logger.debug(
+                                "Import RPC timed out, but server-side verified "
+                                "%d requested sources — skipping retry (json mode).",
+                                len(requested_urls_norm),
+                            )
                         # Return only new sources that match a requested URL.
                         # No-URL new sources (research reports, pasted text)
                         # are included only if the request itself had no-URL
@@ -307,6 +313,12 @@ async def import_with_retry(
                                     "requested sources are already present — "
                                     "skipping retry.[/yellow]"
                                 )
+                            else:
+                                logger.debug(
+                                    "Import RPC timed out, but all requested "
+                                    "sources are already present — skipping retry "
+                                    "(json mode)."
+                                )
                             return _merge_imported_sources(
                                 [], verified_imported, verified_imported_ids
                             )
@@ -354,6 +366,12 @@ async def import_with_retry(
                 console.print(
                     f"[yellow]Import timed out; retrying in {sleep_for:.0f}s "
                     f"(attempt {attempt + 1})[/yellow]"
+                )
+            else:
+                logger.debug(
+                    "Import timed out; retrying in %.0fs (attempt %d) (json mode).",
+                    sleep_for,
+                    attempt + 1,
                 )
             await asyncio.sleep(sleep_for)
             delay = min(delay * backoff_factor, max_delay)

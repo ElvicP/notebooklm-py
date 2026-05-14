@@ -13,6 +13,7 @@ that exposes a ``--json`` flag so future regressions surface immediately.
 from __future__ import annotations
 
 import json
+from collections.abc import Generator
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -41,7 +42,7 @@ def runner() -> CliRunner:
 
 
 @pytest.fixture
-def mock_auth_env():
+def mock_auth_env() -> Generator[None, None, None]:
     """Stub auth loading + token fetch so --json paths run offline."""
     with (
         patch("notebooklm.cli.helpers.load_auth_from_storage") as mock_load,
@@ -228,9 +229,68 @@ def _customize_share_view_level(client: MagicMock) -> None:
     client.sharing.set_view_level = AsyncMock(return_value=_stub_share_status())
 
 
+def _customize_source_fulltext(client: MagicMock) -> None:
+    # source fulltext --json calls asdict() on the result, so return a real
+    # SourceFulltext dataclass instance (not a MagicMock).
+    from notebooklm.types import SourceFulltext
+
+    client.sources.get_fulltext = AsyncMock(
+        return_value=SourceFulltext(
+            source_id="src123def456ghi789jkl",
+            title="Source A",
+            content="some content",
+            url=None,
+            char_count=12,
+        )
+    )
+
+
+def _customize_source_guide(client: MagicMock) -> None:
+    client.sources.get_guide = AsyncMock(
+        return_value={"summary": "a summary", "keywords": ["k1", "k2"]}
+    )
+
+
+def _customize_research_wait(client: MagicMock) -> None:
+    # research wait polls until status == "completed". Return a completed
+    # payload immediately so the loop exits on the first iteration.
+    client.research.poll = AsyncMock(
+        return_value={
+            "status": "completed",
+            "sources": [],
+            "query": "",
+            "report": "",
+        }
+    )
+
+
 JSON_COMMANDS: list[tuple[str, list[str], object]] = [
     # source group
     ("source_list", ["source", "list", "-n", "abc123def456ghi789jkl", "--json"], None),
+    (
+        "source_fulltext",
+        [
+            "source",
+            "fulltext",
+            "src123def456ghi789jkl",
+            "-n",
+            "abc123def456ghi789jkl",
+            "--json",
+        ],
+        _customize_source_fulltext,
+    ),
+    (
+        "source_guide",
+        [
+            "source",
+            "guide",
+            "src123def456ghi789jkl",
+            "-n",
+            "abc123def456ghi789jkl",
+            "--json",
+        ],
+        _customize_source_guide,
+    ),
     # artifact group
     ("artifact_list", ["artifact", "list", "-n", "abc123def456ghi789jkl", "--json"], None),
     (
@@ -240,6 +300,11 @@ JSON_COMMANDS: list[tuple[str, list[str], object]] = [
     ),
     # research group
     ("research_status", ["research", "status", "-n", "abc123def456ghi789jkl", "--json"], None),
+    (
+        "research_wait",
+        ["research", "wait", "-n", "abc123def456ghi789jkl", "--json"],
+        _customize_research_wait,
+    ),
     # share group
     ("share_status", ["share", "status", "-n", "abc123def456ghi789jkl", "--json"], None),
     (
