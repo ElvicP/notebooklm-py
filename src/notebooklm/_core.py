@@ -1027,9 +1027,10 @@ class ClientCore:
                 f"{parse_label} failed with HTTP {exc.response.status_code}: {exc}"
             ) from exc
         # NOTE: bare ``httpx.TimeoutException`` / ``httpx.RequestError``
-        # handlers were removed after T3.A — ``_perform_authed_post`` now
-        # always either retries those or wraps them in ``_TransportServerError``
-        # (handled above), so they cannot reach this scope.
+        # handlers were removed here because ``_perform_authed_post`` always
+        # either retries those errors or wraps them in
+        # ``_TransportServerError`` (handled above), so they cannot reach
+        # this scope.
 
     async def rpc_call(
         self,
@@ -1184,8 +1185,8 @@ class ClientCore:
                 exc.response.status_code,
             )
             self._raise_rpc_error_from_http_status(exc, method)
-        # NOTE: bare ``httpx.RequestError`` handler was removed after T3.A —
-        # ``_perform_authed_post`` now always either retries network-layer
+        # NOTE: bare ``httpx.RequestError`` handler was removed here because
+        # ``_perform_authed_post`` always either retries network-layer
         # errors or wraps them in ``_TransportServerError`` (handled above),
         # so they cannot reach this scope.
 

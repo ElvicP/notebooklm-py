@@ -391,8 +391,9 @@ async def test_query_post_timeout_after_budget_keeps_timeout_message(monkeypatch
     """Timeout that exhausts the retry budget still surfaces ``timed out`` —
     explicit regression for the dead-handler bug: prior to the fix, the only
     code path that could produce a ``timed out`` message was the bare
-    ``except httpx.TimeoutException`` handler, which became unreachable after
-    T3.A wrapped all ``httpx.RequestError`` into ``_TransportServerError``."""
+    ``except httpx.TimeoutException`` handler, which became unreachable once
+    ``_perform_authed_post`` started wrapping every ``httpx.RequestError``
+    into ``_TransportServerError`` (PR #464)."""
     from notebooklm.exceptions import NetworkError
 
     core = _make_core(server_error_max_retries=2)
@@ -419,6 +420,9 @@ async def test_query_post_timeout_after_budget_keeps_timeout_message(monkeypatch
         assert "timed out" in msg
         assert "network error after retries" not in msg
         assert isinstance(exc_info.value.original_error, httpx.ReadTimeout)
+        # Chain: NetworkError -> _TransportServerError -> ReadTimeout (symmetry
+        # with the budget=0 test above).
+        assert isinstance(exc_info.value.__cause__, _TransportServerError)
     finally:
         await core.close()
 
