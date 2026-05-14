@@ -60,3 +60,9 @@ def test_get_default_bl_strips_whitespace(monkeypatch):
     """Surrounding whitespace in NOTEBOOKLM_BL is stripped."""
     monkeypatch.setenv("NOTEBOOKLM_BL", "  custom_build  ")
     assert get_default_bl() == "custom_build"
+
+
+def test_get_default_bl_whitespace_only_falls_back(monkeypatch):
+    """A whitespace-only NOTEBOOKLM_BL value falls back to DEFAULT_BL."""
+    monkeypatch.setenv("NOTEBOOKLM_BL", "   ")
+    assert get_default_bl() == DEFAULT_BL

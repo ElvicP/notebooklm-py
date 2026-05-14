@@ -100,10 +100,13 @@ class ChatAPI:
         else:
             assert conversation_id is not None  # Type narrowing for mypy
             conversation_history = self._build_conversation_history(conversation_id)
-        # Rebind to a non-Optional local so the build_request closure below
-        # carries the narrowed type — mypy doesn't propagate flow-narrowing
-        # of ``conversation_id`` through a nested-function capture.
+        # Rebind to non-Optional locals so the build_request closure below
+        # carries the narrowed types — mypy doesn't propagate flow-narrowing
+        # of ``conversation_id`` / ``source_ids`` through a nested-function
+        # capture. ``_build_chat_request`` declares both as non-Optional, so
+        # the closure capture would otherwise be a latent type error.
         active_conversation_id: str = conversation_id
+        active_source_ids: list[str] = source_ids
 
         # Mint the request-id under the asyncio-safe counter helper so two
         # concurrent ``ask`` calls on the same client never collide (audit C3,
@@ -117,7 +120,7 @@ class ChatAPI:
                 snapshot=snapshot,
                 notebook_id=notebook_id,
                 question=question,
-                source_ids=source_ids,
+                source_ids=active_source_ids,
                 conversation_history=conversation_history,
                 conversation_id=active_conversation_id,
                 reqid=reqid,
