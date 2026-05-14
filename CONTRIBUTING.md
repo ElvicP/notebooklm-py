@@ -10,10 +10,13 @@ uv sync --frozen --extra browser --extra dev --extra markdown
 source .venv/bin/activate
 uv run playwright install chromium
 pre-commit install
+```
 
-# Run the full pre-commit suite (matches what CI runs).
-# IMPORTANT: use the broad `.` scope, not `src/ tests/` — the pre-commit hook
-# in CI invokes ruff-format on the whole tree and is stricter than a narrow scope.
+**Run the full pre-commit suite** (matches what CI runs). IMPORTANT: use the
+broad `.` scope, not `src/ tests/` — the pre-commit hook in CI invokes
+ruff-format on the whole tree and is stricter than a narrow scope.
+
+```bash
 uv run ruff format --check . && \
     uv run ruff check . && \
     uv run mypy src/notebooklm --ignore-missing-imports && \

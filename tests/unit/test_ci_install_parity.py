@@ -262,6 +262,85 @@ def test_block_mirror_indented_block_in_list_recognized(tmp_path):
     assert result.returncode == 0, f"stderr: {result.stderr}"
 
 
+def test_block_mirror_substring_only_in_prose_fails(tmp_path):
+    """Body must appear inside a fenced bash block in CONTRIBUTING.md, not in prose.
+
+    The previous (looser) substring check would let an installation block
+    pass when its body coincidentally appeared inside an unrelated prose
+    paragraph or a different code fence. This test pins the stricter
+    behavior: only fenced bash bodies count as a mirror.
+    """
+    install_md = "# Install\n\n```bash\necho hello\n```\n"
+    contributing_md = (
+        f"# Contributing\n\n```bash\n{CANONICAL}\n```\n\n"
+        # Same body text, but inside prose (not a fenced bash block) — must NOT count.
+        "Some prose mentioning `echo hello` inline.\n"
+    )
+    workflow, installation, contributing = _make_synthetic_setup(
+        tmp_path, install_md=install_md, contributing_md=contributing_md
+    )
+    result = _run(
+        [
+            "--workflow",
+            str(workflow),
+            "--contributing",
+            str(contributing),
+            "--installation",
+            str(installation),
+        ]
+    )
+    assert result.returncode == 1
+    assert "BLOCK-MIRROR DRIFT" in result.stderr
+
+
+def test_block_mirror_no_bash_blocks_warns_and_passes(tmp_path):
+    """When installation.md has no bash blocks at all, WARN to stderr and pass."""
+    install_md = "# Install\n\nJust prose, no fenced bash blocks here.\n"
+    contributing_md = f"```bash\n{CANONICAL}\n```\n"
+    workflow, installation, contributing = _make_synthetic_setup(
+        tmp_path, install_md=install_md, contributing_md=contributing_md
+    )
+    result = _run(
+        [
+            "--workflow",
+            str(workflow),
+            "--contributing",
+            str(contributing),
+            "--installation",
+            str(installation),
+        ]
+    )
+    assert result.returncode == 0
+    assert "no fenced ``bash`` blocks" in result.stderr
+
+
+def test_block_mirror_trailing_whitespace_on_closing_fence(tmp_path):
+    """A closing fence with trailing whitespace must still terminate the block."""
+    # Note: trailing spaces after the closing ```. Without rstrip tolerance the
+    # parser would slurp the rest of the document into one giant block.
+    install_md = (
+        "# Install\n\n"
+        "<!-- not mirrored: synthetic -->\n"
+        "```bash\necho hello\n```   \n\n"
+        "## Next section (must remain outside the block)\n"
+    )
+    contributing_md = f"```bash\n{CANONICAL}\n```\n"
+    workflow, installation, contributing = _make_synthetic_setup(
+        tmp_path, install_md=install_md, contributing_md=contributing_md
+    )
+    result = _run(
+        [
+            "--workflow",
+            str(workflow),
+            "--contributing",
+            str(contributing),
+            "--installation",
+            str(installation),
+        ]
+    )
+    assert result.returncode == 0
+
+
 def test_skip_block_mirror_flag_bypasses_extension(tmp_path):
     """``--skip-block-mirror`` runs only the original Phase-1 check."""
     install_md = "# Install\n\n```bash\necho not-mirrored\n```\n"

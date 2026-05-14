@@ -76,7 +76,10 @@ def _extract_bash_blocks(text: str) -> list[_BashBlock]:
                 ln = lines[j]
                 ln_stripped = ln.lstrip()
                 ln_indent = len(ln) - len(ln_stripped)
-                if ln_stripped == "```" and ln_indent == indent:
+                if ln_stripped.rstrip() == "```" and ln_indent == indent:
+                    # Tolerate trailing whitespace on the closing fence so a
+                    # file with stray spaces after ``` doesn't silently
+                    # capture the rest of the document into one giant block.
                     break
                 # Strip the opener's indent so the captured body is comparable
                 # against blocks elsewhere that may use different indentation.
@@ -156,9 +159,16 @@ def _check_block_mirror_policy(installation_path: Path, contributing_path: Path)
         print(f"WARN: no fenced ``bash`` blocks found in {installation_path}", file=sys.stderr)
         return 0
 
+    # Compare against the SET of fenced bash blocks in CONTRIBUTING.md, not
+    # the raw text. A naive substring check would let an installation block
+    # pass when its body coincidentally appears inside prose, an unrelated
+    # block, or a longer command — exactly the false-positive failure mode
+    # that lets stale install docs slip through unnoticed.
+    contributing_block_bodies = {b.body for b in _extract_bash_blocks(contributing_text)}
+
     failures: list[str] = []
     for block in blocks:
-        if block.body in contributing_text:
+        if block.body in contributing_block_bodies:
             continue
         if _has_not_mirrored_marker(installation_text, block):
             continue
