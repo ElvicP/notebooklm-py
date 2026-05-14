@@ -351,6 +351,35 @@ class TestConfigureJsonOutput:
             assert data["configured"] is True
             mock_client.chat.configure.assert_awaited_once()
 
+    def test_configure_no_flags_json(self, runner, mock_auth):
+        """`configure --json` with no other flags should still emit valid JSON.
+
+        Mirrors the non-JSON "Chat configured (no changes)" path so callers
+        running the command in a script can still parse a result.
+        """
+        with patch_client_for_module("chat") as mock_client_cls:
+            mock_client = create_mock_client()
+            mock_client.chat.configure = AsyncMock(return_value=None)
+            mock_client_cls.return_value = mock_client
+
+            with patch(
+                "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+            ) as mock_fetch:
+                mock_fetch.return_value = ("csrf", "session")
+                result = runner.invoke(cli, ["configure", "-n", "nb_123", "--json"])
+
+            assert result.exit_code == 0, result.output
+            import json
+
+            data = json.loads(result.output)
+            assert data["notebook_id"] == "nb_123"
+            assert data["mode"] is None
+            assert data["goal"] is None
+            assert data["persona"] is None
+            assert data["response_length"] is None
+            assert data["configured"] is True
+            mock_client.chat.configure.assert_awaited_once()
+
 
 class TestAskServerResumed:
     def test_ask_shows_resumed_when_no_local_conv_but_server_has_one(
