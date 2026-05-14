@@ -1,5 +1,6 @@
 """Unit tests for SourcesAPI file upload pipeline and YouTube detection."""
 
+import warnings
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -519,8 +520,6 @@ class TestAddFile:
         Default-path callers — the overwhelming majority — should never see the
         deprecation message; otherwise it becomes noise rather than a signal.
         """
-        import warnings as _warnings
-
         test_file = tmp_path / "notes.txt"
         test_file.write_bytes(b"hello")
 
@@ -537,8 +536,8 @@ class TestAddFile:
             mock_client.post.side_effect = [mock_start_response, mock_upload_response]
             mock_client_cls.return_value = mock_client
 
-            with _warnings.catch_warnings(record=True) as caught:
-                _warnings.simplefilter("always")
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
                 result = await sources_api.add_file("nb_123", str(test_file))
 
         deprecation_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning)]

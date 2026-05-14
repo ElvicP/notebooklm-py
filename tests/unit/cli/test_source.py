@@ -257,6 +257,10 @@ class TestSourceAdd:
                 )
 
         assert result.exit_code == 0
+        # ``click.echo(..., err=True)`` writes to stderr; Click's ``CliRunner``
+        # mixes stderr into ``result.output`` by default (``mix_stderr=True``).
+        # If the runner fixture is ever switched to ``mix_stderr=False`` this
+        # assertion would silently pass — flip to ``result.stderr`` if so.
         assert "unused for file sources" in result.output
         # ``add_file`` must NOT receive the unused mime_type — passing it would
         # also trip the library-level DeprecationWarning, doubling the noise.
