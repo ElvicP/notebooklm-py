@@ -374,6 +374,12 @@ def artifact_wait(ctx, artifact_id, notebook_id, timeout, interval, json_output,
                         "error": status.error,
                     }
                     json_output_response(data)
+                    # Mirror non-JSON exit-code semantics: completed = 0,
+                    # error/other = 1. Without this, automation sees a JSON
+                    # payload containing an "error" message but the command
+                    # still exited 0.
+                    if status.status != "completed":
+                        raise SystemExit(1)
                 else:
                     if status.status == "completed":
                         console.print(f"[green]✓ Artifact completed:[/green] {resolved_id}")
