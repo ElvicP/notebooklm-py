@@ -1404,15 +1404,14 @@ def register_session_commands(cli):
         except click.ClickException:
             raise
 
+        async def _get():
+            async with NotebookLMClient(auth) as client:
+                # Resolve partial ID to full ID
+                resolved_id = await resolve_notebook_id(client, notebook_id)
+                nb = await client.notebooks.get(resolved_id)
+                return nb, resolved_id
+
         try:
-
-            async def _get():
-                async with NotebookLMClient(auth) as client:
-                    # Resolve partial ID to full ID
-                    resolved_id = await resolve_notebook_id(client, notebook_id)
-                    nb = await client.notebooks.get(resolved_id)
-                    return nb, resolved_id
-
             nb, resolved_id = run_async(_get())
         except click.ClickException:
             # Re-raise click exceptions (from resolve_notebook_id — partial-id

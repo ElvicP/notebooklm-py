@@ -122,6 +122,16 @@ class NetworkError(NotebookLMError):
 class RPCError(NotebookLMError):
     """Base for RPC-specific failures after connection established.
 
+    Note:
+        A small number of domain-level exceptions also inherit from
+        :class:`RPCError` so that ``except RPCError`` keeps catching them at
+        transport-level call sites. Currently :class:`NotebookNotFoundError`
+        is one such case — the underlying RPC call succeeded but returned a
+        degenerate payload, and historic callers relied on ``except RPCError``
+        to handle it. When writing new ``except RPCError`` clauses, be aware
+        these domain errors may also flow through; catch the specific domain
+        type first if you want to handle it differently.
+
     Attributes:
         method_id: The RPC method ID (e.g., "abc123") for debugging.
         raw_response: First 500 chars of raw response for debugging.

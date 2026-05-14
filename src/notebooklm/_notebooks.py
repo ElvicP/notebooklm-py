@@ -160,11 +160,21 @@ class NotebooksAPI:
         )
         # get_notebook returns [nb_info, ...] where nb_info contains the notebook data
         nb_info = result[0] if result and isinstance(result, list) and len(result) > 0 else []
+        # Guard the empty-payload case BEFORE parsing. ``Notebook.from_api_response``
+        # currently tolerates ``[]`` but a future tightening could turn that into
+        # an ``IndexError`` that would surface as a confusing crash instead of
+        # the intended ``NotebookNotFoundError``. Raising here keeps the contract
+        # stable regardless of how the parser evolves.
+        if not nb_info:
+            raise NotebookNotFoundError(
+                notebook_id,
+                method_id=RPCMethod.GET_NOTEBOOK.value,
+            )
         notebook = Notebook.from_api_response(nb_info)
-        # Degenerate response: empty payload, or both id+title parsed to empty
-        # strings. Either condition reliably signals an unknown notebook_id —
-        # a valid notebook always has at least one of id/title populated.
-        if not nb_info or (not notebook.id and not notebook.title):
+        # Defense-in-depth: even when the outer list isn't empty, the server can
+        # return a payload whose id and title both parse to ``""``. A valid
+        # notebook always has at least one of the two populated.
+        if not notebook.id and not notebook.title:
             raise NotebookNotFoundError(
                 notebook_id,
                 method_id=RPCMethod.GET_NOTEBOOK.value,
