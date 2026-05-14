@@ -95,17 +95,21 @@ def test_docstring_example_lines_parse(relpath: str) -> None:
             line = raw.strip()
             if "from_storage(" not in line:
                 continue
-            # Strip trailing ``as client:`` so the example fragment is a
-            # statement we can parse standalone. ``async with X as y:``
-            # is only valid inside an async function; wrap accordingly.
-            wrapped = f"async def _():\n    {line}\n        pass\n"
+            # Wrap the line inside an ``async def`` so constructs like
+            # ``async with X as y:`` (only legal inside an async function)
+            # parse. If the line is itself a compound-statement header
+            # (ends with ``:``), give it a ``pass`` body so the wrapper
+            # stays syntactically valid.
+            if line.rstrip().endswith(":"):
+                wrapped = f"async def _():\n    {line}\n        pass\n"
+            else:
+                wrapped = f"async def _():\n    {line}\n"
             try:
                 ast.parse(wrapped)
             except SyntaxError as exc:  # pragma: no cover - failure path
                 pytest.fail(f"{relpath}: example line {line!r} failed to parse: {exc}")
 
 
-@pytest.mark.asyncio
 async def test_from_storage_smoke_constructs_client(tmp_path: Path, httpx_mock: HTTPXMock) -> None:
     """Smoke test: the documented example shape actually returns a client.
 
