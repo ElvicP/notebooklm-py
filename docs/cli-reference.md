@@ -1165,7 +1165,7 @@ notebooklm note <list|create|get|save|rename|delete> [OPTIONS]
 | Subcommand | Required arguments | Type-specific options |
 |---|---|---|
 | `list` | (none) | — |
-| `create` | `[CONTENT]` (positional or stdin via `-`) | `--content TEXT` (or `-` for stdin; mutually exclusive with positional), `-t/--title TEXT` |
+| `create` | `[CONTENT]` (positional or stdin via `-`) | `--content TEXT` (or `-` for stdin; mutually exclusive with positional), `-t/--title TEXT` (default: `"New Note"`) |
 | `get` | `NOTE_ID` | — |
 | `save` | `NOTE_ID` | `--title TEXT`, `--content TEXT` |
 | `rename` | `NOTE_ID NEW_TITLE` | — |
@@ -1286,7 +1286,7 @@ Codex does not consume the `skill` subcommand. In this repository it reads the r
 Add a Google Drive document, slide deck, sheet, or PDF as a source. The Drive `--mime-type` is **live and functional** on this subcommand (unlike the deprecated file-source `--mime-type` documented above) — it tells the backend which Drive document type to import.
 
 ```bash
-notebooklm source add-drive [OPTIONS] DRIVE_ID TITLE
+notebooklm source add-drive [OPTIONS] FILE_ID TITLE
 ```
 
 **Options:**
@@ -1312,7 +1312,7 @@ notebooklm source add-drive 1AbcD...XyZ "Whitepaper" --mime-type pdf --json
 
 ```bash
 notebooklm source stale [OPTIONS] SOURCE_ID
-notebooklm source clean  [OPTIONS]
+notebooklm source clean [OPTIONS]
 ```
 
 **`stale` exit codes (deliberately inverted from the rest of the CLI for shell control-flow use):**
