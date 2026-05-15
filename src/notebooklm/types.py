@@ -13,7 +13,10 @@ import warnings
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    import httpx
 
 from ._env import get_base_url
 
@@ -100,7 +103,7 @@ class ConnectionLimits:
     keepalive_expiry: float = 30.0
     """Seconds an idle connection stays in the pool before being closed."""
 
-    def to_httpx_limits(self) -> "Any":
+    def to_httpx_limits(self) -> "httpx.Limits":
         """Map to ``httpx.Limits`` (lazy import to keep types.py dep-light)."""
         import httpx
 
@@ -459,6 +462,7 @@ def _extract_artifact_url(data: list[Any], artifact_type: int | None) -> str | N
 __all__ = [
     # Dataclasses
     "CitedSourceSelection",
+    "ConnectionLimits",
     "Notebook",
     "NotebookDescription",
     "NotebookMetadata",

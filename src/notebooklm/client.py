@@ -235,6 +235,12 @@ class NotebookLMClient:
                 (default) preserves pre-Phase-3 raise-immediately behavior.
             server_error_max_retries: Max automatic retries for HTTP 5xx /
                 network errors with exponential backoff. Defaults to ``3``.
+            limits: HTTP connection-pool tuning (``ConnectionLimits``). ``None``
+                (default) uses ``ConnectionLimits()`` defaults sized for
+                typical batchexecute fan-out (max_connections=100,
+                max_keepalive_connections=50, keepalive_expiry=30.0s). Widen
+                for heavy batch workloads (FastAPI/Django services sharing one
+                client across many concurrent requests).
 
         Returns:
             NotebookLMClient instance (not yet connected).
