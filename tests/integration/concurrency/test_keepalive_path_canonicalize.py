@@ -99,12 +99,31 @@ def test_tilde_path_is_expanded(
     its expanded sibling — second representation flavor from audit §29.
     """
     # Pretend HOME lives under tmp_path so ``~`` expansion is hermetic.
+    # ``Path.expanduser`` consults different env vars per platform:
+    #   - POSIX: ``$HOME``
+    #   - Windows: ``$USERPROFILE`` (then ``$HOMEDRIVE`` + ``$HOMEPATH``).
+    # Set both so the test is portable; clear the Windows fallback so a
+    # CI runner with a real ``HOMEDRIVE``/``HOMEPATH`` doesn't redirect
+    # ``~`` to the runner's actual profile (the failure mode that bit
+    # PR #612's first push on windows-latest, Python 3.14).
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.delenv("HOMEDRIVE", raising=False)
+    monkeypatch.delenv("HOMEPATH", raising=False)
+
     target = tmp_path / "auth.json"
     target.write_text("{}", encoding="utf-8")
 
     tilde_path = Path("~/auth.json")
     expanded_path = (tmp_path / "auth.json").resolve()
+    # Sanity: the override must actually take effect on this platform —
+    # if expansion still points elsewhere, the test would silently pass
+    # trivially via a different path. Skip rather than test-vacuously.
+    if Path("~").expanduser() != tmp_path:
+        pytest.skip(
+            f"Cannot hermetically override ~ on this platform "
+            f"(expanduser='{Path('~').expanduser()}', want='{tmp_path}')"
+        )
 
     client_tilde = NotebookLMClient(_auth_tokens, storage_path=tilde_path)
     client_expanded = NotebookLMClient(_auth_tokens, storage_path=expanded_path)
