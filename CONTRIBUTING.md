@@ -40,7 +40,7 @@ suite imports and patches `playwright.sync_api`. The command
 `uv sync --frozen --extra dev` is only the test/lint toolchain; it is not enough
 for `uv run pytest`.
 
-> **Architecture & testing context.** Once installed, read [docs/development.md](docs/development.md) for the layered RPC/Core/Client/CLI design, test-tree layout, concurrency model (file locks), and release workflow before touching `src/notebooklm/`.
+> **Architecture & testing context.** Once installed, read [docs/development.md](docs/development.md) for the layered RPC/Core/Client/CLI design, test-tree layout, and release workflow before touching `src/notebooklm/`.
 
 ### Code Quality
 
