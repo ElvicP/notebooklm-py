@@ -523,7 +523,13 @@ def _login_browser_cookies_single(
 
 
 def _profiles_by_account_email(profile_names: list[str]) -> dict[str, str]:
-    """Return existing profiles keyed by account metadata email."""
+    """Return existing profiles keyed by *casefolded* account metadata email.
+
+    Keys are casefolded so that mixed-casing in stored ``context.json``
+    metadata (``Alice@Gmail.com`` vs. an incoming ``alice@gmail.com``)
+    doesn't cause us to miss the match and wrongly allocate a suffixed
+    profile. Lookup callers must casefold their email key likewise.
+    """
     from ..auth import read_account_metadata
 
     profiles_by_email: dict[str, str] = {}
@@ -533,7 +539,7 @@ def _profiles_by_account_email(profile_names: list[str]) -> dict[str, str]:
         if isinstance(email, str) and email:
             # list_profiles() is sorted, so this also prefers the unsuffixed
             # profile over older duplicate suffixes such as alice-2.
-            profiles_by_email.setdefault(email, profile)
+            profiles_by_email.setdefault(email.casefold(), profile)
     return profiles_by_email
 
 
@@ -608,7 +614,7 @@ def _login_all_accounts_from_browser(
     claimed: set[str] = set()
     for account in accounts:
         base_name = email_to_profile_name(account.email)
-        target_profile = profiles_by_email.get(account.email)
+        target_profile = profiles_by_email.get(account.email.casefold())
         if target_profile is None or target_profile in claimed:
             target_profile = _resolve_all_accounts_target(
                 base_name=base_name,

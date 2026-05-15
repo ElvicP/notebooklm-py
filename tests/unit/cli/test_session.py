@@ -3572,6 +3572,32 @@ class TestLoginAllAccountsUpdate:
         assert "--update" in result.output
         assert "--all-accounts" in result.output
 
+    def test_all_accounts_matches_existing_profile_case_insensitively(self, runner, tmp_path):
+        """Stored email metadata may differ in case from what Google returns
+        on a later probe (e.g. ``Alice@Gmail.com`` stored, ``alice@gmail.com``
+        probed). The email-keyed reuse path must casefold both sides so the
+        same profile is reused rather than allocating a suffixed duplicate.
+        Regression for CodeRabbit's review on #594.
+        """
+        # No --update — proving the case-insensitive match works on the
+        # default reuse-by-email-metadata path (not the --update name path).
+        result, root = self._run_all_accounts(
+            runner,
+            tmp_path,
+            update=False,
+            accounts=[(0, "alice@gmail.com", True)],
+            preexisting={"alice": {"account": {"authuser": 0, "email": "Alice@Gmail.com"}}},
+        )
+        assert result.exit_code == 0, result.output
+        # No alice-2 — the existing alice profile was reused despite the
+        # casing mismatch.
+        assert (root / "alice-2").exists() is False
+        # Re-stamped metadata uses the email as Google reports it now.
+        assert json.loads((root / "alice" / "context.json").read_text())["account"] == {
+            "authuser": 0,
+            "email": "alice@gmail.com",
+        }
+
 
 class TestStaleAccountMetadataCleanup:
     """Default-account login must clear stale account metadata from previous targeted runs."""
