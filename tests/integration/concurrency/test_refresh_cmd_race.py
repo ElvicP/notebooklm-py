@@ -431,3 +431,80 @@ async def test_waiter_cancellation_does_not_kill_inflight_subprocess(monkeypatch
     # bumped exactly once.
     refresh_key = str(storage.expanduser().resolve())
     assert auth_mod._REFRESH_GENERATIONS.get(refresh_key, 0) >= 1
+
+
+@pytest.mark.asyncio
+async def test_cancel_settle_race_does_not_bump_on_failure(monkeypatch, tmp_path):
+    """Cancel/settle race: caller cancelled AS subprocess settles with failure.
+
+    Regression for the CodeRabbit finding on PR #621: when the leader is
+    cancelled in the same loop tick that the subprocess settles with an
+    exception, the ``_settle`` callback used to clear the in-flight
+    registry entry, leaving the caller's CancelledError handler unable
+    to inspect ``inflight.exception()``. The handler then fell into the
+    success path — bumped generation — and other waiters observed the
+    phantom bump, skipped their own refresh, and proceeded with stale
+    cookies.
+
+    Fix: ``_settle`` keeps the done future in the registry; the
+    CancelledError handler observes ``inflight.exception()`` and routes
+    the caller down the failure branch (no generation bump).
+    """
+    storage = tmp_path / "storage_state.json"
+    storage.write_text('{"cookies": [], "origins": []}')
+    monkeypatch.setenv(auth_mod.NOTEBOOKLM_REFRESH_CMD_ENV, "dummy")
+
+    cancel_now = asyncio.Event()
+    settle_after_cancel = asyncio.Event()
+
+    async def fake_run_refresh_cmd(storage_path, profile):
+        # Signal the test to cancel the caller, then wait briefly so the
+        # cancellation is scheduled before the subprocess settles.
+        cancel_now.set()
+        await settle_after_cancel.wait()
+        raise RuntimeError("NOTEBOOKLM_REFRESH_CMD exited 2: synthetic failure")
+
+    async def fake_fetch_tokens_with_jar(cookie_jar, storage_path, **kwargs):
+        if not getattr(cookie_jar, "_first_fetch_done", False):
+            cookie_jar._first_fetch_done = True
+            raise ValueError("Authentication expired. Run 'notebooklm login'.")
+        return "csrf-token", "session-id"
+
+    def fake_build(_p):
+        return httpx.Cookies()
+
+    def fake_snapshot(_j):
+        return None
+
+    monkeypatch.setattr(auth_mod, "_run_refresh_cmd", fake_run_refresh_cmd)
+    monkeypatch.setattr(auth_mod, "_fetch_tokens_with_jar", fake_fetch_tokens_with_jar)
+    monkeypatch.setattr(auth_mod, "build_httpx_cookies_from_storage", fake_build)
+    monkeypatch.setattr(auth_mod, "snapshot_cookie_jar", fake_snapshot)
+
+    jar = httpx.Cookies()
+    task = asyncio.create_task(auth_mod._fetch_tokens_with_refresh(jar, storage_path=storage))
+    await cancel_now.wait()
+    # Cancel the caller and release the subprocess in adjacent loop ticks
+    # so settle and cancellation interleave.
+    task.cancel()
+    settle_after_cancel.set()
+
+    result = await asyncio.gather(task, return_exceptions=True)
+    # Caller cancellation wins. The subprocess failure must NOT have
+    # been swallowed silently.
+    assert isinstance(result[0], asyncio.CancelledError), (
+        f"Expected CancelledError, got {result[0]!r}"
+    )
+
+    # The load-bearing assertion: generation must NOT have advanced.
+    # If the cancel/settle race silently swallowed the subprocess
+    # failure, the caller would have fallen into the success branch and
+    # bumped ``_REFRESH_GENERATIONS`` — leaving a phantom bump for
+    # other waiters.
+    refresh_key = str(storage.expanduser().resolve())
+    assert auth_mod._REFRESH_GENERATIONS.get(refresh_key, 0) == 0, (
+        "Generation must not advance when the subprocess failed, even when "
+        "the caller was cancelled at the same time. "
+        f"_REFRESH_GENERATIONS[{refresh_key!r}] = "
+        f"{auth_mod._REFRESH_GENERATIONS.get(refresh_key, 0)} — phantom bump regression."
+    )

@@ -2496,12 +2496,13 @@ async def _coalesced_run_refresh_cmd(
                         future.set_exception(exc)
                     else:
                         future.set_result(None)
-            # Clear the registry slot once settled so subsequent callers
-            # start a fresh refresh cycle. Guarded by the sync mutex so a
-            # concurrent leader check sees the cleared slot atomically.
-            with _REFRESH_STATE_LOCK:
-                if registry.get(refresh_key) is future:
-                    del registry[refresh_key]
+            # Intentionally LEAVE the (now-done) future in the registry so the
+            # caller's CancelledError handler in ``_fetch_tokens_with_refresh``
+            # can still inspect ``inflight.exception()`` after a cancel/settle
+            # race (CodeRabbit PR #621 finding). The leader-check at the
+            # get-or-create site (``existing is None or existing.done()``)
+            # treats a done future as overwritable, so the next refresh
+            # cycle's leader replaces this slot — no accumulation.
 
         task.add_done_callback(_settle)
 
@@ -2769,8 +2770,18 @@ async def _fetch_tokens_with_refresh(
                             if inflight is None or inflight.done():
                                 # Subprocess already settled; we absorbed the
                                 # cancellation. Inspect its terminal state.
-                                if inflight is not None and not inflight.cancelled():
-                                    subprocess_exc = inflight.exception()
+                                # Per the CodeRabbit finding on PR #621, the
+                                # ``_settle`` callback intentionally leaves
+                                # the done future in the registry so this
+                                # branch can still observe ``inflight.
+                                # exception()`` after a cancel/settle race.
+                                if inflight is not None:
+                                    if inflight.cancelled():
+                                        # Subprocess itself was cancelled —
+                                        # treat as failure (do not bump gen).
+                                        subprocess_exc = asyncio.CancelledError()
+                                    else:
+                                        subprocess_exc = inflight.exception()
                                 break
                             # Otherwise loop — re-await the shielded future.
                         except BaseException as exc:  # noqa: BLE001
