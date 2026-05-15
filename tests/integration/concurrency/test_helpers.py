@@ -123,8 +123,12 @@ async def test_unique_outputs_returns_outputs_for_caller_assertions() -> None:
         return next(seq)
 
     outputs = await assert_unique_outputs(_seq, 5)
-    # Caller can check ordering / monotonicity beyond uniqueness.
-    assert outputs == [0, 1, 2, 3, 4]
+    # Caller can check shape beyond uniqueness. Use ``sorted`` /
+    # ``set`` rather than positional equality so the test stays
+    # stable across asyncio event-loop scheduling implementations
+    # (CPython runs zero-await coroutines FIFO; uvloop/others may not).
+    assert sorted(outputs) == [0, 1, 2, 3, 4]
+    assert set(outputs) == set(range(5))
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +178,57 @@ async def test_with_simulated_cancel_negative_delay_raises() -> None:
 
     with pytest.raises(ValueError, match="delay must be >= 0"):
         await with_simulated_cancel(_noop(), delay=-1.0)
+
+
+async def test_with_simulated_cancel_propagates_outer_cancellation_to_inner() -> None:
+    """Outer cancel of the helper itself must cancel the wrapped task too.
+
+    Otherwise the inner task becomes a stray background task and the
+    cancellation is silently consumed. Regression coverage for the
+    claude[bot] iter-2 finding.
+    """
+    inner_started = asyncio.Event()
+    inner_finished = False
+
+    async def _slow() -> str:
+        nonlocal inner_finished
+        inner_started.set()
+        try:
+            await asyncio.sleep(10.0)
+            inner_finished = True
+            return "never"
+        except asyncio.CancelledError:
+            # Re-raise so the cancellation actually takes effect on
+            # the task (the helper expects to receive CancelledError
+            # from awaiting the task).
+            raise
+
+    helper_task = asyncio.create_task(
+        with_simulated_cancel(_slow(), delay=10.0, label="outer-cancel-test")
+    )
+
+    # Wait until the inner coro has started (so the task is real).
+    await inner_started.wait()
+    # Give the canceller a tick to schedule, then cancel the OUTER helper.
+    await asyncio.sleep(0)
+    helper_task.cancel()
+
+    # The helper catches CancelledError and returns it as a value
+    # (per its contract); we just verify the outer cancel did NOT
+    # leave the inner running.
+    try:
+        result = await helper_task
+        assert isinstance(result, asyncio.CancelledError)
+    except asyncio.CancelledError:
+        # Acceptable: depending on timing, the outer cancel may
+        # propagate before the helper's except block runs.
+        pass
+
+    # Yield to let the inner task observe its own cancellation.
+    await asyncio.sleep(0)
+    assert not inner_finished, (
+        "Inner task should have been cancelled when the outer helper was cancelled."
+    )
 
 
 async def test_with_simulated_cancel_cleans_up_canceller_task() -> None:

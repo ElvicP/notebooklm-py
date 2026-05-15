@@ -216,6 +216,13 @@ async def with_simulated_cancel(
     "the leader survived; the canceled follower received
     ``CancelledError``" — returning makes that two assertions, not
     one ``pytest.raises`` block per scenario.
+
+    Footgun: if ``T`` is itself a ``BaseException`` subclass (a
+    coroutine that legitimately RETURNS an exception object rather
+    than raising), the caller cannot distinguish "coro returned an
+    exception value" from "coro raised". Phase 2 tests that need
+    that distinction should write a custom assertion rather than
+    rely on ``isinstance(result, BaseException)``.
     """
     if delay < 0:
         # Close the coro so misuse doesn't trigger
@@ -240,6 +247,13 @@ async def with_simulated_cancel(
     try:
         return await task
     except BaseException as exc:  # noqa: BLE001 — we explicitly return any exception
+        # Outer-cancellation safety: if THIS helper's invoking task is
+        # cancelled (vs. the inner ``task`` being cancelled by our own
+        # canceller), propagate the cancel into ``task`` so it doesn't
+        # become a stray background task. The exception is still
+        # returned per the helper's contract.
+        if isinstance(exc, asyncio.CancelledError) and not task.done():
+            task.cancel()
         return exc
     finally:
         # Best-effort cleanup; the canceller has either fired or is
@@ -248,7 +262,7 @@ async def with_simulated_cancel(
             canceller.cancel()
             try:
                 await canceller
-            except (asyncio.CancelledError, BaseException):  # noqa: BLE001
+            except BaseException:  # noqa: BLE001 — cleanup must not propagate
                 pass
 
 
