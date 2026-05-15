@@ -326,7 +326,10 @@ def _decode_freq(body: str | bytes | None) -> Any:
     if body is None:
         return None
     if isinstance(body, bytes):
-        body = body.decode("utf-8")
+        try:
+            body = body.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"request body is not valid UTF-8 ({exc})") from exc
     qs = parse_qs(body, keep_blank_values=True)
     if "f.req" not in qs:
         return None
