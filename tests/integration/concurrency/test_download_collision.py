@@ -22,6 +22,22 @@ from pytest_httpx import HTTPXMock
 from notebooklm import NotebookLMClient
 
 
+@pytest.fixture(autouse=True)
+def _stub_storage_cookies(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Bypass on-disk storage_state.json lookup in `_download_url`.
+
+    `_download_url` calls `load_httpx_cookies(path=self._storage_path)`
+    which raises `FileNotFoundError` on a clean CI runner that hasn't
+    been through `notebooklm login`. We don't care about the cookies for
+    this test (the mock transport doesn't validate auth) — return an
+    empty dict.
+    """
+    monkeypatch.setattr(
+        "notebooklm._artifacts.load_httpx_cookies",
+        lambda path=None: {},
+    )
+
+
 async def test_concurrent_downloads_to_same_output_path_no_corruption(
     auth_tokens,
     httpx_mock: HTTPXMock,
