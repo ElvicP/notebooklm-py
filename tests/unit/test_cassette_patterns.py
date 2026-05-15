@@ -176,6 +176,18 @@ def test_unknown_email_provider_not_scrubbed() -> None:
     assert scrub_string(text) == text
 
 
+@pytest.mark.parametrize("param", ["flat", "rate", "format", "stat"])
+def test_at_lookbehind_protects_param_names_ending_in_at(param: str) -> None:
+    """Params whose names *end* in ``at`` are not eaten by the ``at=`` scrubber.
+
+    Without the negative-lookbehind anchor, ``at=[A-Za-z0-9_-]+`` would match
+    the substring ``at=VALUE`` inside ``flat=VALUE`` / ``rate=VALUE`` and
+    corrupt the URL or form body.
+    """
+    body = f"foo=1&{param}=PUBLIC_VALUE&bar=2"
+    assert scrub_string(body) == body
+
+
 # ---------------------------------------------------------------------------
 # scrub_string — idempotence
 # ---------------------------------------------------------------------------
@@ -216,8 +228,7 @@ def test_is_clean_accepts_known_placeholder_in_cookie_header(placeholder: str) -
     # contains '@' which we test via the JSON-key shape (cookies in JSON-key
     # shape are explicitly enumerated below).
     if "@" in placeholder:
-        # Skip header form for email-shaped placeholder
-        return
+        pytest.skip("header form doesn't apply to email-shaped placeholder")
     header = f"Cookie: SID={placeholder}"
     ok, leaks = is_clean(header)
     assert ok, leaks
@@ -310,6 +321,11 @@ def test_is_clean_flags_wiz_global_data_unscrubbed_csrf() -> None:
         "Set-Cookie: SAPISID=S_REAL_TOKEN; Path=/",
         '{"name":"SID","value":"S_REAL_VALUE"}',
         '{"value":"S_REAL_VALUE","name":"__Secure-1PSID"}',
+        # Direct JSON-key cookie shape (round-trip via the rule added to
+        # close the validator/sanitizer asymmetry).
+        '{"SID": "S_REAL_LEAKED_TOKEN"}',
+        '{"SAPISID":"S_real_leaked_token_here"}',
+        '{"__Secure-1PSID": "S_REAL_VALUE"}',
         '{"email":"alice@gmail.com"}',
         '{"SNlM0e":"real-csrf-here"}',
         '{"FdrFJe":"real-session-here"}',
