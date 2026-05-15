@@ -120,11 +120,11 @@ async def test_close_during_keepalive_cancel_does_not_leak_transport(
         With keepalive's poke stuck here, ``_core.close()`` has to
         cancel the keepalive task and ``gather()`` it before reaching
         ``save_cookies`` and the shielded ``aclose``. The outer
-        ``wait_for(timeout=0.5)`` will inject a cancel somewhere along
-        that path — at the gather, the save_cookies ``to_thread``, or
-        the shielded aclose itself. Wherever it lands, the shield in
-        the outer ``finally`` must still drive ``aclose()`` to
-        completion; that's what the assertion below proves.
+        ``wait_for(timeout=0.1)`` below — combined with the patched
+        ``_slow_aclose`` — injects a cancel inside the shielded
+        ``aclose`` await. The shield in the outer ``finally`` must
+        still drive ``aclose()`` to completion; that's what the
+        assertion below proves.
 
         ``CancelledError`` is intentionally NOT trapped: the keepalive
         task must remain cancellable so that ``close()`` can tear it
