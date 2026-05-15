@@ -684,14 +684,20 @@ async def import_sources(notebook_id: str, task_id: str, sources: list[dict]) ->
 ```python
 # Start fast web research (default)
 result = await client.research.start(nb_id, "AI safety regulations")
+if result is None:
+    raise RuntimeError("Research start returned None")
 task_id = result["task_id"]
 
 # Start deep web research
 result = await client.research.start(nb_id, "quantum computing", source="web", mode="deep")
+if result is None:
+    raise RuntimeError("Research start returned None")
 task_id = result["task_id"]
 
 # Start fast Drive research
 result = await client.research.start(nb_id, "project docs", source="drive", mode="fast")
+if result is None:
+    raise RuntimeError("Research start returned None")
 
 # Poll until complete
 import asyncio
