@@ -287,7 +287,8 @@ for the full layered story.
 
 - `server_error_max_retries` (default `3`) retries HTTP 5xx and network-layer
   `httpx.RequestError` (timeouts, connect errors) with exponential backoff
-  capped at 30 seconds (`min(2 ** attempt, 30)`). Set to `0` to disable.
+  capped at 30 seconds (`min(2 ** attempt, 30)`, plus ±20% jitter to
+  desynchronize concurrent retries). Set to `0` to disable.
 - `rate_limit_max_retries` (default `0`) retries HTTP 429 responses when the
   `Retry-After` header is parseable. The default of `0` preserves the
   pre-Phase-3 contract of raising `RateLimitError` immediately so callers
