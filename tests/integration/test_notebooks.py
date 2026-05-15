@@ -134,10 +134,14 @@ class TestCreateNotebook:
             await client.notebooks.create("Test Title")
 
         # The create request is the second one; assert it carries the
-        # CREATE_NOTEBOOK rpcid.
+        # CREATE_NOTEBOOK rpcid AND the title we passed in.
         requests = httpx_mock.get_requests()
         create_requests = [r for r in requests if RPCMethod.CREATE_NOTEBOOK.value in str(r.url)]
         assert len(create_requests) == 1
+        body = create_requests[0].content.decode()
+        assert "Test+Title" in body or "Test%20Title" in body, (
+            f"CREATE_NOTEBOOK request body did not contain url-encoded 'Test Title': {body[:200]}"
+        )
 
 
 class TestGetNotebook:

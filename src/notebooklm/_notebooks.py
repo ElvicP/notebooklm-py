@@ -97,6 +97,16 @@ class NotebooksAPI:
         # baseline is best-effort — if listing fails (e.g. transient
         # 5xx), we fall back to an empty baseline so a brand-new
         # account behaves correctly.
+        #
+        # Edge case: when the baseline fetch fails AND a pre-existing
+        # notebook with the same title already exists, the probe cannot
+        # tell that notebook apart from one that just landed. The
+        # ambiguous-probe guard only fires when >1 matches appear, so
+        # a single pre-existing same-titled notebook would be returned
+        # as if it were freshly created. This is a doubly-exceptional
+        # scenario (baseline list failure + title collision) and is
+        # accepted as a known limitation; callers needing strict
+        # uniqueness should embed a UUID in the title.
         try:
             baseline_ids = {nb.id for nb in await self.list()}
         except Exception:

@@ -396,10 +396,13 @@ async def test_sources_add_text_default_behavior_unchanged(auth_tokens) -> None:
     notebook_id = "nb_test"
     src_id = "src_text"
     title = "My Note"
+    add_count = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal add_count
         rpc_id = _rpc_id_in_request(request)
         if rpc_id == RPCMethod.ADD_SOURCE.value:
+            add_count += 1
             # ADD_SOURCE returns a single-source row that
             # Source.from_api_response can parse. Shape mirrors the
             # add-source response: nested list with the id at [0][0][0]
@@ -421,6 +424,7 @@ async def test_sources_add_text_default_behavior_unchanged(auth_tokens) -> None:
         await client._core._http_client.aclose()
 
     assert source.id == src_id
+    assert add_count == 1, f"expected exactly 1 ADD_SOURCE call, got {add_count}"
 
 
 # ---------------------------------------------------------------------------

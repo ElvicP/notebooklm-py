@@ -207,7 +207,7 @@ async with await NotebookLMClient.from_storage() as client:
 
 ### Idempotency
 
-**T7.B2 — probe-then-retry for create RPCs.** Mutating create RPCs run with the inner `_perform_authed_post` retry loop suppressed: a 5xx / 429 / network error during a write surfaces immediately, and an API-layer wrapper (`_idempotency.idempotent_create`) probes the server to discover whether the write already landed before retrying.
+**Probe-then-retry for create operations.** When a network or server error (5xx / 429 / connection drop) interrupts a create call, the client surfaces the failure immediately rather than blindly retrying. For the methods listed below, the client then probes the server to discover whether the resource was already created before attempting a retry. This prevents duplicate resources when the server accepted the request but the response was lost in transit. The probe runs automatically — no opt-in keyword is required.
 
 The following methods are idempotent under retry:
 
@@ -229,7 +229,7 @@ except NonIdempotentRetryError:
     ...
 ```
 
-`client.sources.add_file(...)` is not yet covered (tracked as a separate fix).
+`client.sources.add_file(...)` and `client.sources.add_drive(...)` are not yet covered by the probe-then-retry wrapper — a transport failure during these calls may produce a duplicate source on retry. Tracked as a separate fix.
 
 ---
 

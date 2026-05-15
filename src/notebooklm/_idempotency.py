@@ -32,12 +32,15 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-# The transport-layer exception types that ``_perform_authed_post``
-# would have retried on. These all signal "the server may or may not
-# have committed the write." The ``idempotent_create`` wrapper catches
-# exactly these; anything else (auth, validation, decoding) propagates
-# unchanged because it indicates the request never reached a state
-# where the write could land.
+# The translated exception types that ``rpc_call`` raises when the
+# request fails in a way that *might* have committed the write on the
+# server. With ``disable_internal_retries=True``, ``_perform_authed_post``
+# does not retry these on its own; instead it lets ``rpc_call`` translate
+# the underlying ``_TransportServerError``/network failure into
+# ``ServerError`` / ``NetworkError`` / ``RateLimitError`` and surface it
+# here. ``idempotent_create`` catches exactly these; anything else (auth,
+# validation, decoding) propagates unchanged because it indicates the
+# request never reached a state where the write could land.
 #
 # Note: ``RPCTimeoutError`` inherits from ``NetworkError`` so it is
 # already covered by the ``NetworkError`` catch.

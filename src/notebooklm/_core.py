@@ -1446,6 +1446,10 @@ class ClientCore:
             source_path: Original source path.
             allow_null: Original allow_null setting.
             original_error: The auth error that triggered this retry.
+            disable_internal_retries: When True, suppress the inner 5xx /
+                429 / network retry loop on the post-refresh ``rpc_call``,
+                so transport failures are surfaced immediately for the
+                caller's idempotency wrapper to handle.
 
         Returns:
             The RPC result if retry succeeds, None if refresh failed.

@@ -475,7 +475,7 @@ class RPCTimeoutError(NetworkError):
 
 
 class NonIdempotentRetryError(NotebookLMError):
-    """Raised when an API marked ``idempotent=True`` cannot be retried safely without potential duplication.
+    """Raised when an opt-in idempotent call cannot guarantee single-write semantics.
 
     Some create RPCs (notably ``SourcesAPI.add_text``) lack a reliable
     server-side dedupe key, so a probe-then-retry strategy cannot
