@@ -117,30 +117,72 @@ def test_tilde_path_is_expanded(
     assert tilde_key == expanded_path
 
 
-def test_public_storage_path_argument_unchanged(tmp_path: Path, _auth_tokens: AuthTokens) -> None:
+def test_public_storage_path_argument_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, _auth_tokens: AuthTokens
+) -> None:
     """T7.G6 must preserve the public path argument type (``str | Path |
     None``) — only the internal-derived ``_keepalive_storage_path`` is
     canonicalized. The auth object's ``storage_path`` and the argument
     passed by the caller stay as-is so external observers (logs,
     serialization, downstream callers) see the original value.
+
+    Uses a GENUINELY non-canonical path (relative-from-cwd) so the
+    assertion isn't trivially satisfied by an already-resolved input —
+    ``tmp_path`` is itself a resolved absolute path on every supported
+    platform, so a naïve ``Path(str(tmp_path / "x"))`` would compare
+    equal to its resolved form and the test would prove nothing.
     """
     target = tmp_path / "store.json"
     target.write_text("{}", encoding="utf-8")
-    # An unresolved path (no .resolve() applied) — the relative-from-cwd
-    # case isn't portable here, so use an absolute Path that lacks
-    # canonicalization side effects but is well-formed.
-    raw_path = Path(str(target))
+
+    # Build a relative-from-cwd path that is decisively different from
+    # its canonical absolute form. ``monkeypatch.chdir`` reverts on
+    # teardown, so no cross-test contamination.
+    monkeypatch.chdir(tmp_path)
+    raw_path = Path("store.json")
+    assert raw_path != target.resolve()
+    assert str(raw_path) != str(target.resolve())
 
     client = NotebookLMClient(_auth_tokens, storage_path=raw_path)
 
     # auth.storage_path was normalized onto the auth object by __init__
     # (see client.py:153-154). The PUBLIC value remains the caller's
-    # original Path — not the canonicalized one.
+    # original (non-canonical) Path — not the canonicalized one.
     assert client.auth.storage_path == raw_path
+    assert client.auth.storage_path != target.resolve()
     # And the internal keepalive field IS canonicalized.
     keepalive_key = client._core._keepalive_storage_path
     assert keepalive_key is not None
     assert keepalive_key == target.resolve()
+    assert keepalive_key.is_absolute()
+
+
+def test_symlink_is_resolved(tmp_path: Path, _auth_tokens: AuthTokens) -> None:
+    """A symlinked path must resolve to its canonical target — the third
+    representation flavor from audit §29. CodeRabbit + Claude-bot both
+    flagged this case as a coverage gap on the initial PR; this closes
+    it. Without symlink resolution, a client opened via the symlink and
+    another opened via the real path would each occupy a distinct
+    dedupe slot and double-fire ``RotateCookies``.
+    """
+    target = tmp_path / "actual.json"
+    target.write_text("{}", encoding="utf-8")
+
+    link = tmp_path / "link.json"
+    link.symlink_to(target)
+    # Sanity: raw Path objects compare unequal; resolution is what
+    # makes them coincide.
+    assert link != target
+
+    client_link = NotebookLMClient(_auth_tokens, storage_path=link)
+    client_target = NotebookLMClient(_auth_tokens, storage_path=target)
+
+    link_key = client_link._core._keepalive_storage_path
+    target_key = client_target._core._keepalive_storage_path
+    assert link_key is not None
+    assert target_key is not None
+    assert link_key == target_key
+    assert link_key == target.resolve()
 
 
 def test_none_storage_path_stays_none(_auth_tokens: AuthTokens) -> None:
