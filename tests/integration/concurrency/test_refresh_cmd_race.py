@@ -427,10 +427,26 @@ async def test_waiter_cancellation_does_not_kill_inflight_subprocess(monkeypatch
         f"Observed {concurrent_invocations_observed} concurrent subprocess "
         "invocations — bug §27 #2 regression."
     )
+    # Critical assertion 4 — exact-once coalescing (CodeRabbit PR #621
+    # follow-up): a regression where A's cancellation aborts the leader
+    # subprocess and B starts a SECOND non-overlapping subprocess later
+    # would still pass the non-overlap checks above. Pin the same-loop
+    # coalescing contract directly: subprocess runs EXACTLY once across
+    # both callers, regardless of cancellation timing.
+    assert subprocess_invocations == 1, (
+        f"Expected exactly 1 subprocess invocation (A+B coalesced on shared "
+        f"future), saw {subprocess_invocations}. A sequential retry after "
+        "leader cancellation still violates the shared in-flight refresh contract."
+    )
+    assert subprocess_completions == 1, (
+        f"Expected exactly 1 completed subprocess invocation, saw {subprocess_completions}."
+    )
     # The first subprocess completed successfully — generation must be
     # bumped exactly once.
     refresh_key = str(storage.expanduser().resolve())
-    assert auth_mod._REFRESH_GENERATIONS.get(refresh_key, 0) >= 1
+    assert auth_mod._REFRESH_GENERATIONS.get(refresh_key, 0) == 1, (
+        "Generation must be bumped exactly once on successful coalesced refresh."
+    )
 
 
 @pytest.mark.asyncio
