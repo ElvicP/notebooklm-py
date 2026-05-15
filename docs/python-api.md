@@ -461,7 +461,7 @@ print(f"Keywords: {guide['keywords']}")
 
 #### Type-Specific List Methods
 
-**CLI equivalent:** `notebooklm artifact list --type <audio|video|slide-deck|quiz|flashcard|infographic|data-table|mind-map|report>` (see [Artifact Commands](cli-reference.md#artifact-commands-notebooklm-artifact-cmd)).
+**CLI equivalent:** `notebooklm artifact list --type <audio|video|slide-deck|quiz|flashcards|infographic|data-table|mind-map|report>` (see [Artifact Commands](cli-reference.md#artifact-commands-notebooklm-artifact-cmd)).
 
 | Method | Parameters | Returns | Description |
 |--------|------------|---------|-------------|
