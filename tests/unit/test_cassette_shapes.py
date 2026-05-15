@@ -101,7 +101,10 @@ def _has_ogw_avatar(cassette: Path) -> bool:
     the xfail goes away.
     """
     try:
-        return "/ogw/" in cassette.read_text()
+        # Explicit UTF-8 — cassettes may carry emoji (e.g. 🔍) in payloads and
+        # Path.read_text() defaults to the platform encoding (cp1252 on
+        # Windows), which raises UnicodeDecodeError on non-ASCII bytes.
+        return "/ogw/" in cassette.read_text(encoding="utf-8")
     except OSError:
         return False
 
@@ -354,7 +357,10 @@ def _load_cassette(path: Path) -> tuple[dict[str, Any], str]:
     inside escaped JSON-string payloads (the parsed structure would lose the
     escape characters in the regex).
     """
-    raw = path.read_text()
+    # Explicit UTF-8 — cassettes may carry emoji (e.g. 🔍) in payloads and
+    # Path.read_text() defaults to the platform encoding (cp1252 on
+    # Windows), which raises UnicodeDecodeError on non-ASCII bytes.
+    raw = path.read_text(encoding="utf-8")
     data = yaml.safe_load(raw) or {}
     return data, raw
 
