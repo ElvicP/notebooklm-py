@@ -158,8 +158,9 @@ Cookie extraction (and Google-account selection) happens in the
 account is currently active in the source browser. To pick up cookies for
 optional surfaces (YouTube, Docs, MyAccount, Mail), extend the rookiepy
 `domains=` argument with `OPTIONAL_COOKIE_DOMAINS` (or a label-specific
-subset via `OPTIONAL_COOKIE_DOMAINS_BY_LABEL`). The CLI equivalent is
-`notebooklm login --browser-cookies <browser> [--include-domains youtube,docs,...]`.
+subset via `OPTIONAL_COOKIE_DOMAINS_BY_LABEL`) — both imported from
+`notebooklm.auth` alongside `REQUIRED_COOKIE_DOMAINS`. The CLI equivalent
+is `notebooklm login --browser-cookies <browser> [--include-domains youtube,docs,...]`.
 
 **Environment Variable Support:**
 
@@ -383,7 +384,7 @@ print(url)
 | `check_freshness(notebook_id, source_id)` | `str, str` | `bool` | Check if source needs refresh |
 | `delete(notebook_id, source_id)` | `str, str` | `bool` | Delete source |
 | `wait_until_ready(notebook_id, source_id, timeout=120.0, ...)` | `str, str, float, ...` | `Source` | Poll until `status == READY` (fully processed). Raises `SourceTimeoutError`/`SourceProcessingError`/`SourceNotFoundError`. |
-| `wait_until_registered(notebook_id, source_id, timeout=30.0, ...)` | `str, str, float, ...` | `Source` | Poll until the source is visible server-side (any non-ERROR status). Returns in seconds; intended for narrow follow-up RPCs (e.g. `UPDATE_SOURCE`) that only require registration, not full processing. |
+| `wait_until_registered(notebook_id, source_id, timeout=30.0, ...)` | `str, str, float, ...` | `Source` | Poll until the source is visible server-side (any non-ERROR status). Completes quickly (seconds for typical sources); intended for narrow follow-up RPCs (e.g. `UPDATE_SOURCE`) that only require registration, not full processing. |
 | `wait_for_sources(notebook_id, source_ids, timeout=120.0, **kwargs)` | `str, list[str], float, ...` | `list[Source]` | Wait for multiple sources to become ready **in parallel**. Per-source timeout; `**kwargs` are forwarded to `wait_until_ready`. |
 
 **Example:**
