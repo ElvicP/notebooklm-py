@@ -2099,7 +2099,7 @@ class TestSourceWait:
                 patch(
                     "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
                 ) as mock_fetch,
-                patch("notebooklm.cli.source.console.status") as mock_status,
+                patch.object(source_module.console, "status") as mock_status,
             ):
                 mock_fetch.return_value = ("csrf", "session")
                 mock_status.return_value.__enter__ = MagicMock(return_value=MagicMock())
@@ -2133,7 +2133,7 @@ class TestSourceWait:
                 patch(
                     "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
                 ) as mock_fetch,
-                patch("notebooklm.cli.source.console.status") as mock_status,
+                patch.object(source_module.console, "status") as mock_status,
             ):
                 mock_fetch.return_value = ("csrf", "session")
                 result = runner.invoke(cli, ["source", "wait", "src_123", "-n", "nb_123", "--json"])

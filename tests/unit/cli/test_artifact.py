@@ -1,5 +1,6 @@
 """Tests for artifact CLI commands."""
 
+import importlib
 import json
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -11,6 +12,12 @@ from notebooklm.notebooklm_cli import cli
 from notebooklm.types import Artifact
 
 from .conftest import create_mock_client, patch_client_for_module
+
+# ``notebooklm.cli.artifact`` (the module) is shadowed by ``cli.__init__``'s
+# re-export of the ``artifact`` Click Group (same name). Use ``importlib`` so
+# tests target the module's attribute set (``console``, helpers) rather than
+# the Click Group sitting at the same dotted path.
+artifact_module = importlib.import_module("notebooklm.cli.artifact")
 
 
 @pytest.fixture
@@ -890,7 +897,7 @@ class TestArtifactWait:
                 patch(
                     "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
                 ) as mock_fetch,
-                patch("notebooklm.cli.artifact.console.status") as mock_status,
+                patch.object(artifact_module.console, "status") as mock_status,
             ):
                 mock_fetch.return_value = ("csrf", "session")
                 mock_status.return_value.__enter__ = MagicMock(return_value=MagicMock())
@@ -926,7 +933,7 @@ class TestArtifactWait:
                 patch(
                     "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
                 ) as mock_fetch,
-                patch("notebooklm.cli.artifact.console.status") as mock_status,
+                patch.object(artifact_module.console, "status") as mock_status,
             ):
                 mock_fetch.return_value = ("csrf", "session")
                 result = runner.invoke(

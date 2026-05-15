@@ -1,6 +1,7 @@
 """Tests for generate CLI commands."""
 
 import asyncio
+import importlib
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -12,6 +13,12 @@ from notebooklm.notebooklm_cli import cli
 from notebooklm.rpc.types import ReportFormat
 
 from .conftest import create_mock_client, patch_client_for_module
+
+# ``notebooklm.cli.generate`` (the module) is shadowed by ``cli.__init__``'s
+# re-export of the ``generate`` Click Group (same name). Use ``importlib`` so
+# tests target the module's attribute set (``console``, helpers) rather than
+# the Click Group sitting at the same dotted path.
+generate_module = importlib.import_module("notebooklm.cli.generate")
 
 
 @pytest.fixture
@@ -233,7 +240,7 @@ class TestGenerateAudio:
                 patch(
                     "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
                 ) as mock_fetch,
-                patch("notebooklm.cli.generate.console.status") as mock_status,
+                patch.object(generate_module.console, "status") as mock_status,
             ):
                 mock_fetch.return_value = ("csrf", "session")
                 # ``console.status`` returns a context manager; emulate one so
@@ -2204,7 +2211,7 @@ class TestStatusWithElapsed:
         """Under --json the helper must NOT call console.status (stdout stays JSON)."""
 
         async def _exercise() -> None:
-            with patch("notebooklm.cli.generate.console.status") as mock_status:
+            with patch.object(generate_module.console, "status") as mock_status:
                 async with _status_with_elapsed("audio", json_output=True):
                     pass
                 assert not mock_status.called, "console.status must not be invoked under --json"
