@@ -205,6 +205,32 @@ async with await NotebookLMClient.from_storage() as client:
 
 **Note:** If your session cookies have fully expired (not just CSRF tokens), you'll need to re-run `notebooklm login`.
 
+### Idempotency
+
+**T7.B2 — probe-then-retry for create RPCs.** Mutating create RPCs run with the inner `_perform_authed_post` retry loop suppressed: a 5xx / 429 / network error during a write surfaces immediately, and an API-layer wrapper (`_idempotency.idempotent_create`) probes the server to discover whether the write already landed before retrying.
+
+The following methods are idempotent under retry:
+
+| Method | Probe |
+|---|---|
+| `client.notebooks.create(title)` | Snapshot notebook IDs *before*, list *after* a transport failure, return the single new notebook with the matching title (or raise on ambiguity). |
+| `client.sources.add_url(notebook_id, url)` | List the notebook's sources, return the existing source whose `url` exactly matches. |
+| `client.sources.add_url(notebook_id, youtube_url)` | Same probe via canonical YouTube URL. |
+
+`client.sources.add_text(notebook_id, title, content)` is **not** retry-safe: text sources lack a reliable server-side dedupe key (titles aren't unique; content isn't exposed in the source list). The default behavior is unchanged from previous releases. If you want explicit failure rather than possible silent duplication on retry, opt in:
+
+```python
+from notebooklm import NonIdempotentRetryError
+
+try:
+    await client.sources.add_text(nb_id, "Title", "Content", idempotent=True)
+except NonIdempotentRetryError:
+    # Embed a UUID in the title and dedupe client-side instead.
+    ...
+```
+
+`client.sources.add_file(...)` is not yet covered (tracked as a separate fix).
+
 ---
 
 ## API Reference
