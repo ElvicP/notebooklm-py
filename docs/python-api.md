@@ -1,7 +1,7 @@
 # Python API Reference
 
 **Status:** Active
-**Last Updated:** 2026-05-11
+**Last Updated:** 2026-05-15
 
 Complete reference for the `notebooklm` Python library.
 
@@ -750,14 +750,41 @@ async def start(
 
 async def poll(notebook_id: str) -> dict:
     """
-    Returns: {"task_id": str, "status": str, "query": str, "sources": list, "summary": str}
-    Status is "completed", "in_progress", or "no_research"
+    Returns a dict for the LATEST research task. Top-level keys:
+      - task_id:   str       — task/report identifier
+      - status:    str       — "completed" | "in_progress" | "no_research"
+      - query:     str       — original research query
+      - sources:   list[dict]
+      - summary:   str       — summary text when present
+      - report:    str       — deep-research report markdown when present
+      - tasks:     list[dict] — ALL parsed tasks (same shape as the top-level
+                                latest-task fields), additive across polls
+
+    Each source dict may include:
+      - url, title
+      - result_type:        int — 1=web, 2=drive, 5=deep-research report entry
+      - research_task_id:   str — task/report ID that produced this source
+      - report_markdown:    str — deep-research report markdown (for type-5 entries)
     """
 
 async def import_sources(notebook_id: str, task_id: str, sources: list[dict]) -> list[dict]:
     """
-    sources: List of dicts with 'url' and 'title' keys
-    Returns: List of imported sources with 'id' and 'title'
+    sources: list of dicts with 'url' and 'title' keys. Deep-research entries
+        from poll() may also include 'report_markdown', 'result_type', and
+        'research_task_id'.
+    Returns: list of imported sources with 'id' and 'title'.
+
+    Raises:
+      - ValidationError if `sources` contains entries from more than one
+        research task (`research_task_id` mismatch). Import each task's
+        sources in a separate call.
+
+    Caveats:
+      - The API response can under-report — fewer items may come back than
+        were actually imported. After this call, re-list with
+        `client.sources.list(notebook_id)` to verify the final source set.
+      - Entries without a `url` and without a complete report (`title` +
+        `report_markdown` + `result_type == 5`) are skipped with a warning.
     """
 ```
 
@@ -1003,9 +1030,11 @@ print(f"Type: {source.kind}")  # "Type: pdf"
 class Artifact:
     id: str
     title: str
+    _artifact_type: int             # Internal type code; field order matters. Access via .kind.
     status: int                     # 1=processing, 2=pending, 3=completed, 4=failed
     created_at: Optional[datetime]
     url: Optional[str]
+    _variant: int | None = None     # Internal variant for type-4 artifacts (1=flashcards, 2=quiz).
 
     @property
     def kind(self) -> ArtifactType:
@@ -1022,7 +1051,16 @@ class Artifact:
     @property
     def is_flashcards(self) -> bool:
         """Check if this is a flashcards artifact."""
+
+    @property
+    def report_subtype(self) -> str | None:
+        """Title-derived report subtype: 'briefing_doc', 'study_guide',
+        'blog_post', or 'report' for type-2 artifacts; None otherwise.
+        Use this instead of parsing titles in caller code.
+        """
 ```
+
+**Note on `_artifact_type` / `_variant`:** these are private (leading-underscore) fields with `repr=False` and are part of the dataclass for `from_api_response()` round-tripping. Always consume them via the public `.kind`, `.is_quiz`, `.is_flashcards`, and `.report_subtype` accessors — the underscore prefix signals that direct access is unsupported and subject to change without notice.
 
 **Type Identification:**
 
@@ -1071,6 +1109,18 @@ class GenerationStatus:
     @property
     def is_pending(self) -> bool:
         """Check if generation is pending."""
+
+    @property
+    def is_not_found(self) -> bool:
+        """Check if the artifact is absent from the poll response.
+
+        Distinct from ``is_pending``: a *pending* artifact exists in the
+        artifact list and is queued, while *not_found* means the artifact
+        has either not yet appeared (brief lag after creation) or was
+        silently removed server-side (e.g. after a daily-quota rejection).
+        ``wait_for_completion`` treats a sustained run of ``not_found``
+        responses as a failure — see its ``max_not_found`` parameter.
+        """
 
     @property
     def is_rate_limited(self) -> bool:
@@ -1149,6 +1199,39 @@ class SharedUser:
     permission: SharePermission        # OWNER, EDITOR, or VIEWER
     display_name: str | None           # User's display name
     avatar_url: str | None             # URL to user's avatar image
+```
+
+### AccountLimits
+
+Returned by `client.settings.get_account_limits()`. Use these fields for
+quota decisions in preference to the raw tier string — the server-reported
+limits are what NotebookLM actually enforces.
+
+```python
+@dataclass(frozen=True)
+class AccountLimits:
+    notebook_limit: int | None = None  # Max notebooks the account can hold
+    source_limit: int | None = None    # Max sources per notebook
+    raw_limits: tuple[Any, ...] = ()   # Untouched RPC payload for forensic use
+```
+
+### AccountTier
+
+Returned by `client.settings.get_account_tier()`. Raw tier metadata from
+NotebookLM's homepage tier RPC. `plan_name` is the user-facing label when
+available (e.g. `"NotebookLM Pro"`); `tier` is the internal identifier
+(`"STANDARD"`, `"PLUS"`, `"PRO"`, `"PRO_DASHER_END_USER"`, `"ULTRA"`).
+
+```python
+@dataclass(frozen=True)
+class AccountTier:
+    tier: str | None = None        # Internal tier identifier
+    plan_name: str | None = None   # User-facing plan label
+```
+
+```python
+tier = await client.settings.get_account_tier()
+label = tier.plan_name or tier.tier or "unknown"
 ```
 
 ### SourceFulltext
