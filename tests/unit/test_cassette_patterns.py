@@ -216,6 +216,33 @@ def test_scrub_is_idempotent_on_already_scrubbed_storage_state() -> None:
     assert once == twice == text
 
 
+@pytest.mark.parametrize(
+    "field,placeholder",
+    [
+        ("SNlM0e", "SCRUBBED_CSRF"),
+        ("FdrFJe", "SCRUBBED_SESSION"),
+        ("oPEP7c", "SCRUBBED_EMAIL"),
+        ("S06Grb", "SCRUBBED_USER_ID"),
+        ("B8SWKb", "SCRUBBED_API_KEY"),
+        ("at", "SCRUBBED_CSRF"),
+    ],
+)
+def test_token_field_scrubs_value_with_escaped_quote(field: str, placeholder: str) -> None:
+    """JSON token values containing ``\\"`` are scrubbed in full, not truncated.
+
+    Regression test for the naive ``[^"]+`` value match: without the escape-
+    aware idiom, the scrub stops at the first ``\\"`` and leaves the suffix of
+    the secret in the cassette while ``is_clean`` is fooled by the leading
+    placeholder. The new ``(?:[^"\\\\]|\\\\.)*`` idiom matches across escape
+    sequences so the entire JSON string value is replaced.
+    """
+    text = f'{{"{field}":"REAL_PREFIX\\"REAL_SUFFIX"}}'
+    scrubbed = scrub_string(text)
+    assert "REAL_PREFIX" not in scrubbed, scrubbed
+    assert "REAL_SUFFIX" not in scrubbed, scrubbed
+    assert f'"{field}":"{placeholder}"' in scrubbed
+
+
 # ---------------------------------------------------------------------------
 # is_clean — positive: every known placeholder is accepted
 # ---------------------------------------------------------------------------
@@ -289,14 +316,14 @@ def test_is_clean_flags_sid_starting_with_S_in_storage_state() -> None:
 def test_is_clean_flags_sid_starting_with_S_in_json_key() -> None:
     """Same I7 hole in the JSON-dict-with-cookie-name-as-key shape."""
     text = '{"SAPISID": "S_real_leaked_token_here"}'
-    ok, leaks = is_clean(text)
+    ok, _ = is_clean(text)
     assert not ok
 
 
 def test_is_clean_flags_short_one_char_cookie_value() -> None:
     """A single-character non-scrubbed leak (``"SID": "x"``) is detected."""
     text = '{"SID": "x"}'
-    ok, leaks = is_clean(text)
+    ok, _ = is_clean(text)
     assert not ok
 
 
@@ -423,12 +450,12 @@ def test_filter_headers_disjoint_from_cookies() -> None:
 def test_bad_cassette_byte_count_payload_with_email_is_flagged() -> None:
     """A synthetic bad-cassette body with a leaked email is flagged."""
     body = '12\n{"u":"alice@gmail.com"}\n'
-    ok, leaks = is_clean(body)
+    ok, _ = is_clean(body)
     assert not ok
 
 
 def test_bad_cassette_cookie_header_payload_is_flagged() -> None:
     """A synthetic bad-cassette body with a leaked cookie value is flagged."""
     body = "Set-Cookie: SID=S_REAL_LEAK; Path=/\n"
-    ok, leaks = is_clean(body)
+    ok, _ = is_clean(body)
     assert not ok
