@@ -163,6 +163,9 @@ async def test_from_storage_accepts_upload_timeout(monkeypatch, auth_tokens) -> 
     monkeypatch.setattr(auth_module.AuthTokens, "from_storage", _fake_from_storage)
 
     custom = httpx.Timeout(7.0, read=14.0)
+    # Context not entered — only inspecting constructor-level wiring.
+    # ``__aenter__`` / ``ClientCore.open()`` never run, so there are no
+    # background tasks or open sockets to clean up.
     client = await NotebookLMClient.from_storage(upload_timeout=custom)
 
     assert client.sources._upload_timeout is custom
