@@ -203,17 +203,14 @@ async def create_note(
         # T7.C4: shield the UPDATE_NOTE finalize from outer cancellation.
         # CREATE_NOTE has already persisted a row server-side; without the
         # shield, a cancel arriving between CREATE_NOTE and UPDATE_NOTE
-        # completion leaves an orphan row with no title/content. The shield
-        # lets the in-flight finalize run to completion; if the outer cancel
-        # still propagates (await released before finalize completed), fire
-        # a best-effort DELETE_NOTE via create_task — NOT awaited, so the
-        # re-raise is never blocked on cleanup — to remove the orphan row.
+        # completion leaves an orphan row with no title/content. If the
+        # outer cancel still propagates (the await released before finalize
+        # completed), schedule a fire-and-forget DELETE_NOTE to remove the
+        # orphan row — the task handle is intentionally discarded so the
+        # CancelledError re-raise never blocks on cleanup.
         try:
             await asyncio.shield(update_note(core, notebook_id, note_id, content, title))
         except asyncio.CancelledError:
-            # Fire-and-forget cleanup. We deliberately discard the task
-            # handle: callers cancelling create_note() must not be made to
-            # wait on (or even know about) the cleanup.
             asyncio.create_task(  # noqa: RUF006 — fire-and-forget by design
                 _delete_note_best_effort(core, notebook_id, note_id)
             )
