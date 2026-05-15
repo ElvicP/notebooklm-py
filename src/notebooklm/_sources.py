@@ -1418,8 +1418,9 @@ class SourcesAPI:
             POST is fired against the same resumable upload URL via
             ``asyncio.create_task``. The cleanup task is not awaited —
             re-raising must not block on best-effort cleanup. The cleanup
-            POST itself is shielded so cooperative cancellation does not
-            tear it down before the bytes hit the wire.
+            runs on a detached task with no outer await chain, so a
+            caller-level cancel cannot reach it; no explicit shield is
+            needed at that layer (see ``_cancel_upload_session`` docstring).
 
         Args:
             upload_url: The resumable upload URL from _start_resumable_upload.
@@ -1446,14 +1447,17 @@ class SourcesAPI:
                 while chunk := f.read(65536):  # 64KB chunks
                     yield chunk
 
-        # `finalize_started` flips the moment we hand the request to httpx.
-        # On cancel we use it to discriminate:
+        # `finalize_started` flips after the local ``httpx.AsyncClient``
+        # context enters and immediately before ``client.post(...)``. There
+        # is no ``await`` between the flip and the POST, so asyncio cannot
+        # deliver a cancel in that window — once the flag is True, the
+        # request is effectively in flight. On cancel we discriminate:
         #   - True  → shield is keeping the in-flight POST alive; just re-raise.
         #   - False → no POST went out, so fire a best-effort Scotty cancel.
-        # A single-element list is the simplest closure-mutable boolean.
-        finalize_started = [False]
+        finalize_started = False
 
         async def _do_finalize() -> None:
+            nonlocal finalize_started
             # See _start_resumable_upload: pass the live cookie jar so
             # httpx scopes cookies per Domain attribute. Scotty validates
             # OSID against host and rejects foreign-host cookies. (#373)
@@ -1461,15 +1465,24 @@ class SourcesAPI:
                 timeout=httpx.Timeout(10.0, read=300.0),
                 cookies=self._core.get_http_client().cookies,
             ) as client:
-                finalize_started[0] = True
+                finalize_started = True
                 response = await client.post(upload_url, headers=headers, content=file_stream())
                 response.raise_for_status()
 
+        def _log_finalize_exc(t: asyncio.Task[None]) -> None:
+            # On post-finalize cancel, ``finalize_task`` keeps running in the
+            # background. Without this callback, an unawaited exception
+            # (e.g. server 5xx) would surface as a noisy
+            # "Task exception was never retrieved" asyncio warning.
+            if not t.cancelled() and (exc := t.exception()) is not None:
+                logger.debug("Background finalize POST failed: %r", exc)
+
         finalize_task = asyncio.create_task(_do_finalize())
+        finalize_task.add_done_callback(_log_finalize_exc)
         try:
             await asyncio.shield(finalize_task)
         except asyncio.CancelledError:
-            if not finalize_started[0]:
+            if not finalize_started:
                 # Pre-finalize cancel: the POST never went out. Cancel the
                 # still-setting-up inner task and fire a best-effort
                 # Scotty cancel so the resumable upload session doesn't
