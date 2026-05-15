@@ -1,22 +1,29 @@
 #!/usr/bin/env python3
-"""Bulk re-scrub VCR cassettes for ``lh3.googleusercontent.com/(a|ogw)/`` avatar URLs.
+"""Bulk re-scrub VCR cassettes for stale tokens missed by the on-record sanitizer.
 
-T8.B6 — collapses every ``lh3.googleusercontent.com/(?:a|ogw)/<token>`` avatar
-URL to the canonical ``SCRUBBED_AVATAR_URL`` placeholder and re-derives the
-chunked ``<count>\\n<payload>\\n`` byte-count prefixes inside every recorded
-response body. Writes back only if anything changed; idempotent on a clean
-tree.
+Collapses every ``lh3.googleusercontent.com/(?:a|ogw)/<token>`` avatar URL to
+``SCRUBBED_AVATAR_URL`` (T8.B6) and every ``AONS<20+chars>`` Drive ACL token
+to ``SCRUBBED_AONS`` (T8.B8), then re-derives the chunked
+``<count>\\n<payload>\\n`` byte-count prefixes inside every recorded response
+body. Writes back only if anything changed; idempotent on a clean tree.
 
 Why this script exists
 ----------------------
-The T8.A6a avatar-URL scrubber (PR #565) added
-``lh3.googleusercontent.com/(?:a|ogw)/<token>`` → ``SCRUBBED_AVATAR_URL`` to
-the canonical pattern registry, but the ~67 cassettes recorded BEFORE that
-pattern landed still embed the raw avatar URLs. The phase-1 audit listed
-them in ``tests/scripts/cassette_repair_allowlist.txt`` under the "/ogw/
-avatar URL group" header; this script is the one-off tool that walks each
-of those cassettes, re-scrubs them in place, and reports a byte-level diff
-so reviewers can verify the change set.
+The canonical pattern registry in ``tests/cassette_patterns.py`` gains new
+sensitive-data scrubbers over time, but cassettes recorded BEFORE a pattern
+landed still embed the raw tokens. This script is the one-off tool that
+walks those cassettes, re-scrubs them in place, and reports a byte-level
+diff so reviewers can verify the change set.
+
+Currently covers two patterns added retroactively:
+
+* T8.A6a — ``lh3.googleusercontent.com/(?:a|ogw)/<token>`` avatar URLs.
+  Original group was tracked in the phase-1 audit allowlist under the
+  ``/ogw/`` header (cleared in T8.B6).
+* T8.A6b — ``AONS<token>`` Drive permission/ACL tokens. The two cassettes
+  ``notebooks_list.yaml`` and ``real_api_list_notebooks.yaml`` carried 20
+  raw tokens from a real Drive-source notebook listing and tripped the
+  CI guard once T8.A5a started enforcing AONS detection.
 
 Why we DON'T call ``scrub_string`` here
 ---------------------------------------
@@ -32,18 +39,20 @@ Caching Economics", ...) that would be silently clobbered to
 ``SCRUBBED_NAME`` and break the cli-vcr tests that rely on matching
 those titles in the parsed response.
 
-So the script applies ONLY the avatar-URL scrubber by name. Every other
-pattern in the registry — display names, emails, cookies, tokens — is
-already correctly applied on record by ``vcr_config.scrub_response`` and
-has been for every cassette in the tree; running them again here cannot
-produce new scrubs (the registry is idempotent on its own placeholders),
-but it CAN produce display-name false positives the recorder's allowlist
-was never tuned to cover.
+So the script applies ONLY a hand-picked subset of scrubbers by name —
+patterns whose match-shape carries no false-positive risk on the cassette
+corpus (a literal ``AONS`` prefix, a literal ``lh3.googleusercontent.com``
+host). Every other pattern in the registry — display names, emails,
+cookies, tokens — is already correctly applied on record by
+``vcr_config.scrub_response`` and has been for every cassette in the
+tree; running them again here cannot produce new scrubs (the registry is
+idempotent on its own placeholders), but it CAN produce display-name
+false positives the recorder's allowlist was never tuned to cover.
 
 The byte-count re-derivation (``recompute_chunk_prefix``) runs on every
 body unconditionally — it's a documented no-op on bodies that don't look
-chunked, and a safety net for any chunked body whose avatar URL inside a
-WRB payload shifted its length.
+chunked, and a safety net for any chunked body whose scrubbed payload
+shifted its length.
 
 Architecture notes
 ------------------
@@ -100,29 +109,41 @@ sys.path.insert(0, str(_TESTS_DIR))
 
 from cassette_patterns import recompute_chunk_prefix  # noqa: E402
 
-# The single regex/replacement pair this script applies. Mirrored verbatim
-# from ``cassette_patterns.SENSITIVE_PATTERNS`` (section 13 — see the comment
-# block above for the rationale on why we copy it instead of running the
-# whole registry). When the canonical pattern changes in
-# ``cassette_patterns.py`` this constant should be updated in lockstep —
-# the unit test ``test_avatar_pattern_matches_registry`` in
-# ``tests/unit/test_rescrub_cassettes_script.py`` asserts the two stay in
-# sync so the drift is caught at PR review time.
+# The regex/replacement pairs this script applies. Each pair is mirrored
+# verbatim from ``cassette_patterns.SENSITIVE_PATTERNS`` — see the comment
+# block above for the rationale on why we copy them instead of running the
+# whole registry. When a canonical pattern changes in
+# ``cassette_patterns.py`` the corresponding constant here must be updated
+# in lockstep; the drift-detection tests in
+# ``tests/unit/test_rescrub_cassettes_script.py`` pin the two together so
+# the divergence is caught at PR review time.
 _AVATAR_URL_RE = re.compile(r"https?://lh3\.googleusercontent\.com/(?:a|ogw)/[A-Za-z0-9_=\-]+")
 _AVATAR_URL_REPLACEMENT = "SCRUBBED_AVATAR_URL"
 
+# Drive permission/ACL tokens — ``AONS`` prefix + 20+ char tail. The 20-char
+# floor matches the canonical guard in ``cassette_patterns.py`` (section 10)
+# and avoids matching short literal ``AONS`` mentions in code or docs.
+_AONS_TOKEN_RE = re.compile(r"AONS[A-Za-z0-9_\-]{20,}")
+_AONS_TOKEN_REPLACEMENT = "SCRUBBED_AONS"
 
-def _scrub_avatar_urls(text: str) -> str:
-    """Replace every ``lh3...../(a|ogw)/<token>`` URL with the placeholder.
 
-    Isolated from the rest of the canonical registry by design — see the
-    module docstring for why this script doesn't call ``scrub_string``.
+def _scrub_known_sensitive(text: str) -> str:
+    """Apply every scrubber this script owns, in script-declaration order.
+
+    Application order is decoupled from the canonical registry's section
+    numbering because the patterns are disjoint — no placeholder a
+    previous scrubber emits can match any later scrubber's regex, so the
+    chained ``re.sub`` calls commute. Isolated from the rest of the
+    canonical registry by design — see the module docstring for why this
+    script doesn't call ``scrub_string``.
     """
-    return _AVATAR_URL_RE.sub(_AVATAR_URL_REPLACEMENT, text)
+    text = _AVATAR_URL_RE.sub(_AVATAR_URL_REPLACEMENT, text)
+    text = _AONS_TOKEN_RE.sub(_AONS_TOKEN_REPLACEMENT, text)
+    return text
 
 
 def _rescrub_body(body: str | bytes) -> tuple[str | bytes, bool]:
-    """Apply avatar-URL scrub + recompute_chunk_prefix to a single body value.
+    """Apply ``_scrub_known_sensitive`` + ``recompute_chunk_prefix`` to a body.
 
     Returns ``(new_body, changed)``. The body is preserved in its original
     type (``str`` or ``bytes``) so re-emitted cassettes match what vcrpy
@@ -137,12 +158,12 @@ def _rescrub_body(body: str | bytes) -> tuple[str | bytes, bool]:
             decoded = body.decode("utf-8")
         except UnicodeDecodeError:
             return body, False
-        scrubbed = _scrub_avatar_urls(decoded)
+        scrubbed = _scrub_known_sensitive(decoded)
         rederived = recompute_chunk_prefix(scrubbed)
         encoded = rederived.encode("utf-8")
         return encoded, encoded != body
     if isinstance(body, str):
-        scrubbed = _scrub_avatar_urls(body)
+        scrubbed = _scrub_known_sensitive(body)
         rederived = recompute_chunk_prefix(scrubbed)
         return rederived, rederived != body
     # ``body`` is something exotic (None, dict). Leave it alone.
@@ -185,9 +206,10 @@ def _rescrub_cassette(path: Path) -> tuple[bool, int]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Bulk re-scrub VCR cassettes for lh3.googleusercontent.com/(a|ogw) "
-            "avatar URLs. Re-derives chunk byte-counts in the same pass. "
-            "Idempotent."
+            "Bulk re-scrub VCR cassettes for stale sensitive tokens "
+            "(lh3.googleusercontent.com/(a|ogw) avatar URLs, AONS Drive "
+            "permission tokens). Re-derives chunk byte-counts in the same "
+            "pass. Idempotent."
         )
     )
     parser.add_argument(

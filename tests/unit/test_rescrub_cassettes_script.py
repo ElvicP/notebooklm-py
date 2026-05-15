@@ -14,12 +14,12 @@ pre-scrub payload — then run the script in a tmp_path and assert:
 * The script is idempotent: a second run on the already-cleaned tree
   reports zero changes and produces a byte-identical file.
 
-One additional regression test asserts the avatar-URL regex the script
-hard-codes mirrors the canonical pattern in
-``tests/cassette_patterns.py``. The script deliberately does NOT call
-``scrub_string`` (see its module docstring), so the registry/script
-drift could go unnoticed if the canonical pattern were ever tightened
-or widened — this test pins them together.
+A parametrized regression test asserts that every scrubber the script
+hard-codes (avatar URL, AONS Drive token, ...) mirrors its canonical
+entry in ``tests/cassette_patterns.py``. The script deliberately does
+NOT call ``scrub_string`` (see its module docstring), so registry/script
+drift could go unnoticed if a canonical pattern were ever tightened or
+widened — this test pins them together for each owned placeholder.
 
 The script is invoked via :func:`runpy.run_path` rather than imported
 in-process — there's a hyphen in its filename (``rescrub-cassettes.py``)
@@ -229,43 +229,122 @@ def test_script_handles_empty_cassette(tmp_path: Path, name: str) -> None:
     assert _run_script(str(cassette_path)) == 0
 
 
-def test_avatar_pattern_matches_registry() -> None:
-    """The script's avatar-URL regex must mirror cassette_patterns'.
+def _load_script_namespace() -> dict[str, object]:
+    """Import the script as a module namespace without running ``main``.
 
-    ``scripts/rescrub-cassettes.py`` deliberately copies the avatar-URL
-    pattern out of :data:`cassette_patterns.SENSITIVE_PATTERNS` (section
-    13) rather than calling ``scrub_string`` — see the script's module
-    docstring for why. This test pins the two together so a future
-    tightening of the canonical pattern (e.g. adding a path segment, or
-    swapping ``=`` for a different sizing-suffix delimiter) doesn't
-    silently leave the script's regex stale.
+    Importing via :func:`runpy.run_path` with ``run_name="__main__"`` would
+    execute the script's argparse loop. Using a non-``__main__`` run name
+    makes the ``if __name__ == "__main__":`` guard skip, so we get only the
+    module globals (regex constants, helpers).
+    """
+    return runpy.run_path(str(_SCRIPT), run_name="not_main")
+
+
+@pytest.mark.parametrize(
+    "regex_attr,replacement_attr,placeholder",
+    [
+        ("_AVATAR_URL_RE", "_AVATAR_URL_REPLACEMENT", "SCRUBBED_AVATAR_URL"),
+        ("_AONS_TOKEN_RE", "_AONS_TOKEN_REPLACEMENT", "SCRUBBED_AONS"),
+    ],
+)
+def test_script_patterns_match_registry(
+    regex_attr: str, replacement_attr: str, placeholder: str
+) -> None:
+    """Each pattern the script owns must mirror ``cassette_patterns``.
+
+    ``scripts/rescrub-cassettes.py`` deliberately copies a hand-picked
+    subset of patterns out of :data:`cassette_patterns.SENSITIVE_PATTERNS`
+    rather than calling ``scrub_string`` — see the script's module
+    docstring for why. This test pins each copied pattern to its source
+    so a future tightening of the canonical regex doesn't silently leave
+    the script's copy stale.
 
     The check is structural: we walk the canonical
     ``SENSITIVE_PATTERNS`` list, locate the entry whose replacement is
-    ``SCRUBBED_AVATAR_URL``, and assert it equals the regex the script
+    the expected placeholder, and assert it equals the regex the script
     exposes. Both sides are plain ``(regex, replacement)`` pairs so the
     test fails loudly if either drifts.
     """
-    # Importing the script via runpy.run_path would execute its
-    # ``main(argv=sys.argv[1:])`` block; we only want its module globals.
-    # Load it with run_path and ``run_name`` set to something other than
-    # ``__main__`` so the ``if __name__ == "__main__":`` guard skips.
-    script_ns = runpy.run_path(str(_SCRIPT), run_name="not_main")
-    script_pattern = script_ns["_AVATAR_URL_RE"].pattern
-    script_replacement = script_ns["_AVATAR_URL_REPLACEMENT"]
+    script_ns = _load_script_namespace()
+    script_pattern = script_ns[regex_attr].pattern  # type: ignore[attr-defined]
+    script_replacement = script_ns[replacement_attr]
 
     from cassette_patterns import SENSITIVE_PATTERNS
 
-    avatar_entries = [
-        (pat, repl) for pat, repl in SENSITIVE_PATTERNS if repl == "SCRUBBED_AVATAR_URL"
-    ]
-    assert len(avatar_entries) == 1, (
-        f"Expected exactly one SCRUBBED_AVATAR_URL entry in registry, got {len(avatar_entries)}"
+    matching = [(pat, repl) for pat, repl in SENSITIVE_PATTERNS if repl == placeholder]
+    assert len(matching) == 1, (
+        f"Expected exactly one {placeholder} entry in registry, got {len(matching)}"
     )
-    registry_pattern, registry_replacement = avatar_entries[0]
+    registry_pattern, registry_replacement = matching[0]
     assert script_pattern == registry_pattern, (
-        "scripts/rescrub-cassettes.py avatar regex drifted from "
+        f"scripts/rescrub-cassettes.py {placeholder} regex drifted from "
         f"cassette_patterns.SENSITIVE_PATTERNS: script={script_pattern!r} "
         f"vs registry={registry_pattern!r}"
     )
     assert script_replacement == registry_replacement
+
+
+def test_script_scrubs_aons_tokens_and_recomputes_byte_counts(tmp_path: Path) -> None:
+    """A cassette carrying AONS Drive tokens is cleaned in a single pass.
+
+    AONS scrubbing was added in T8.B8 to clear the two cassettes
+    (``notebooks_list.yaml``, ``real_api_list_notebooks.yaml``) that
+    pre-dated the on-record AONS sanitizer. The token appears inside the
+    stringified WRB payload of a chunked batchexecute response, so the
+    byte-count prefix must shrink in lockstep — same shape the avatar
+    test pins, just a different token.
+    """
+    aons_token = "AONSffxS0jODUzWyU5t_oF5FW38-nGbABiAjdnDUXEt4SZNfpeDststh7Ey16odguOAuix6KnIWop"
+    chunk_payload = (
+        f'[["wrb.fr","wXbhsf","[[null,[\\"{aons_token}\\"]]]",null,null,null,"generic"]]'
+    )
+    chunk_count = len(chunk_payload.encode("utf-8"))
+    chunked_body = f")]}}'\n\n{chunk_count}\n{chunk_payload}\n"
+
+    cassette = {
+        "interactions": [
+            {
+                "request": {
+                    "body": "f.req=%5B%5D",
+                    "headers": {"Host": ["notebooklm.google.com"]},
+                    "method": "POST",
+                    "uri": "https://notebooklm.google.com/_/LabsTailwindUi/data/batchexecute?rpcids=wXbhsf",
+                },
+                "response": {
+                    "body": {"string": chunked_body},
+                    "headers": {"Content-Type": ["application/json+protobuf"]},
+                    "status": {"code": 200, "message": "OK"},
+                },
+            }
+        ],
+        "version": 1,
+    }
+    cassette_path = tmp_path / "bad_aons.yaml"
+    cassette_path.write_text(yaml.dump(cassette), encoding="utf-8")
+
+    assert _run_script(str(cassette_path)) == 0
+
+    post = cassette_path.read_text(encoding="utf-8")
+    assert aons_token not in post, f"AONS leak survived rescrub:\n{post}"
+    assert "SCRUBBED_AONS" in post, f"placeholder not emitted:\n{post}"
+
+    data = yaml.safe_load(post)
+    chunked = data["interactions"][0]["response"]["body"]["string"]
+    assert chunked.startswith(")]}'\n\n"), "chunked framing must survive scrub"
+    lines = chunked[len(")]}'\n\n") :].split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        try:
+            declared = int(line)
+        except ValueError:
+            i += 1
+            continue
+        i += 1
+        if i >= len(lines):
+            break
+        actual = len(lines[i].encode("utf-8"))
+        assert declared == actual, (
+            f"chunk@line{i}: prefix declares {declared} bytes but payload is {actual} bytes"
+        )
+        i += 1
