@@ -111,14 +111,12 @@ async def test_no_leftover_tmp_files_after_concurrent_downloads(
     httpx_mock: HTTPXMock,
     tmp_path,
 ) -> None:
-    """No `<output>.tmp` or mkstemp leftovers should remain on success.
+    """Both calls succeed and leave zero tempfiles behind.
 
-    Pre-fix: even on success, the shared `<output>.tmp` was renamed
-    away — no leftover. Post-fix: each call's mkstemp temp is renamed
-    onto `output_path`; the loser's temp is left ONLY if the winner
-    raced through the rename first (filesystem-dependent). Be lenient:
-    assert at most one leftover tempfile is acceptable, and only with
-    the expected `<name>.<random>.tmp` shape.
+    With the mock transport, both `_download_url` invocations always
+    succeed and atomically `os.replace` their unique mkstemp temps onto
+    `output_path` (one wins, the other clobbers — both get a final
+    state). No tempfile should remain in `tmp_path` after the gather.
     """
     url_a = "https://storage.googleapis.com/file_a.bin"
     url_b = "https://storage.googleapis.com/file_b.bin"
@@ -128,25 +126,23 @@ async def test_no_leftover_tmp_files_after_concurrent_downloads(
     output_path = tmp_path / "out.bin"
 
     async with NotebookLMClient(auth_tokens) as client:
-        await asyncio.gather(
+        results = await asyncio.gather(
             client.artifacts._download_url(url_a, str(output_path)),
             client.artifacts._download_url(url_b, str(output_path)),
             return_exceptions=True,
         )
 
-    # mkstemp temp names have shape `out.bin.<random>.tmp`. List leftovers.
+    # Both calls must succeed (no exception slipped through return_exceptions).
+    assert all(isinstance(r, str) for r in results), f"unexpected exception: {results}"
+    assert output_path.exists(), "expected final output file to exist after both downloads"
+
+    # mkstemp temp names have shape `out.bin.<random>.tmp`. With deterministic
+    # mock-transport completion, both renames succeed and zero leftovers remain.
     leftovers = sorted(p for p in tmp_path.iterdir() if p != output_path)
-    assert len(leftovers) <= 1, f"unexpected leftover temp files: {leftovers}"
-    for p in leftovers:
-        assert p.name.startswith("out.bin.") and p.name.endswith(".tmp"), (
-            f"unexpected leftover shape: {p.name}"
-        )
+    assert leftovers == [], f"unexpected leftover temp files: {leftovers}"
 
 
 @pytest.fixture
 def non_mocked_hosts() -> list[str]:
-    """Tell pytest-httpx to NOT intercept calls to googleapis.com only — we
-    want to intercept those — but allow other hosts through. Returning an
-    empty list means "intercept everything matching the registered URLs."
-    """
+    """Empty list: intercept all hosts via pytest-httpx. No real network."""
     return []

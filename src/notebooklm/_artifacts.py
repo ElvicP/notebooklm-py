@@ -2339,15 +2339,22 @@ class ArtifactsAPI:
         os.close(fd)
         temp_file = Path(temp_path_str)
 
-        # Load cookies with domain info for cross-domain redirect handling
-        cookies = load_httpx_cookies(path=self._storage_path)
-
-        # Use granular timeouts: 10s to connect, 30s per chunk read/write
-        # This allows large files to download without timeout while still
-        # detecting network failures quickly
-        timeout = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=30.0)
-
+        # NOTE: outer try MUST start here, immediately after the temp file
+        # exists on disk, so the ``except BaseException`` cleanup at the
+        # bottom unlinks the empty temp if anything between mkstemp and the
+        # download (e.g. ``load_httpx_cookies``) raises. Pre-existing code
+        # had `temp_file = output_file.with_suffix(...)` which only built a
+        # ``Path`` (no filesystem entry); switching to mkstemp creates the
+        # file immediately, so the cleanup window must widen.
         try:
+            # Load cookies with domain info for cross-domain redirect handling
+            cookies = load_httpx_cookies(path=self._storage_path)
+
+            # Use granular timeouts: 10s to connect, 30s per chunk read/write
+            # This allows large files to download without timeout while still
+            # detecting network failures quickly
+            timeout = httpx.Timeout(connect=10.0, read=30.0, write=30.0, pool=30.0)
+
             try:
                 # Nested context managers required: client.stream() returns an
                 # async context manager that must run within the client's scope
