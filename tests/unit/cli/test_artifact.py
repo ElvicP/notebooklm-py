@@ -865,6 +865,79 @@ class TestArtifactWait:
             data = json.loads(result.output)
             assert data["status"] == "timeout"
 
+    def test_artifact_wait_invokes_console_status(self, runner, mock_auth):
+        """`artifact wait` wraps the polling call in `console.status` (P5.T2 / I7).
+
+        The spinner gives interactive users feedback during the blocking wait.
+        Asserts the wrap by patching `notebooklm.cli.artifact.console.status`
+        and confirming it is invoked exactly once with a message that mentions
+        the wait. Does not assert under `--json` because the JSON path
+        intentionally suppresses the spinner to keep stdout pure JSON.
+        """
+        with patch_client_for_module("artifact") as mock_client_cls:
+            mock_client = create_mock_client()
+            mock_client.artifacts.list = AsyncMock(
+                return_value=[Artifact(id="art_123", title="Test", _artifact_type=1, status=3)]
+            )
+            mock_client.artifacts.wait_for_completion = AsyncMock(
+                return_value=MagicMock(
+                    status="completed", url="https://example.com/audio.mp3", error=None
+                )
+            )
+            mock_client_cls.return_value = mock_client
+
+            with (
+                patch(
+                    "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+                ) as mock_fetch,
+                patch("notebooklm.cli.artifact.console.status") as mock_status,
+            ):
+                mock_fetch.return_value = ("csrf", "session")
+                mock_status.return_value.__enter__ = MagicMock(return_value=MagicMock())
+                mock_status.return_value.__exit__ = MagicMock(return_value=False)
+                result = runner.invoke(cli, ["artifact", "wait", "art_123", "-n", "nb_123"])
+
+            assert result.exit_code == 0, result.output
+            assert mock_status.called, "expected console.status to wrap the wait call"
+            status_msg = mock_status.call_args.args[0]
+            assert "artifact" in status_msg.lower() or "wait" in status_msg.lower(), (
+                f"expected status message to describe the wait, got: {status_msg!r}"
+            )
+
+    def test_artifact_wait_json_skips_console_status(self, runner, mock_auth):
+        """`artifact wait --json` must NOT invoke console.status (stdout stays JSON).
+
+        The spinner is suppressed under JSON mode so automation parsing stdout
+        does not see Rich escape sequences leak in (P5.T2 / I7).
+        """
+        with patch_client_for_module("artifact") as mock_client_cls:
+            mock_client = create_mock_client()
+            mock_client.artifacts.list = AsyncMock(
+                return_value=[Artifact(id="art_123", title="Test", _artifact_type=1, status=3)]
+            )
+            mock_client.artifacts.wait_for_completion = AsyncMock(
+                return_value=MagicMock(
+                    status="completed", url="https://example.com/audio.mp3", error=None
+                )
+            )
+            mock_client_cls.return_value = mock_client
+
+            with (
+                patch(
+                    "notebooklm.auth.fetch_tokens_with_domains", new_callable=AsyncMock
+                ) as mock_fetch,
+                patch("notebooklm.cli.artifact.console.status") as mock_status,
+            ):
+                mock_fetch.return_value = ("csrf", "session")
+                result = runner.invoke(
+                    cli, ["artifact", "wait", "art_123", "-n", "nb_123", "--json"]
+                )
+
+            assert result.exit_code == 0, result.output
+            assert not mock_status.called, (
+                "console.status must NOT be invoked under --json (would leak ANSI into stdout)"
+            )
+
 
 # =============================================================================
 # ARTIFACT SUGGESTIONS TESTS
