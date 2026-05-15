@@ -141,8 +141,14 @@ async def test_cancel_mid_close_does_not_leak_transport(
     except asyncio.CancelledError:
         pass
 
-    # Give shielded aclose a tick to finalize if it's still in progress.
-    await asyncio.sleep(0.01)
+    # Give the shielded aclose bounded time to finalize. asyncio.shield
+    # raises CancelledError in the outer task immediately, but the inner
+    # aclose() future keeps running — poll for completion rather than
+    # rely on a fixed sleep that could flake on a slow CI runner.
+    for _ in range(50):  # up to ~0.5s total
+        if http_client_ref.is_closed:
+            break
+        await asyncio.sleep(0.01)
 
     assert http_client_ref.is_closed, (
         "transport leaked: cancel during close left the httpx client open"
