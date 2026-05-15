@@ -42,8 +42,6 @@ chat_ask.yaml
 chat_ask_with_references.yaml
 example_httpbin_get.yaml
 example_httpbin_post.yaml
-sharing_get_status.yaml
-sharing_set_public.yaml
 sources_add_drive.yaml
 sources_add_file.yaml
 sources_check_freshness_drive.yaml
