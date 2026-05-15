@@ -88,7 +88,6 @@ async def _open_core_with_transport(transport: ConcurrentMockTransport) -> Clien
     return core
 
 
-@pytest.mark.asyncio
 async def test_harness_100_way_fanout_records_peak_inflight(
     mock_transport_concurrent: ConcurrentMockTransport,
 ) -> None:
@@ -157,7 +156,6 @@ async def test_harness_100_way_fanout_records_peak_inflight(
     )
 
 
-@pytest.mark.asyncio
 async def test_barrier_factory_releases_n_arrivers(
     barrier_factory,
 ) -> None:
@@ -178,7 +176,6 @@ async def test_barrier_factory_releases_n_arrivers(
     assert barrier.arrived_count == 3
 
 
-@pytest.mark.asyncio
 async def test_cancellation_helper_surfaces_label_on_timeout(
     cancellation_helper,
     caplog: pytest.LogCaptureFixture,

@@ -139,10 +139,12 @@ Per-bug tests live in `tests/integration/<bug-slug>/` (or a flat
 `tests/integration/test_<bug-slug>.py`), NOT in this package. They
 should:
 
-- Import fixtures from `tests.integration.concurrency.conftest` (the
-  fixtures are auto-discovered by pytest if the per-bug test lives
-  *underneath* this package, but explicit imports work for tests at
-  any path).
+- Use the fixtures by parameter name — pytest auto-discovers them via
+  this package's `conftest.py` for any test that lives *underneath*
+  `tests/integration/concurrency/`. (pytest fixtures are not imported,
+  they are injected by name.) If you need the *class* types for type
+  annotations or for constructing transports manually, import them:
+  `from tests.integration.concurrency.conftest import ConcurrentMockTransport, EventBarrier`.
 - Be one PR per bug.
 - Include a docstring linking the audit item (e.g.
   `audit/thread-safety-concurrency-audit.md#NN`).
@@ -164,7 +166,9 @@ collection, so a `tests/integration/concurrent/` directory would shadow
 project's deps do). Renaming to `concurrency/` sidesteps the collision
 without changing the semantic intent.
 
-## Plan reference
+## Parent arc
 
-- Plan: [`.sisyphus/plans/tier-7-thread-safety-concurrency/phase-1.md#T7.A1`](../../../.sisyphus/plans/tier-7-thread-safety-concurrency/phase-1.md#T7.A1)
-- Parent arc: Tier 7 thread-safety / concurrency remediation
+- Tier 7 thread-safety / concurrency remediation. Per-task plans are
+  tracked locally (the `.sisyphus/` tree is gitignored); each Phase 2
+  fix PR will reference its source audit item directly in its
+  description and commit message.

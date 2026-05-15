@@ -44,6 +44,7 @@ import asyncio
 import json
 import logging
 import traceback
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
@@ -92,6 +93,11 @@ class _InflightTracker:
             self.peak = self.current
 
     def exit(self) -> None:
+        # Hard assert: a double-`finally` or transport-reuse bug would
+        # silently drive `current` negative and quietly invalidate every
+        # peak assertion downstream. As a test helper we want loud
+        # failure, not silent corruption.
+        assert self.current > 0, "exit() called more times than enter()"
         self.current -= 1
 
 
@@ -144,7 +150,10 @@ class ConcurrentMockTransport(httpx.AsyncBaseTransport):
 
     def __init__(self, *, default_delay: float = 0.05) -> None:
         self._tracker = _InflightTracker()
-        self._queue: list[ConcurrentMockTransport._QueuedResponse] = []
+        # ``deque`` for O(1) FIFO popleft. ``list.pop(0)`` shifts the whole
+        # backing array each dequeue; immaterial at ~100 items but the wrong
+        # data structure for a queue.
+        self._queue: deque[ConcurrentMockTransport._QueuedResponse] = deque()
         self._delay: float = default_delay
         self._captured: list[httpx.Request] = []
         self._request_count: int = 0
@@ -215,7 +224,7 @@ class ConcurrentMockTransport(httpx.AsyncBaseTransport):
     def _next_response(self, request: httpx.Request) -> httpx.Response:
         if not self._queue:
             return httpx.Response(200, text=_default_rpc_response_text())
-        item = self._queue.pop(0)
+        item = self._queue.popleft()
         if isinstance(item, httpx.Response):
             return item
         if isinstance(item, tuple):
