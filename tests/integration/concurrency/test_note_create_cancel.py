@@ -112,6 +112,7 @@ class _NoteCancelTransport(httpx.AsyncBaseTransport):
         return [rpc_id for rpc_id, _ in self.captured]
 
 
+@pytest.mark.asyncio
 async def test_cancel_during_update_note_shields_or_cleans_up(auth_tokens) -> None:
     """Cancel after CREATE_NOTE / before UPDATE_NOTE completes.
 

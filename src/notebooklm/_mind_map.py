@@ -23,6 +23,13 @@ from .types import Note
 
 logger = logging.getLogger(__name__)
 
+# Strong references for fire-and-forget cleanup tasks. ``asyncio.create_task``
+# returns a Task that the event loop only holds via a weak reference, so an
+# unrooted Task can be garbage-collected mid-execution — losing the orphan-row
+# cleanup the T7.C4 shield is supposed to guarantee. Each created task adds
+# itself here and removes itself in a done-callback so the set stays bounded.
+_cleanup_tasks: set[asyncio.Task[Any]] = set()
+
 
 async def _delete_note_best_effort(core: ClientCore, notebook_id: str, note_id: str) -> None:
     """Best-effort DELETE_NOTE cleanup for a partially-finalized create.
@@ -203,17 +210,25 @@ async def create_note(
         # T7.C4: shield the UPDATE_NOTE finalize from outer cancellation.
         # CREATE_NOTE has already persisted a row server-side; without the
         # shield, a cancel arriving between CREATE_NOTE and UPDATE_NOTE
-        # completion leaves an orphan row with no title/content. If the
-        # outer cancel still propagates (the await released before finalize
-        # completed), schedule a fire-and-forget DELETE_NOTE to remove the
-        # orphan row — the task handle is intentionally discarded so the
-        # CancelledError re-raise never blocks on cleanup.
+        # completion leaves an orphan row with no title/content.
+        #
+        # When CancelledError lands here, the shielded UPDATE_NOTE Task is
+        # still running on the loop. Fire a best-effort DELETE_NOTE that
+        # covers both sub-cases:
+        #   (a) UPDATE_NOTE hasn't applied yet → orphan-row cleanup.
+        #   (b) UPDATE_NOTE completes between the cancel and DELETE_NOTE →
+        #       the now-applied note is deleted; caller's cancel intent
+        #       (note should not exist) is honoured.
+        # Strong-ref the cleanup task in ``_cleanup_tasks`` so the loop's
+        # weak-ref Task storage cannot GC it mid-flight (RUF006); the
+        # done-callback discards on completion so the set stays bounded.
+        # The re-raise never awaits the cleanup task.
         try:
             await asyncio.shield(update_note(core, notebook_id, note_id, content, title))
         except asyncio.CancelledError:
-            asyncio.create_task(  # noqa: RUF006 — fire-and-forget by design
-                _delete_note_best_effort(core, notebook_id, note_id)
-            )
+            cleanup_task = asyncio.create_task(_delete_note_best_effort(core, notebook_id, note_id))
+            _cleanup_tasks.add(cleanup_task)
+            cleanup_task.add_done_callback(_cleanup_tasks.discard)
             raise
 
     return Note(
