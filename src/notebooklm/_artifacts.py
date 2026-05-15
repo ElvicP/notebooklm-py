@@ -12,7 +12,9 @@ import csv
 import html
 import json
 import logging
+import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -2321,8 +2323,21 @@ class ArtifactsAPI:
         output_file = Path(output_path)
         output_file.parent.mkdir(parents=True, exist_ok=True)
 
-        # Use temp file to avoid leaving corrupted partial files on failure
-        temp_file = output_file.with_suffix(output_file.suffix + ".tmp")
+        # Use a unique temp file per call (not ``<output>.tmp``) so two
+        # concurrent downloads targeting the same ``output_path`` cannot
+        # interleave bytes into a shared file or have one task's
+        # ``rename`` clobber the other's. ``mkstemp`` creates+opens an
+        # exclusive FD; we close it immediately and re-open via ``open``
+        # in the worker-thread write loop below — passing the raw FD
+        # into ``asyncio.to_thread(f.write, ...)`` would risk Windows
+        # sharing violations and FD leaks across the rename.
+        fd, temp_path_str = tempfile.mkstemp(
+            dir=output_file.parent,
+            prefix=output_file.name + ".",
+            suffix=".tmp",
+        )
+        os.close(fd)
+        temp_file = Path(temp_path_str)
 
         # Load cookies with domain info for cross-domain redirect handling
         cookies = load_httpx_cookies(path=self._storage_path)
@@ -2387,8 +2402,11 @@ class ArtifactsAPI:
                                 ),
                             )
 
-                        # Only move to final location on success
-                        temp_file.rename(output_file)
+                        # Only move to final location on success.
+                        # ``os.replace`` is atomic on POSIX and overwrites on
+                        # Windows; ``Path.rename`` would raise on Windows when
+                        # ``output_file`` already exists.
+                        os.replace(temp_file, output_file)
                         # Log host+path only; full URLs may carry capability
                         # tokens in query params (see _download_urls_batch for
                         # the same redaction pattern).
