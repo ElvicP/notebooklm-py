@@ -13,6 +13,7 @@ raw RPC-shaped data (lists). Higher-level dataclass parsing stays in
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -21,6 +22,32 @@ from .rpc import RPCMethod
 from .types import Note
 
 logger = logging.getLogger(__name__)
+
+
+async def _delete_note_best_effort(core: ClientCore, notebook_id: str, note_id: str) -> None:
+    """Best-effort DELETE_NOTE cleanup for a partially-finalized create.
+
+    Used as a fire-and-forget ``asyncio.create_task`` target when an
+    outer cancel arrives mid-UPDATE_NOTE: we never block the re-raise on
+    this call, and any failure (network, auth refresh, etc.) is logged
+    and swallowed — the only side-effect we want is the orphan-row
+    removal, not a secondary exception.
+    """
+    try:
+        params = [notebook_id, None, [note_id]]
+        await core.rpc_call(
+            RPCMethod.DELETE_NOTE,
+            params,
+            source_path=f"/notebook/{notebook_id}",
+            allow_null=True,
+        )
+    except Exception:  # noqa: BLE001 — best-effort cleanup, must not surface
+        logger.warning(
+            "Best-effort DELETE_NOTE cleanup failed for note %s in notebook %s",
+            note_id,
+            notebook_id,
+            exc_info=True,
+        )
 
 
 async def fetch_all_notes_and_mind_maps(core: ClientCore, notebook_id: str) -> list[Any]:
@@ -172,7 +199,25 @@ async def create_note(
     if note_id:
         # CREATE_NOTE ignores the title param server-side, so set it via
         # UPDATE_NOTE alongside the actual content payload.
-        await update_note(core, notebook_id, note_id, content, title)
+        #
+        # T7.C4: shield the UPDATE_NOTE finalize from outer cancellation.
+        # CREATE_NOTE has already persisted a row server-side; without the
+        # shield, a cancel arriving between CREATE_NOTE and UPDATE_NOTE
+        # completion leaves an orphan row with no title/content. The shield
+        # lets the in-flight finalize run to completion; if the outer cancel
+        # still propagates (await released before finalize completed), fire
+        # a best-effort DELETE_NOTE via create_task — NOT awaited, so the
+        # re-raise is never blocked on cleanup — to remove the orphan row.
+        try:
+            await asyncio.shield(update_note(core, notebook_id, note_id, content, title))
+        except asyncio.CancelledError:
+            # Fire-and-forget cleanup. We deliberately discard the task
+            # handle: callers cancelling create_note() must not be made to
+            # wait on (or even know about) the cleanup.
+            asyncio.create_task(  # noqa: RUF006 — fire-and-forget by design
+                _delete_note_best_effort(core, notebook_id, note_id)
+            )
+            raise
 
     return Note(
         id=note_id or "",
