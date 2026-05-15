@@ -509,6 +509,20 @@ class ClientCore:
         one open file descriptor for its duration, so the cap is also an
         FD-exhaustion guard (audit §23 / T7.D3).
 
+        Scope of the cap:
+          - The ``async with`` block in ``add_file`` covers FD-open,
+            the two pre-upload RPCs (``_register_file_source`` and
+            ``_start_resumable_upload``), and the streaming upload. The
+            semaphore therefore also serializes those two RPCs — a side
+            effect of the FD guard, not a separate quota.
+          - The cap applies to the *blocking* ``add_file`` call. On
+            post-finalize cancel (T7.C3), the shielded background
+            ``finalize_task`` continues running with the FD still open
+            after ``add_file``'s ``async with`` exits, so the
+            instantaneous open-FD count can briefly exceed
+            ``max_concurrent_uploads`` by the number of concurrently
+            draining background tasks.
+
         Lazy construction is required because ``asyncio.Semaphore()`` in
         some Python versions binds to the running event loop at creation
         time, and ``ClientCore`` can be constructed outside any loop.

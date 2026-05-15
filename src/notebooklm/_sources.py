@@ -1616,9 +1616,11 @@ class SourcesAPI:
                 # branch where the caller is long gone. The Path-branch
                 # closes its FD inside the generator's ``with`` block and
                 # does NOT need this hook.
-                if path_fallback is None and not isinstance(file_obj, Path):
+                if path_fallback is None:
+                    # path_fallback is None ⇔ file_obj is not a Path (see
+                    # line 1545 where path_fallback is derived).
                     try:
-                        file_obj.close()
+                        file_obj.close()  # type: ignore[union-attr]
                     except Exception as close_exc:  # noqa: BLE001 — defensive
                         # Already-closed / detached FD: harmless. Log at debug
                         # so a real misconfiguration is still discoverable.
@@ -1662,9 +1664,10 @@ class SourcesAPI:
             # done-callback is wired (``close_wired=True``), the task's
             # done-callback handles close on every termination path,
             # so we skip the local close to avoid double-close.
-            if not close_wired and path_fallback is None and not isinstance(file_obj, Path):
+            if not close_wired and path_fallback is None:
+                # path_fallback is None ⇔ file_obj is not a Path.
                 try:
-                    file_obj.close()
+                    file_obj.close()  # type: ignore[union-attr]
                 except Exception as close_exc:  # noqa: BLE001 — defensive
                     logger.debug("Caller FD close on pre-wire exception failed: %r", close_exc)
             raise
