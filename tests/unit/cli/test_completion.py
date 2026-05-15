@@ -432,6 +432,29 @@ class TestCompleteSourcesAndArtifacts:
 
         assert items == []
 
+    def test_complete_artifacts_swallows_listing_error(self):
+        """Parity with ``test_complete_sources_swallows_listing_error`` —
+        the ``-a/--artifact`` completer must also degrade silently on a
+        ``artifacts.list(...)`` failure so the "never traceback during TAB"
+        contract holds across BOTH sub-resource completers (CodeRabbit
+        nitpick on PR #522).
+        """
+        from notebooklm.cli import options
+
+        fake_client = AsyncMock()
+        fake_client.__aenter__.return_value = fake_client
+        fake_client.__aexit__.return_value = None
+        fake_client.artifacts.list = AsyncMock(side_effect=RuntimeError("boom"))
+
+        with (
+            patch.object(options, "_resolve_notebook_for_completion", return_value="nb_x"),
+            patch("notebooklm.cli.helpers.get_auth_tokens", return_value=object()),
+            patch("notebooklm.client.NotebookLMClient", return_value=fake_client),
+        ):
+            items = options._complete_artifacts(ctx=None, param=None, incomplete="art_")
+
+        assert items == []
+
 
 # ---------------------------------------------------------------------------
 # Wiring assertions: confirm the option decorators bind the callbacks
