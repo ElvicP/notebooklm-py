@@ -3903,3 +3903,104 @@ class TestChromiumFanoutAccountSelector:
         # Critically: bob's cookies must come from Profile 1, NOT Default.
         # Before #571 the CLI couldn't see Profile 1 at all.
         assert sid["value"] == "SID-from-Profile 1"
+
+
+class TestChromiumFanoutBoundaryConditions:
+    """Boundary cases around when fan-out activates vs. legacy single-jar
+    path (raised by reviewers on #580)."""
+
+    def test_single_chromium_profile_uses_legacy_single_jar_path(self, runner):
+        """When discovery surfaces exactly ONE chromium user-profile, the
+        legacy ``_read_browser_cookies`` path runs (so existing rookiepy
+        mocks keep working). The new ``read_chromium_profile_cookies`` /
+        ``any_browser`` fan-out path must NOT be invoked.
+        """
+        from notebooklm.cli._chromium_profiles import ChromiumProfile
+
+        only_default = [
+            ChromiumProfile(
+                browser="chrome",
+                directory_name="Default",
+                human_name="Default",
+                cookies_db=Path("/dev/null"),
+            )
+        ]
+
+        mock_rk = _multiaccount_rookiepy_mock()
+
+        async def _enum(*args, **kwargs):
+            from notebooklm.auth import Account
+
+            return [Account(authuser=0, email="alice@example.com", is_default=True)]
+
+        with (
+            patch.dict("sys.modules", {"rookiepy": mock_rk}),
+            patch(
+                "notebooklm.cli._chromium_profiles.discover_chromium_profiles",
+                return_value=only_default,
+            ),
+            patch(
+                "notebooklm.cli._chromium_profiles.read_chromium_profile_cookies",
+                side_effect=AssertionError(
+                    "fan-out must NOT run when only 1 chromium profile exists"
+                ),
+            ),
+            patch("notebooklm.auth.enumerate_accounts", new=_enum),
+        ):
+            result = runner.invoke(cli, ["auth", "inspect", "--browser", "chrome"])
+
+        assert result.exit_code == 0, result.output
+        # Legacy path was used → mock_rk.chrome was called, not any_browser.
+        mock_rk.chrome.assert_called_once()
+        assert "alice@example.com" in result.output
+
+    def test_network_error_aborts_fanout_not_silent_skip(self, runner, tmp_path):
+        """``httpx.RequestError`` during ``enumerate_accounts`` must abort
+        the entire fan-out with a clear network error, not get caught as
+        a per-profile "signed out" skip. (CodeRabbit major on #580.)
+        """
+        profiles, cookies, _ = _chromium_fanout_setup(
+            tmp_path,
+            [
+                (
+                    "Default",
+                    "Personal",
+                    [{"authuser": 0, "email": "alice@gmail.com", "is_default": True}],
+                ),
+                (
+                    "Profile 1",
+                    "Work",
+                    [{"authuser": 0, "email": "bob@gmail.com", "is_default": True}],
+                ),
+            ],
+        )
+
+        async def fake_enumerate(jar, *args, **kwargs):
+            raise httpx.ConnectError("DNS failure: notebooklm.google.com")
+
+        def fake_discover(browser_name):
+            return profiles if browser_name.lower() == "chrome" else []
+
+        def fake_read(profile, *, domains):
+            return cookies[profile.directory_name]
+
+        with (
+            patch.dict("sys.modules", {"rookiepy": MagicMock()}),
+            patch(
+                "notebooklm.cli._chromium_profiles.discover_chromium_profiles",
+                side_effect=fake_discover,
+            ),
+            patch(
+                "notebooklm.cli._chromium_profiles.read_chromium_profile_cookies",
+                side_effect=fake_read,
+            ),
+            patch("notebooklm.auth.enumerate_accounts", side_effect=fake_enumerate),
+        ):
+            result = runner.invoke(cli, ["auth", "inspect", "--browser", "chrome"])
+
+        # Fan-out must abort with non-zero exit + a network error message —
+        # NOT silently return "No accounts found" by collapsing each profile
+        # probe into the soft signed-out skip.
+        assert result.exit_code != 0, result.output
+        assert "network" in result.output.lower()
+        assert "DNS failure" in result.output

@@ -253,8 +253,12 @@ def read_chromium_profile_cookies(
         Raw cookie dicts (rookiepy's native shape).
 
     Raises:
-        RuntimeError: When rookiepy fails to read or decrypt the DB. Caller
-            decides whether to skip-and-warn or propagate.
+        ImportError: When the optional ``rookiepy`` dependency isn't
+            installed. The CLI fan-out caller converts this to a friendly
+            "pip install 'notebooklm-py[cookies]'" message.
+        OSError, RuntimeError: Propagated from rookiepy on read or decrypt
+            failure (locked DB, corrupt Keychain item, etc.). Caller decides
+            whether to skip-and-warn or propagate.
     """
     import rookiepy  # imported lazily; rookiepy is an optional extra
 

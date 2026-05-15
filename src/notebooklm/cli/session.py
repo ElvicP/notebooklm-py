@@ -30,6 +30,8 @@ if TYPE_CHECKING:
     from playwright.sync_api import BrowserContext, Page
     from rich.console import Console
 
+    from ..auth import Account
+
 from ..auth import (
     GOOGLE_REGIONAL_CCTLDS,
     OPTIONAL_COOKIE_DOMAINS_BY_LABEL,
@@ -186,7 +188,7 @@ def _enumerate_one_jar(
     browser_profile: str | None,
     *,
     quiet: bool = False,
-) -> list[Any]:
+) -> "list[Account]":
     """Probe ``?authuser=N`` against one cookie set and return tagged Accounts.
 
     Shared by both the legacy single-jar path and the chromium multi-profile
@@ -200,14 +202,22 @@ def _enumerate_one_jar(
             ``"Profile 1"``, ...) or ``None`` for the legacy single-jar path.
         quiet: Suppress the loud multi-line user-facing error panels
             (``"No valid Google authentication cookies"``, ``"Account
-            discovery failed: …stale"``) and just raise ``SystemExit``. Used
-            by the fan-out caller, which prints its own per-profile soft
-            note for signed-out / stale-cookie profiles and would otherwise
-            bleed those panels into the table output.
+            discovery failed: …stale"``) for "this profile is signed out"
+            cases and just raise ``SystemExit``. Used by the fan-out caller,
+            which prints its own per-profile soft note for signed-out /
+            stale-cookie profiles and would otherwise bleed those panels into
+            the table output. Network errors (``httpx.RequestError``) are
+            NOT downgraded — they propagate as-is so the caller can
+            distinguish transport failures from per-profile "signed out".
 
     Raises:
-        SystemExit: On missing required cookies, stale-cookie rejection by
-            Google, or HTTP transport failure.
+        SystemExit: On missing required cookies or stale-cookie rejection
+            by Google (Google redirected to the account chooser, etc.).
+            These are per-profile "signed out" conditions in fan-out mode
+            and are caught and skipped by the fan-out caller.
+        httpx.RequestError: On network transport failure. Re-raised
+            unchanged so the fan-out aborts (vs. silently downgrading every
+            offline profile to a soft skip).
     """
     from ..auth import (
         Account,
@@ -247,12 +257,17 @@ def _enumerate_one_jar(
             )
         raise SystemExit(1) from None
     except httpx.RequestError as e:
+        # Distinct from "signed out / stale" SystemExit branches above:
+        # a network failure means EVERY profile probe will fail the same
+        # way, so we must surface the transport error rather than let the
+        # fan-out caller collapse it into a soft per-profile skip.
         if not quiet:
             console.print(
                 f"[red]Account discovery failed (network error):[/red] {e}\n"
                 "Check your internet connection and try again."
             )
-        raise SystemExit(1) from None
+            raise SystemExit(1) from None
+        raise
 
     if browser_profile is None:
         return list(accounts)
@@ -272,7 +287,7 @@ def _enumerate_browser_accounts(
     *,
     verbose: bool = True,
     include_domains: set[str] | None = None,
-) -> tuple[dict[str | None, list[dict[str, Any]]], list[Any]]:
+) -> "tuple[dict[str | None, list[dict[str, Any]]], list[Account]]":
     """Read cookies from ``browser_name`` and discover signed-in accounts.
 
     For chromium-family browsers with multiple populated user-data profiles
@@ -335,7 +350,7 @@ def _enumerate_chromium_profiles_fanout(
     *,
     verbose: bool,
     include_domains: set[str] | None,
-) -> tuple[dict[str | None, list[dict[str, Any]]], list[Any]]:
+) -> "tuple[dict[str | None, list[dict[str, Any]]], list[Account]]":
     """Fan out account discovery across multiple Chromium user-data profiles.
 
     Reads cookies from each profile's own ``Cookies`` SQLite DB and probes
@@ -359,12 +374,24 @@ def _enumerate_chromium_profiles_fanout(
 
     per_profile_cookies: dict[str | None, list[dict[str, Any]]] = {}
     seen_emails: dict[str, str] = {}  # email -> winning browser_profile
-    aggregated: list[Any] = []
+    aggregated: list[Account] = []
     global_default_assigned = False
 
     for profile in profiles:
         try:
             raw = read_chromium_profile_cookies(profile, domains=domains)
+        except ImportError:
+            # rookiepy isn't installed — same friendly message the legacy
+            # single-jar path prints (``_read_browser_cookies``). Abort fan-out
+            # since every profile would fail the same way.
+            console.print(
+                "[red]rookiepy is not installed.[/red]\n"
+                "Install it with:\n"
+                "  pip install 'notebooklm-py[cookies]'\n"
+                "or directly:\n"
+                "  pip install rookiepy"
+            )
+            raise SystemExit(1) from None
         except (OSError, RuntimeError) as e:
             # One profile failing (e.g. a locked DB) shouldn't kill discovery
             # of the others. Surface a per-profile note and continue.
@@ -391,6 +418,15 @@ def _enumerate_chromium_profiles_fanout(
                     f"  [dim]no signed-in Google accounts in '{profile.human_name}'[/dim]"
                 )
             continue
+        except httpx.RequestError as e:
+            # Network failure — every subsequent profile probe will hit the
+            # same error, so abort the entire fan-out rather than collapse
+            # the transport failure into per-profile "signed out" skips.
+            console.print(
+                f"[red]Account discovery failed (network error):[/red] {e}\n"
+                "Check your internet connection and try again."
+            )
+            raise SystemExit(1) from None
 
         per_profile_cookies[profile.directory_name] = raw
         for account in accounts:
