@@ -27,6 +27,8 @@ Security Notes:
     - Path traversal protection is enforced on all file operations
 """
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import errno
@@ -442,7 +444,7 @@ class AuthTokens:
     @classmethod
     async def from_storage(
         cls, path: Path | None = None, profile: str | None = None
-    ) -> "AuthTokens":
+    ) -> AuthTokens:
         """Create AuthTokens from Playwright storage state file.
 
         This is the recommended way to create AuthTokens for programmatic use.
@@ -1497,7 +1499,7 @@ def _is_allowed_cookie_domain(domain: str) -> bool:
     return any(domain.endswith(suffix) for suffix in allowed_suffixes)
 
 
-def load_httpx_cookies(path: Path | None = None) -> "httpx.Cookies":
+def load_httpx_cookies(path: Path | None = None) -> httpx.Cookies:
     """Load cookies as an httpx.Cookies object for authenticated downloads.
 
     Unlike load_auth_from_storage() which returns a simple dict, this function
@@ -1577,7 +1579,7 @@ def extract_cookies_with_domains(
     return cookie_map
 
 
-def build_httpx_cookies_from_storage(path: Path | None = None) -> "httpx.Cookies":
+def build_httpx_cookies_from_storage(path: Path | None = None) -> httpx.Cookies:
     """Build an httpx.Cookies jar with original domains preserved.
 
     This function loads cookies from storage and creates a proper httpx.Cookies
@@ -2400,7 +2402,7 @@ _REFRESH_ATTEMPTED_CONTEXT: ContextVar[bool] = ContextVar(
 #   uses it. The outer ``WeakKeyDictionary`` is keyed on the loop object so
 #   the inner dict is reclaimed when the loop is garbage-collected.
 _REFRESH_STATE_LOCK = threading.Lock()
-_REFRESH_LOCKS_BY_LOOP: "weakref.WeakKeyDictionary[Any, dict[Path | None, asyncio.Lock]]" = (
+_REFRESH_LOCKS_BY_LOOP: weakref.WeakKeyDictionary[Any, dict[Path | None, asyncio.Lock]] = (
     weakref.WeakKeyDictionary()
 )
 _REFRESH_GENERATIONS: dict[str, int] = {}
@@ -2766,7 +2768,7 @@ _KEEPALIVE_PRECISION_TOLERANCE = 2.0
 # It is held briefly, never across an ``await``, so it cannot deadlock against
 # any asyncio primitive.
 _POKE_STATE_LOCK = threading.Lock()
-_POKE_LOCKS_BY_LOOP: "weakref.WeakKeyDictionary[Any, dict[Path | None, asyncio.Lock]]" = (
+_POKE_LOCKS_BY_LOOP: weakref.WeakKeyDictionary[Any, dict[Path | None, asyncio.Lock]] = (
     weakref.WeakKeyDictionary()
 )
 # Monotonic timestamp of the last in-process poke *attempt* (success or

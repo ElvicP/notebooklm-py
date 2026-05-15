@@ -1,5 +1,7 @@
 """Agent integration commands."""
 
+from __future__ import annotations
+
 import click
 
 from .agent_templates import get_agent_source_content

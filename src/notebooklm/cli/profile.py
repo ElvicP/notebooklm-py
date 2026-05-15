@@ -8,6 +8,8 @@ Commands:
     profile rename    Rename a profile
 """
 
+from __future__ import annotations
+
 import json
 import os
 import re

@@ -6,6 +6,8 @@ Commands:
     history    Get conversation history or clear local cache
 """
 
+from __future__ import annotations
+
 import logging
 
 import click

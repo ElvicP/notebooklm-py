@@ -4,6 +4,8 @@ Provides operations for asking questions, managing conversations, and
 retrieving conversation history.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import re

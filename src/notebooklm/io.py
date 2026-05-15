@@ -5,6 +5,8 @@ Exists so :mod:`notebooklm.cli` can import :func:`atomic_write_json` /
 (no ``notebooklm._*`` imports). See ``tests/unit/test_cli_boundary.py``.
 """
 
+from __future__ import annotations
+
 from ._atomic_io import atomic_update_json, atomic_write_json
 
 __all__ = ["atomic_update_json", "atomic_write_json"]

@@ -4,6 +4,8 @@ Provides operations for starting research sessions, polling for results,
 and importing discovered sources into notebooks.
 """
 
+from __future__ import annotations
+
 import logging
 from typing import Any
 

@@ -9,11 +9,13 @@ Usage:
     from notebooklm.types import SourceType, ArtifactType  # str enums for .kind
 """
 
+from __future__ import annotations
+
 import warnings
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import httpx
@@ -103,7 +105,7 @@ class ConnectionLimits:
     keepalive_expiry: float = 30.0
     """Seconds an idle connection stays in the pool before being closed."""
 
-    def to_httpx_limits(self) -> "httpx.Limits":
+    def to_httpx_limits(self) -> httpx.Limits:
         """Map to ``httpx.Limits`` (lazy import to keep types.py dep-light)."""
         import httpx
 
@@ -591,7 +593,7 @@ class Notebook:
     is_owner: bool = True
 
     @classmethod
-    def from_api_response(cls, data: list[Any]) -> "Notebook":
+    def from_api_response(cls, data: list[Any]) -> Notebook:
         """Parse notebook from API response.
 
         Args:
@@ -641,7 +643,7 @@ class NotebookDescription:
     suggested_topics: list[SuggestedTopic] = field(default_factory=list)
 
     @classmethod
-    def from_api_response(cls, data: dict[str, Any]) -> "NotebookDescription":
+    def from_api_response(cls, data: dict[str, Any]) -> NotebookDescription:
         """Parse from get_notebook_description() response."""
         topics = [
             SuggestedTopic(question=t.get("question", ""), prompt=t.get("prompt", ""))
@@ -776,7 +778,7 @@ class Source:
         return self.status == SourceStatus.ERROR
 
     @classmethod
-    def from_api_response(cls, data: list[Any], notebook_id: str | None = None) -> "Source":
+    def from_api_response(cls, data: list[Any], notebook_id: str | None = None) -> Source:
         """Parse source data from various API response formats.
 
         The API returns different structures for different operations:
@@ -1031,7 +1033,7 @@ class Artifact:
         return self._variant
 
     @classmethod
-    def from_api_response(cls, data: list[Any]) -> "Artifact":
+    def from_api_response(cls, data: list[Any]) -> Artifact:
         """Parse artifact from API response.
 
         Structure: [id, title, type, ..., status, ..., metadata, ...]
@@ -1068,7 +1070,7 @@ class Artifact:
         )
 
     @classmethod
-    def from_mind_map(cls, data: list[Any]) -> Optional["Artifact"]:
+    def from_mind_map(cls, data: list[Any]) -> Artifact | None:
         """Parse artifact from mind map data (stored in notes system).
 
         Mind map structure:
@@ -1268,7 +1270,7 @@ class ReportSuggestion:
     audience_level: int = 2  # 1=beginner, 2=advanced
 
     @classmethod
-    def from_api_response(cls, data: dict[str, Any]) -> "ReportSuggestion":
+    def from_api_response(cls, data: dict[str, Any]) -> ReportSuggestion:
         """Parse from get_suggested_report_formats() response item."""
         return cls(
             title=data.get("title", ""),
@@ -1299,7 +1301,7 @@ class Note:
     created_at: datetime | None = None
 
     @classmethod
-    def from_api_response(cls, data: list[Any], notebook_id: str) -> "Note":
+    def from_api_response(cls, data: list[Any], notebook_id: str) -> Note:
         """Parse note from API response.
 
         Args:
@@ -1382,7 +1384,7 @@ class AskResult:
     conversation_id: str
     turn_number: int
     is_follow_up: bool
-    references: list["ChatReference"] = field(default_factory=list)
+    references: list[ChatReference] = field(default_factory=list)
     raw_response: str = ""
 
 
@@ -1401,7 +1403,7 @@ class SharedUser:
     avatar_url: str | None = None
 
     @classmethod
-    def from_api_response(cls, data: list[Any]) -> "SharedUser":
+    def from_api_response(cls, data: list[Any]) -> SharedUser:
         """Parse from GET_SHARE_STATUS user entry.
 
         Entry format: [email, permission, [], [name, avatar]]
@@ -1440,7 +1442,7 @@ class ShareStatus:
     share_url: str | None = None
 
     @classmethod
-    def from_api_response(cls, data: list[Any], notebook_id: str) -> "ShareStatus":
+    def from_api_response(cls, data: list[Any], notebook_id: str) -> ShareStatus:
         """Parse from GET_SHARE_STATUS response.
 
         Response format: [[[user_entries]], [is_public], 1000]

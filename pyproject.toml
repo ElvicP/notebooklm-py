@@ -178,6 +178,7 @@ select = [
     "C4",     # flake8-comprehensions
     "UP",     # pyupgrade
     "SIM",    # flake8-simplify
+    "FA",     # flake8-future-annotations (enforce `from __future__ import annotations`)
 ]
 ignore = [
     "E501",   # line too long (handled by formatter)

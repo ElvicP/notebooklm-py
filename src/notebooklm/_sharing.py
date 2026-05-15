@@ -1,5 +1,7 @@
 """Sharing operations API."""
 
+from __future__ import annotations
+
 import logging
 
 from ._core import ClientCore

@@ -19,6 +19,8 @@ Example:
         result = await client.chat.ask(notebook_id, "What is this about?")
 """
 
+from __future__ import annotations
+
 import dataclasses
 import logging
 import os
@@ -95,7 +97,7 @@ class NotebookLMClient:
         keepalive_min_interval: float = DEFAULT_KEEPALIVE_MIN_INTERVAL,
         rate_limit_max_retries: int = 0,
         server_error_max_retries: int = 3,
-        limits: "ConnectionLimits | None" = None,
+        limits: ConnectionLimits | None = None,
         max_concurrent_uploads: int | None = DEFAULT_MAX_CONCURRENT_UPLOADS,
     ):
         """Initialize the NotebookLM client.
@@ -186,7 +188,7 @@ class NotebookLMClient:
         """Get the authentication tokens."""
         return self._core.auth
 
-    async def __aenter__(self) -> "NotebookLMClient":
+    async def __aenter__(self) -> NotebookLMClient:
         """Open the client connection."""
         logger.debug("Opening NotebookLM client")
         await self._core.open()
@@ -234,9 +236,9 @@ class NotebookLMClient:
         keepalive_min_interval: float = DEFAULT_KEEPALIVE_MIN_INTERVAL,
         rate_limit_max_retries: int = 0,
         server_error_max_retries: int = 3,
-        limits: "ConnectionLimits | None" = None,
+        limits: ConnectionLimits | None = None,
         max_concurrent_uploads: int | None = DEFAULT_MAX_CONCURRENT_UPLOADS,
-    ) -> "NotebookLMClient":
+    ) -> NotebookLMClient:
         """Create a client from Playwright storage state file.
 
         This is the recommended way to create a client for programmatic use.

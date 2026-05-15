@@ -1,5 +1,7 @@
 """RPC protocol implementation for NotebookLM batchexecute API."""
 
+from __future__ import annotations
+
 from .decoder import (
     AuthError,
     ClientError,

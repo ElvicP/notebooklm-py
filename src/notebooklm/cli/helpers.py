@@ -9,6 +9,8 @@ Provides common functionality for all CLI commands:
 - @with_client decorator for command boilerplate reduction
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
@@ -145,7 +147,7 @@ def _has_no_url_entry(sources: list[dict]) -> bool:
     return any(_source_url_norm(source) is None for source in sources)
 
 
-def _imported_source_entry(source: "Source") -> dict[str, str]:
+def _imported_source_entry(source: Source) -> dict[str, str]:
     return {"id": source.id, "title": source.title or source.url or ""}
 
 
@@ -1251,7 +1253,7 @@ def display_report(report: str, max_chars: int = 1000, json_hint: bool = True) -
 # =============================================================================
 
 
-def get_artifact_type_display(artifact: "Artifact") -> str:
+def get_artifact_type_display(artifact: Artifact) -> str:
     """Get display string for artifact type.
 
     Args:

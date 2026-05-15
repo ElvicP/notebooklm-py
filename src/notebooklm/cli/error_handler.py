@@ -4,6 +4,8 @@ This module provides a context manager for consistent error handling
 across all CLI commands.
 """
 
+from __future__ import annotations
+
 import json
 from collections.abc import Generator
 from contextlib import contextmanager

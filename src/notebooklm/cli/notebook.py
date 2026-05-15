@@ -11,6 +11,8 @@ Commands:
 Note: Sharing commands moved to 'share' command group.
 """
 
+from __future__ import annotations
+
 from typing import Literal
 
 import click

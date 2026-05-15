@@ -16,6 +16,8 @@ just gets no suggestions instead of an error printed by their shell. This
 keeps tab-completion safe to use even in fresh shells without credentials.
 """
 
+from __future__ import annotations
+
 import os
 from collections.abc import Callable
 

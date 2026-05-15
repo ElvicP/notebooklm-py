@@ -1,5 +1,7 @@
 """User settings API."""
 
+from __future__ import annotations
+
 import logging
 from collections.abc import Sequence
 from typing import Any

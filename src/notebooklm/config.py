@@ -1,5 +1,7 @@
 """Public runtime configuration surface (re-exports from internal _env)."""
 
+from __future__ import annotations
+
 from ._env import (
     DEFAULT_BASE_URL,
     ENTERPRISE_BASE_HOST,

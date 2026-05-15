@@ -1,5 +1,7 @@
 """Public URL helpers (re-exports from internal _url_utils)."""
 
+from __future__ import annotations
+
 from ._url_utils import (
     contains_google_auth_redirect,
     is_google_auth_redirect,

@@ -35,6 +35,8 @@ LLM-friendly design:
   notebooklm ask "what are the key themes?"
 """
 
+from __future__ import annotations
+
 # Runtime Python version guard (must run before any PEP 604 syntax is evaluated)
 import sys
 

@@ -1,5 +1,7 @@
 """Notebook operations API."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
@@ -130,7 +132,7 @@ class NotebooksAPI:
             await client.notebooks.rename(new_nb.id, "Better Title")
     """
 
-    def __init__(self, core: ClientCore, sources_api: "SourcesAPI | None" = None):
+    def __init__(self, core: ClientCore, sources_api: SourcesAPI | None = None):
         """Initialize the notebooks API.
 
         Args:

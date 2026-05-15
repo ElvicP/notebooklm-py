@@ -13,6 +13,8 @@ unbinned, untagged top-level command will fail the suite, surfacing the
 discoverability regression at PR review time.
 """
 
+from __future__ import annotations
+
 from collections import OrderedDict
 
 import click

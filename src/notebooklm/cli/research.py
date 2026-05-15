@@ -5,6 +5,8 @@ Commands:
     wait        Wait for research to complete (blocking)
 """
 
+from __future__ import annotations
+
 import asyncio
 
 import click

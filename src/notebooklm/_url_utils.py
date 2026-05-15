@@ -4,6 +4,8 @@ These helpers use proper URL parsing to avoid substring matching vulnerabilities
 flagged by CodeQL (py/incomplete-url-substring-sanitization).
 """
 
+from __future__ import annotations
+
 import re
 from urllib.parse import urlparse
 

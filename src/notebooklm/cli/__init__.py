@@ -16,6 +16,8 @@ Command groups are organized into separate modules:
 - profile.py: Profile management commands
 """
 
+from __future__ import annotations
+
 # Command groups (subcommand style)
 from .agent import agent
 from .artifact import artifact

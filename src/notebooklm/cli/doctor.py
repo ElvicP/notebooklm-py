@@ -4,6 +4,8 @@ Commands:
     doctor   Check profile setup, auth, and migration status
 """
 
+from __future__ import annotations
+
 import json
 import logging
 

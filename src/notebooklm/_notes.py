@@ -9,6 +9,8 @@ with :class:`ArtifactsAPI`. This module exposes them through the
 historical ``NotesAPI`` method surface for backward compatibility.
 """
 
+from __future__ import annotations
+
 import builtins
 import logging
 from typing import Any

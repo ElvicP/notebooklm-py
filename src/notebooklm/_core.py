@@ -1,5 +1,7 @@
 """Core infrastructure for NotebookLM API client."""
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import math
@@ -296,7 +298,7 @@ class ClientCore:
         keepalive_storage_path: Path | None = None,
         rate_limit_max_retries: int = 0,
         server_error_max_retries: int = 3,
-        limits: "ConnectionLimits | None" = None,
+        limits: ConnectionLimits | None = None,
         max_concurrent_uploads: int | None = DEFAULT_MAX_CONCURRENT_UPLOADS,
     ):
         """Initialize the core client.

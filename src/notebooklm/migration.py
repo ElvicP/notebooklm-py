@@ -12,6 +12,8 @@ The migration is:
   invocations so a container start-up race cannot interleave copies.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import shutil

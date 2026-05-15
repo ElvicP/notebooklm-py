@@ -6,6 +6,8 @@ Commands:
     set     Set default language for artifact generation
 """
 
+from __future__ import annotations
+
 import json
 import logging
 

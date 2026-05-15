@@ -6,6 +6,8 @@ message instead of a cryptic TypeError from PEP 604 union syntax (str | None).
 See: https://github.com/teng-lin/notebooklm-py/issues/117
 """
 
+from __future__ import annotations
+
 import sys
 
 MIN_VERSION = (3, 10)

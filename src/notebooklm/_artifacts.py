@@ -5,6 +5,8 @@ AI-generated artifacts including Audio Overviews, Video Overviews, Reports,
 Quizzes, Flashcards, Infographics, Slide Decks, Data Tables, and Mind Maps.
 """
 
+from __future__ import annotations
+
 import asyncio
 import builtins
 import contextlib
@@ -308,7 +310,7 @@ class ArtifactsAPI:
     def __init__(
         self,
         core: ClientCore,
-        notes_api: "NotesAPI | None" = None,
+        notes_api: NotesAPI | None = None,
         storage_path: Path | None = None,
     ):
         """Initialize the artifacts API.
@@ -2374,7 +2376,7 @@ class ArtifactsAPI:
 
     async def _download_urls_batch(
         self, urls_and_paths: builtins.list[tuple[str, str]]
-    ) -> "DownloadResult":
+    ) -> DownloadResult:
         """Download multiple files using httpx with proper cookie handling.
 
         Args:
