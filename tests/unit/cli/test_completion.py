@@ -124,10 +124,17 @@ class TestCompletionCommand:
 
 
 class _Stub:
-    """Tiny stand-in for notebook / source / artifact rows used by completers."""
+    """Tiny stand-in for notebook / source / artifact rows used by completers.
 
-    def __init__(self, id: str, title: str = ""):
-        self.id = id
+    The constructor takes ``stub_id`` (rather than the more natural ``id``)
+    to avoid shadowing the Python builtin ``id`` — flagged by Ruff A002.
+    The instance attribute is still ``self.id`` so the production code under
+    test, which does ``getattr(row, "id", ...)``, sees the same shape it
+    would in real ``Notebook`` / ``Source`` / ``Artifact`` dataclasses.
+    """
+
+    def __init__(self, stub_id: str, title: str = ""):
+        self.id = stub_id
         self.title = title
 
 

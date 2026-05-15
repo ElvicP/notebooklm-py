@@ -1,7 +1,7 @@
 # CLI Reference
 
 **Status:** Active
-**Last Updated:** 2026-05-11
+**Last Updated:** 2026-05-15
 
 Complete command reference for the `notebooklm` CLI—providing full programmatic access to all NotebookLM features, including capabilities not exposed in the web UI.
 
@@ -598,9 +598,11 @@ notebooklm completion fish > ~/.config/fish/completions/notebooklm.fish
 
 ```bash
 notebooklm ask -n <TAB>            # lists notebook IDs (filtered by what you've typed)
-notebooklm source delete -s <TAB>  # lists sources in the active notebook
-notebooklm artifact get -a <TAB>   # lists artifacts in the active notebook
+notebooklm ask -s <TAB>            # lists sources in the active notebook
+notebooklm download audio -a <TAB> # lists artifacts in the active notebook
 ```
+
+Note: commands that take a positional source / artifact / notebook ID (e.g. `source delete <id>`, `artifact get <id>`, `use <id>`) currently complete only after the option / argument is fully typed — Click's `shell_complete=` is attached to the flag-style `-n/--notebook`, `-s/--source`, `-a/--artifact` declarations enumerated below.
 
 For `-s` and `-a` the active notebook is resolved with the same precedence the command body uses: `-n/--notebook` flag value already on the line > `NOTEBOOKLM_NOTEBOOK` env var > the persisted `notebooklm use` context. With no resolvable notebook (and on any auth / network failure), the completer returns no suggestions silently — it never prints a traceback into your terminal.
 
