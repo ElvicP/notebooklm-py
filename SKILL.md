@@ -91,7 +91,7 @@ Before starting workflows, verify auth is in place. **Use `--test --json` (not b
    - Re-run step 1 after login to confirm.
 4. **If auth was working but cookies went stale** (Google rotated SIDTS, or you signed in fresh in the browser) **→ refresh the active profile in place instead of full re-login:**
    - `notebooklm auth refresh` — server-side SIDTS refresh against the existing `storage_state.json`. Cheap and silent; safe to run on a schedule (cron / launchd / systemd) at 15–20 min cadence to keep an unattended profile warm.
-   - `notebooklm auth refresh --browser-cookies <browser>` — re-extract cookies from a running browser and match them back to the profile's recorded email in `context.json`. Use when the on-disk `storage_state.json` is too stale for the server-side refresh path but you've just signed back into Google in the browser. For Chromium-family browsers with multiple user-profiles (Chrome's `Default`, `Profile 1`, …), refresh fans out across all profiles to find the email — same path as `auth inspect` (issue #571).
+   - `notebooklm auth refresh --browser-cookies <browser>` — re-extract cookies from the browser's on-disk cookie store and match them back to the profile's recorded email in `context.json`. The browser does NOT need to be running — `rookiepy` reads the cookies SQLite DB directly. Use when the on-disk `storage_state.json` is too stale for the server-side refresh path but valid Google cookies still exist in the browser's store (e.g. you recently signed back into Google there). For Chromium-family browsers with multiple user-profiles (Chrome's `Default`, `Profile 1`, …), refresh fans out across all profiles to find the email — same path as `auth inspect` (issue #571).
    - Both forms preserve the same `--profile` (no new profile is created).
 
 > **Note:** `notebooklm status` reports *context state* (selected notebook); do not use it to verify auth.
@@ -118,8 +118,8 @@ Before starting workflows, verify auth is in place. **Use `--test --json` (not b
 - `notebooklm status` - check context
 - `notebooklm auth check` - diagnose auth issues
 - `notebooklm auth inspect` - list Google accounts visible to a browser (read-only)
-- `notebooklm auth refresh` - server-side SIDTS refresh of the active profile (no new profile, no destructive writes)
-- `notebooklm auth refresh --browser-cookies <browser>` - re-extract cookies from a browser into the active profile (rebuilds `storage_state.json` for the same `--profile`, not a new one)
+- `notebooklm auth refresh` - server-side SIDTS rotation written back to the existing `storage_state.json` (no new profile created; same `--profile` preserved)
+- `notebooklm auth refresh --browser-cookies <browser>` - re-extract cookies from the browser's on-disk cookie store and write to the existing `storage_state.json` (no new profile created; same `--profile` preserved)
 - `notebooklm list` - list notebooks
 - `notebooklm source list` - list sources
 - `notebooklm artifact list` - list artifacts
@@ -161,7 +161,7 @@ Before starting workflows, verify auth is in place. **Use `--test --json` (not b
 | Diagnose auth issues | `notebooklm auth check` |
 | Diagnose auth (full) | `notebooklm auth check --test` |
 | Refresh active profile in place (server-side) | `notebooklm auth refresh` |
-| Refresh active profile from a re-signed-in browser | `notebooklm auth refresh --browser-cookies <browser>` |
+| Refresh active profile from browser's on-disk cookie store | `notebooklm auth refresh --browser-cookies <browser>` |
 | One-shot cookie keepalive (for cron) | `notebooklm auth refresh --quiet` |
 | List notebooks | `notebooklm list` |
 | Create notebook | `notebooklm create "Title"` |
