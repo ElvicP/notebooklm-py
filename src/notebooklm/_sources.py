@@ -1406,6 +1406,21 @@ class SourcesAPI:
         Uses streaming to avoid loading the entire file into memory,
         which is important for large PDFs and documents.
 
+        Cancellation contract (T7.C3 / audit §9):
+          - The finalize POST is wrapped in ``asyncio.shield``. If a
+            ``CancelledError`` arrives while the finalize POST is in
+            flight, the inner Task keeps running so the server-side
+            session reaches a known terminal state instead of dangling.
+            The cancel is then re-raised to the caller.
+          - If the cancel arrives BEFORE the finalize POST is dispatched
+            (e.g. while the local ``httpx.AsyncClient`` is being
+            constructed), a best-effort ``X-Goog-Upload-Command: cancel``
+            POST is fired against the same resumable upload URL via
+            ``asyncio.create_task``. The cleanup task is not awaited —
+            re-raising must not block on best-effort cleanup. The cleanup
+            POST itself is shielded so cooperative cancellation does not
+            tear it down before the bytes hit the wire.
+
         Args:
             upload_url: The resumable upload URL from _start_resumable_upload.
             file_path: Path to the file to upload.
@@ -1431,12 +1446,68 @@ class SourcesAPI:
                 while chunk := f.read(65536):  # 64KB chunks
                     yield chunk
 
-        # See _start_resumable_upload: pass the live cookie jar so httpx scopes
-        # cookies per Domain attribute. Scotty validates OSID against host
-        # and rejects foreign-host cookies. (#373)
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(10.0, read=300.0),
-            cookies=self._core.get_http_client().cookies,
-        ) as client:
-            response = await client.post(upload_url, headers=headers, content=file_stream())
-            response.raise_for_status()
+        # `finalize_started` flips the moment we hand the request to httpx.
+        # On cancel we use it to discriminate:
+        #   - True  → shield is keeping the in-flight POST alive; just re-raise.
+        #   - False → no POST went out, so fire a best-effort Scotty cancel.
+        # A single-element list is the simplest closure-mutable boolean.
+        finalize_started = [False]
+
+        async def _do_finalize() -> None:
+            # See _start_resumable_upload: pass the live cookie jar so
+            # httpx scopes cookies per Domain attribute. Scotty validates
+            # OSID against host and rejects foreign-host cookies. (#373)
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(10.0, read=300.0),
+                cookies=self._core.get_http_client().cookies,
+            ) as client:
+                finalize_started[0] = True
+                response = await client.post(upload_url, headers=headers, content=file_stream())
+                response.raise_for_status()
+
+        finalize_task = asyncio.create_task(_do_finalize())
+        try:
+            await asyncio.shield(finalize_task)
+        except asyncio.CancelledError:
+            if not finalize_started[0]:
+                # Pre-finalize cancel: the POST never went out. Cancel the
+                # still-setting-up inner task and fire a best-effort
+                # Scotty cancel so the resumable upload session doesn't
+                # dangle until the server's GC sweeps it.
+                finalize_task.cancel()
+                asyncio.create_task(self._cancel_upload_session(upload_url, base_url, auth_route))
+            # Post-finalize cancel: asyncio.shield is keeping the inner
+            # task alive; let it run to completion in the background, then
+            # propagate the cancel as the caller requested.
+            raise
+
+    async def _cancel_upload_session(self, upload_url: str, base_url: str, auth_route: str) -> None:
+        """Best-effort POST a Scotty resumable-upload cancel command.
+
+        Invoked fire-and-forget (via ``asyncio.create_task``) from
+        ``_upload_file_streaming`` when a ``CancelledError`` arrives
+        BEFORE the finalize POST is dispatched, so the server-side
+        session is torn down instead of held until Scotty's GC timeout.
+
+        Network failures are swallowed — Ctrl-C cleanup is best-effort;
+        the worst case is that the session lives until Scotty GCs it.
+        Since the caller schedules this on a detached task, there is no
+        outer await chain that can deliver a cancellation here, so no
+        extra shield is needed at this layer.
+        """
+        headers = {
+            "Accept": "*/*",
+            "Content-Type": "application/x-www-form-urlencoded;charset=utf-8",
+            "x-goog-authuser": auth_route,
+            "Origin": base_url,
+            "Referer": f"{base_url}/",
+            "x-goog-upload-command": "cancel",
+        }
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(10.0, read=10.0),
+                cookies=self._core.get_http_client().cookies,
+            ) as client:
+                await client.post(upload_url, headers=headers)
+        except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+            logger.debug("Best-effort Scotty cancel for %s failed: %r", upload_url, exc)
