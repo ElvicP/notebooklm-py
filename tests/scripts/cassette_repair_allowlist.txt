@@ -25,6 +25,17 @@
 # guard tolerates an empty file and an empty file makes the eventual
 # ``--strict`` flip a no-op.
 
+# --- illustrative documentation fixtures (not real recordings) -------------
+# These two files are committed as illustrative examples of the cassette
+# format, not real recorded sessions.  They contain YAML strings that
+# happen to end on a closing double-quote immediately after the canonical
+# ``SCRUBBED`` placeholder (``HSID=SCRUBBED"``), and the line-by-line
+# guard captures the trailing ``"`` as part of the cookie value — making
+# it look like a leak.  The cassettes themselves are clean; the line
+# boundary is a YAML-serialization artifact.
+example_batchexecute_pattern.yaml
+example_scrubbed_cookies.yaml
+
 # --- spec-explicit entries (10 total; 6 also in the /ogw/ group) -----------
 artifacts_revise_slide.yaml
 chat_ask.yaml
