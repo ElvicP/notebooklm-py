@@ -156,7 +156,7 @@ async def test_close_during_keepalive_cancel_does_not_leak_transport(
         http_client_ref = client._core._http_client
         assert http_client_ref is not None, "open() must have installed a transport"
 
-        # Slow down ``aclose()`` so the outer ``wait_for(timeout=0.5)``
+        # Slow down ``aclose()`` so the outer ``wait_for(timeout=0.1)``
         # below reliably injects a ``CancelledError`` while the shielded
         # close is in flight. Without this the entire close path
         # finishes in microseconds (mock transport, no real connections
