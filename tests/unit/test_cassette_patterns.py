@@ -381,12 +381,20 @@ def test_scrub_then_is_clean_round_trip(leak_input: str) -> None:
 
 
 def test_vcr_config_uses_registry_scrub_string() -> None:
-    """``vcr_config.scrub_string`` IS the registry's :func:`scrub_string`.
+    """``vcr_config.scrub_string`` is sourced from ``cassette_patterns``.
 
-    If a future refactor accidentally reintroduces an inline pattern list in
-    ``vcr_config``, the two references diverge and this assertion catches it.
+    ``vcr_config`` loads ``cassette_patterns`` via ``importlib.util.spec_from_
+    file_location`` (a separate module identity from the ``sys.path``-import
+    used by the test harness), so we cannot use ``is`` identity. Instead we
+    pin both the source-file location and the byte-for-byte source of the
+    bound function — if a future refactor reintroduces an inline pattern list
+    in ``vcr_config`` and reassigns ``scrub_string`` to a local definition,
+    either check fails.
     """
-    assert vcr_config.scrub_string is scrub_string
+    import inspect
+
+    assert inspect.getfile(vcr_config.scrub_string).endswith("cassette_patterns.py")
+    assert inspect.getsource(vcr_config.scrub_string) == inspect.getsource(scrub_string)
 
 
 def test_vcr_config_has_no_inline_sensitive_patterns() -> None:
