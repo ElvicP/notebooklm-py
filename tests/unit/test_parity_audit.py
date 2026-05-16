@@ -69,9 +69,7 @@ def test_known_vocabulary_has_four_required_groups(pa):
 def test_known_vocabulary_reflects_enums(pa):
     vocab = pa.build_known_vocabulary()
     # Studio outputs (ArtifactType)
-    assert {"audio", "video", "mind_map", "infographic", "slide_deck"} <= vocab[
-        "studio_output"
-    ]
+    assert {"audio", "video", "mind_map", "infographic", "slide_deck"} <= vocab["studio_output"]
     # Source types (SourceType)
     assert {"pdf", "youtube", "web_page", "google_docs"} <= vocab["source_type"]
     # Chat config (ChatMode/ChatGoal/ChatResponseLength) — at least the modes
@@ -129,25 +127,27 @@ def test_fetch_pages_uses_injected_fetcher(pa):
         calls.append(url)
         return f"<html><body>content of {url}</body></html>"
 
-    pages, failed = pa.fetch_pages(
-        ["https://a.test", "https://b.test"], fetcher=fake_fetch
-    )
+    pages, failed = pa.fetch_pages(["https://a.test", "https://b.test"], fetcher=fake_fetch)
     assert failed == []
     assert set(pages) == {"https://a.test", "https://b.test"}
     assert calls == ["https://a.test", "https://b.test"]
 
 
 def test_fetch_pages_records_failures(pa):
+    good = "https://good.test"
+    bad = "https://bad.test"
+
     def flaky(url: str) -> str:
-        if "bad" in url:
+        # Exact match (not a URL substring check) — keeps CodeQL's
+        # py/incomplete-url-substring-sanitization heuristic from firing
+        # on test scaffolding.
+        if url == bad:
             raise RuntimeError("boom")
         return "<body>ok</body>"
 
-    pages, failed = pa.fetch_pages(
-        ["https://good.test", "https://bad.test"], fetcher=flaky
-    )
-    assert "https://good.test" in pages
-    assert failed == ["https://bad.test"]
+    pages, failed = pa.fetch_pages([good, bad], fetcher=flaky)
+    assert list(pages) == [good]
+    assert failed == [bad]
 
 
 # ---------------------------------------------------------------------------
@@ -177,9 +177,7 @@ def _write_html_dir(tmp_path: Path, name: str, body: str) -> Path:
 
 
 def test_main_clean_returns_0_and_writes_doc(pa, tmp_path):
-    d = _write_html_dir(
-        tmp_path, "p.html", "Audio Overview and Video Overview and Mind Map"
-    )
+    d = _write_html_dir(tmp_path, "p.html", "Audio Overview and Video Overview and Mind Map")
     out = tmp_path / "feature-parity.md"
     rc = pa.main(["--input-dir", str(d), "--output", str(out)])
     assert rc == 0

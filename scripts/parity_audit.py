@@ -380,8 +380,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not pages:
         print(
-            "parity-audit: nothing audited (no reachable sources). "
-            f"failed={failed}",
+            f"parity-audit: nothing audited (no reachable sources). failed={failed}",
             file=sys.stderr,
         )
         return 2
