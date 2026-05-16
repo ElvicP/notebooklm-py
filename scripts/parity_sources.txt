@@ -1,0 +1,13 @@
+# Curated feature pages for the recurring parity audit (Spec 0.1).
+#
+# One URL per line. Blank lines and lines starting with '#' are ignored.
+# The audit is heuristic: it scrapes these pages and flags Studio-output
+# phrases ("<Name> Overview") the library does not model yet.
+#
+# Only the canonical product page is seeded by default — it is stable and
+# not a guessed URL. Maintainers should add the specific NotebookLM
+# announcement / Help Center pages they want tracked (e.g. Google blog
+# posts, support.google.com articles) as they are published. Dead links
+# are skipped, not fatal.
+
+https://notebooklm.google.com/

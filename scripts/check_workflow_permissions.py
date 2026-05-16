@@ -23,8 +23,11 @@ from pathlib import Path
 # codeql.yml: needs `security-events: write` (job-scoped is the standard).
 # publish.yml / testpypi-publish.yml: write to PyPI; permissions live at job level.
 # rpc-health.yml: opens issues on failure (already has its own permissions block).
+# parity-audit.yml: opens issues on drift (Spec 0.1; has its own scoped block
+#   with contents:read + issues:write, same shape as rpc-health.yml).
 ALLOWLIST = {
     "codeql.yml",
+    "parity-audit.yml",
     "publish.yml",
     "rpc-health.yml",
     "testpypi-publish.yml",
