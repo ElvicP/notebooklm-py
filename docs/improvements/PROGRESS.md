@@ -13,7 +13,7 @@ Live tracker. Update after each spec completion.
 
 | Spec | Title | Status | Branch | PR target | Notes |
 |------|-------|--------|--------|-----------|-------|
-| 0.1 | Recurring API parity audit | ⬜ | — | — | Includes GitHub Action + scripts/parity_audit.py |
+| 0.1 | Recurring API parity audit | ✅ | `spec/0.1-parity-audit` | TBD | `scripts/parity_audit.py` (heuristic enum diff, injectable fetcher, exit-code taxonomy) + quarterly fork-guarded workflow that opens an issue on drift + `make audit` + generated `docs/feature-parity.md`. 17 test cases. Commit `4c59d51`. |
 | 0.2 | `from __future__ import annotations` consistency | ✅ | `spec/0.2-future-annotations` | TBD | 48 files migrated, ruff FA enabled, 61 tests added. Commit `bf0bea9`. |
 | 0.3 | Backoff jitter | ⏳ | — | — | Touch `_core.py` retry path |
 | 0.4 | httpx/httpcore log redaction | ⬜ | — | — | Extend `_logging.py` filter scope |
