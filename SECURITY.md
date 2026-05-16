@@ -59,6 +59,25 @@ Default location is `~/.notebooklm/` (can be changed via `NOTEBOOKLM_HOME` envir
    - Store the JSON value in GitHub Secrets or similar secure secret management
    - The env var approach keeps credentials in memory only, never written to disk
 
+### Log Redaction
+
+Logs are scrubbed of credential-shaped data (CSRF/`at=` tokens, `f.sid=`,
+OAuth params, Google session cookies, `Authorization`/`Cookie`/`Set-Cookie`
+headers) before they are emitted. This applies to:
+
+- The `notebooklm` package logger and all of its child loggers.
+- The third-party **`httpx` and `httpcore`** loggers — which otherwise leak
+  full request URLs (with auth query params) and cookie headers when you
+  enable them at `DEBUG`. Redaction is applied automatically on import and
+  is **on by default**.
+
+You can opt out of the `httpx`/`httpcore` scrubbing **only** for advanced
+debugging by setting `NOTEBOOKLM_REDACT_HTTPX=0` (also accepts
+`false`/`no`/`off`). Doing so will print raw credentials to your logs — do
+not enable it in shared, persisted, or CI logs. See
+[docs/troubleshooting.md](docs/troubleshooting.md#httpx--httpcore-log-redaction)
+for details.
+
 ### What This Library Does NOT Do
 
 - Does not transmit credentials to any third party

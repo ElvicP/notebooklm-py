@@ -544,6 +544,7 @@ Windows systems with non-English locales (Chinese cp950, Japanese cp932, etc.) m
 | `NOTEBOOKLM_LOG_LEVEL` | `WARNING` | Set to `DEBUG`, `INFO`, `WARNING`, or `ERROR` |
 | `NOTEBOOKLM_DEBUG_RPC` | (unset) | Legacy: Set to `1` to enable `DEBUG` level |
 | `NOTEBOOKLM_DEBUG` | (unset) | Set to `1` to preserve the full raw RPC response body on `RPCError.raw_response` (default: truncated to 80 chars + `"..."`) |
+| `NOTEBOOKLM_REDACT_HTTPX` | `1` (on) | Credential redaction of `httpx`/`httpcore` logs. Set to `0`/`false`/`no`/`off` to opt out (advanced debugging only — leaks auth params and cookies) |
 
 **When to use each level:**
 
@@ -575,6 +576,36 @@ os.environ["NOTEBOOKLM_LOG_LEVEL"] = "DEBUG"
 from notebooklm import NotebookLMClient
 # Now all notebooklm operations will log at DEBUG level
 ```
+
+### httpx / httpcore log redaction
+
+`httpx` and `httpcore` have their own loggers that you can enable
+independently for network debugging:
+
+```python
+import logging
+logging.getLogger("httpx").setLevel(logging.DEBUG)
+logging.getLogger("httpcore").setLevel(logging.DEBUG)
+```
+
+Those loggers emit full request URLs (including auth query params like
+`at=` and `f.sid=`) and cookie headers. **By default, `notebooklm-py`
+extends its credential redaction to these loggers automatically** — as
+soon as `notebooklm` is imported, the same filter that scrubs the package
+logger also scrubs `httpx` and `httpcore` output (`httpcore` logs from
+child loggers like `httpcore.connection`; they are covered via the parent
+handler). You do not need to call anything.
+
+Opt out only if you are debugging and explicitly need the raw values:
+
+```bash
+NOTEBOOKLM_REDACT_HTTPX=0 NOTEBOOKLM_LOG_LEVEL=DEBUG notebooklm list
+```
+
+Note: if you raise the `httpx`/`httpcore` level **and** have root logging
+configured (e.g. `logging.basicConfig`), you may see each line twice (once
+from the redacting handler we attach, once via propagation to root). Both
+copies are redacted — it is cosmetic only.
 
 ### Test Basic Operations
 

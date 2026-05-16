@@ -16,7 +16,7 @@ Live tracker. Update after each spec completion.
 | 0.1 | Recurring API parity audit | ⬜ | — | — | Includes GitHub Action + scripts/parity_audit.py |
 | 0.2 | `from __future__ import annotations` consistency | ✅ | `spec/0.2-future-annotations` | TBD | 48 files migrated, ruff FA enabled, 61 tests added. Commit `bf0bea9`. |
 | 0.3 | Backoff jitter | ✅ | `spec/0.3-backoff-jitter` | TBD | Per-instance `jitter_rng` (`random.Random`, not global RNG) + `_apply_jitter` non-negative jitter on 5xx/network **and** 429 Retry-After paths. 6 tests added. Commit `6ec990e`. |
-| 0.4 | httpx/httpcore log redaction | ⬜ | — | — | Extend `_logging.py` filter scope |
+| 0.4 | httpx/httpcore log redaction | ✅ | `spec/0.4-httpx-redaction` | TBD | `configure_logging()` auto-installs RedactingFilter on `httpx`+`httpcore` (httpcore child loggers covered via parent handler); `NOTEBOOKLM_REDACT_HTTPX=0` opt-out; docs in troubleshooting.md + SECURITY.md. 16 test cases added. Commit `97f124b`. |
 | 0.5 | Test cassettes via Git LFS | ⬜ | — | — | 28MB → LFS, update CONTRIBUTING.md |
 
 ## Phase 1 — Performance & UX Critical Wins
