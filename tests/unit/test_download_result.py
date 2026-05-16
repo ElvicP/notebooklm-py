@@ -222,9 +222,19 @@ async def test_download_warning_log_does_not_leak_url_via_exception_str(
 
 
 def test_no_docs_callers():
-    """_download_urls_batch is private — no public docs reference it."""
+    """_download_urls_batch is private — no *public* docs reference it.
+
+    ``docs/improvements/`` is excluded: it holds fork-local planning
+    trackers (PROGRESS.md / spec.md) that intentionally name internal
+    helpers when scoping future work. Those are not user-facing API
+    documentation, so the no-private-leak guard does not apply to them —
+    while it still protects every published doc.
+    """
     repo_root = Path(__file__).resolve().parents[2]
     docs_dir = repo_root / "docs"
+    planning_dir = docs_dir / "improvements"
     for md in docs_dir.rglob("*.md"):
+        if planning_dir in md.parents:
+            continue
         text = md.read_text(encoding="utf-8")
         assert "_download_urls_batch" not in text, f"unexpected docs ref in {md}"
