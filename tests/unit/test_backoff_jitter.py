@@ -48,9 +48,7 @@ def _make_core(
 
 
 def _ok_response() -> httpx.Response:
-    return httpx.Response(
-        200, text="OK", request=httpx.Request("POST", "https://example.test/x")
-    )
+    return httpx.Response(200, text="OK", request=httpx.Request("POST", "https://example.test/x"))
 
 
 def _status_error(code: int, *, retry_after: str | None = None) -> httpx.HTTPStatusError:
@@ -100,8 +98,7 @@ async def test_5xx_backoff_has_injected_deterministic_jitter(monkeypatch):
         # Independently replay the same seed to derive the expected schedule.
         replay = random.Random(42)
         expected = [
-            base + replay.uniform(0, base * 0.1)
-            for base in (min(2**n, 30) for n in range(3))
+            base + replay.uniform(0, base * 0.1) for base in (min(2**n, 30) for n in range(3))
         ]
         assert sleeps == pytest.approx(expected)
         # Jitter is additive and non-negative: each delay exceeds its base.
@@ -135,8 +132,7 @@ async def test_network_error_backoff_carries_jitter(monkeypatch):
 
         replay = random.Random(1)
         expected = [
-            base + replay.uniform(0, base * 0.1)
-            for base in (min(2**n, 30) for n in range(2))
+            base + replay.uniform(0, base * 0.1) for base in (min(2**n, 30) for n in range(2))
         ]
         assert sleeps == pytest.approx(expected)
         assert all(d != b for d, b in zip(sleeps, (1, 2), strict=True))
