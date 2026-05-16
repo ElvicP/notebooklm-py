@@ -12,6 +12,11 @@ scrubs the rendered output as belt-and-suspenders.
 
 propagate is left True so records flow to root for caplog / basicConfig users;
 the in-place mutation ensures downstream handlers see scrubbed data.
+
+configure_logging() also extends the same redaction to the third-party
+``httpx`` and ``httpcore`` loggers (which leak auth query params and cookie
+headers when enabled at DEBUG). On by default; opt out with
+``NOTEBOOKLM_REDACT_HTTPX=0``.
 """
 
 from __future__ import annotations
@@ -104,6 +109,17 @@ _REDACT_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 _HANDLER_MARKER = "_notebooklm_redacting"
 _DEFAULT_FMT = "%(asctime)s %(levelname)s [%(name)s] %(message)s"
 _DEFAULT_DATEFMT = "%H:%M:%S"
+
+# Third-party HTTP loggers whose records can carry auth query params and
+# cookie headers. ``httpx`` emits from the bare ``httpx`` logger; ``httpcore``
+# emits ONLY from child loggers (httpcore.connection / .http11 / .http2 /
+# .proxy / .socks), so the filter must ride on a handler attached to the
+# ``httpcore`` parent — a logger-level filter would never run for those
+# child records during propagation.
+_HTTPX_REDACT_LOGGERS = ("httpx", "httpcore")
+# ``NOTEBOOKLM_REDACT_HTTPX`` opt-out values (advanced debugging only).
+# Redaction is ON by default; only these explicit spellings disable it.
+_REDACT_HTTPX_DISABLE_VALUES = frozenset({"0", "false", "no", "off"})
 
 
 def _scrub(text: object) -> str:
@@ -246,6 +262,19 @@ def apply_redaction(handler: logging.Handler) -> logging.Handler:
     return handler
 
 
+def _redact_httpx_enabled() -> bool:
+    """Whether the httpx/httpcore loggers get the credential RedactingFilter.
+
+    ON by default. Opt out (advanced debugging that intentionally wants raw
+    URLs / cookie headers) by setting ``NOTEBOOKLM_REDACT_HTTPX`` to one of
+    ``0`` / ``false`` / ``no`` / ``off`` (case-insensitive, surrounding
+    whitespace ignored). Any other value — including unset — keeps redaction
+    on.
+    """
+    raw = os.environ.get("NOTEBOOKLM_REDACT_HTTPX", "1")
+    return raw.strip().lower() not in _REDACT_HTTPX_DISABLE_VALUES
+
+
 def configure_logging() -> None:
     """Configure the `notebooklm` package logger with credential redaction.
 
@@ -254,6 +283,13 @@ def configure_logging() -> None:
     and decorator-wrapped RedactingFormatter — we do not silently skip them.
 
     Honors NOTEBOOKLM_LOG_LEVEL and NOTEBOOKLM_DEBUG_RPC.
+
+    Also extends credential redaction to the third-party ``httpx`` and
+    ``httpcore`` loggers (which can emit full URLs with auth query params
+    and cookie headers when the user enables them at DEBUG). On by default;
+    opt out with ``NOTEBOOKLM_REDACT_HTTPX=0`` — see
+    :func:`_redact_httpx_enabled`. Idempotent like the rest of this
+    function, so it is safe on every call.
 
     propagate is left True so records flow to root (caplog, basicConfig).
     The in-place filter mutation ensures downstream handlers see scrubbed
@@ -273,6 +309,9 @@ def configure_logging() -> None:
         logger.addHandler(_make_default_handler())
 
     logger.propagate = True
+
+    if _redact_httpx_enabled():
+        install_redaction(*_HTTPX_REDACT_LOGGERS)
 
 
 def install_redaction(*logger_names: str) -> None:
