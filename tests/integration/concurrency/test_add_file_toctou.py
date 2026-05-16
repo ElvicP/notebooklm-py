@@ -53,6 +53,7 @@ from __future__ import annotations
 import asyncio
 import builtins
 import os
+import sys
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -67,6 +68,18 @@ from notebooklm import NotebookLMClient
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "POSIX-only TOCTOU scenario. The test simulates the attacker with "
+        "os.replace() over the file whose FD add_file holds. On Windows the "
+        "OS locks the open file, so os.replace raises WinError 5 — the swap "
+        "is impossible while the FD is held. That means the TOCTOU defense "
+        "holds *more* strongly on Windows (the attack cannot happen at all); "
+        "the POSIX rename-over-open-fd inode-swap discriminator simply does "
+        "not exist here, so there is nothing for this test to assert."
+    ),
+)
 async def test_add_file_holds_validated_fd_across_swap(
     auth_tokens,
     tmp_path: Path,
