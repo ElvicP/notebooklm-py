@@ -18,6 +18,14 @@ from notebooklm._core import ClientCore
 from notebooklm.rpc import RateLimitError, RPCError, RPCMethod
 
 
+@pytest.fixture(autouse=True)
+def _no_backoff_jitter(monkeypatch):
+    """Neutralize Spec 0.3 retry jitter so the 429 ``Retry-After`` sleep
+    schedule stays exact (``sleep(1)``). Jitter is covered in
+    ``test_backoff_jitter.py``."""
+    monkeypatch.setattr(ClientCore, "_apply_jitter", lambda self, base: float(base))
+
+
 @pytest.fixture
 def auth_tokens():
     auth = MagicMock()

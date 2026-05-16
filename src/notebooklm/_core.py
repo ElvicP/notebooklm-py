@@ -298,6 +298,7 @@ class ClientCore:
         server_error_max_retries: int = 3,
         limits: "ConnectionLimits | None" = None,
         max_concurrent_uploads: int | None = DEFAULT_MAX_CONCURRENT_UPLOADS,
+        jitter_rng: random.Random | None = None,
     ):
         """Initialize the core client.
 
@@ -332,8 +333,10 @@ class ClientCore:
                 transport failures: HTTP 5xx responses and network-layer
                 ``httpx.RequestError`` (timeouts, connect errors). Defaults to
                 ``3``. Uses exponential backoff ``min(2 ** attempt, 30)``
-                seconds — 5xx responses rarely carry ``Retry-After``, so the
-                429 model doesn't apply. Set to ``0`` to disable. Refresh-path
+                seconds plus anti-thundering-herd jitter (see
+                ``_apply_jitter``) — 5xx responses rarely carry
+                ``Retry-After``, so the 429 model doesn't apply. Set to
+                ``0`` to disable. Refresh-path
                 errors (400/401/403) are NOT covered here; those follow the
                 existing auth-refresh-and-retry flow.
             limits: HTTP connection-pool tuning (``ConnectionLimits``). ``None``
@@ -354,6 +357,15 @@ class ClientCore:
                 of the RPC connection pool because uploads use their own
                 ``httpx.AsyncClient`` (Scotty endpoint) and don't share
                 the RPC pool.
+            jitter_rng: Test-only seam. The per-instance ``random.Random``
+                used to add anti-thundering-herd jitter to retry backoff
+                (5xx, network, and 429 paths). ``None`` (default,
+                production) constructs a fresh ``random.Random()`` seeded
+                from OS entropy at instantiation — per-process and
+                independent of the module-global RNG, so two clients in
+                one process don't share jitter state. Inject a seeded
+                ``random.Random(seed)`` in tests to make the jittered
+                schedule reproducible.
 
         Raises:
             ValueError: If ``keepalive`` or ``keepalive_min_interval`` is not a
@@ -377,6 +389,11 @@ class ClientCore:
                 f"server_error_max_retries must be >= 0, got {server_error_max_retries}"
             )
         self._server_error_max_retries = server_error_max_retries
+        # Per-instance RNG for retry-backoff jitter. A bare ``random.Random()``
+        # is seeded from OS entropy at construction: per-process, independent
+        # of the module-global RNG (so concurrent clients don't synchronize),
+        # and overridable in tests via the ``jitter_rng`` seam.
+        self._jitter_rng = jitter_rng if jitter_rng is not None else random.Random()
         # ``None`` resolves to the default (``DEFAULT_MAX_CONCURRENT_UPLOADS``)
         # rather than meaning "unbounded" — the FD-exhaustion guard is the
         # whole point of the knob; an unbounded fan-out of ``add_file`` would
@@ -865,6 +882,18 @@ class ClientCore:
             )
         return f"{get_batchexecute_url()}?{urlencode(params)}"
 
+    def _apply_jitter(self, base: float) -> float:
+        """Add non-negative anti-thundering-herd jitter to a backoff delay.
+
+        Returns ``base + U(0, base * 0.1)`` — up to 10% extra, never less
+        than ``base``. Positive-only jitter (vs. a symmetric spread) keeps
+        the delay from ever dropping *below* the intended backoff/Retry-After
+        while still desynchronizing a fleet of clients that failed on the
+        same transient blip. Draws from the per-instance ``_jitter_rng`` so
+        tests can inject a seeded ``random.Random`` for reproducibility.
+        """
+        return base + self._jitter_rng.uniform(0, base * 0.1)  # noqa: S311  # nosec B311 — jitter, not crypto
+
     async def _perform_authed_post(
         self,
         *,
@@ -899,13 +928,16 @@ class ClientCore:
           (``query_post``). If the post-refresh retry's POST fails for a
           non-auth reason, that exception propagates as-is.
         - **Rate-limit path** — on HTTP 429 with a parseable Retry-After,
-          sleeps and retries until ``rate_limit_max_retries`` is reached;
-          after that, raises :class:`_TransportRateLimited` with the final
-          response and parsed retry-after value. With no parseable header or
-          ``rate_limit_max_retries == 0``, raises immediately.
+          sleeps (Retry-After plus anti-thundering-herd jitter, see
+          ``_apply_jitter``) and retries until ``rate_limit_max_retries``
+          is reached; after that, raises :class:`_TransportRateLimited`
+          with the final response and parsed retry-after value. With no
+          parseable header or ``rate_limit_max_retries == 0``, raises
+          immediately.
         - **Server-error path** — on HTTP 5xx, or any ``httpx.RequestError``
           (network-layer failures: timeouts, connect errors), sleeps with
-          exponential backoff ``min(2 ** attempt, 30)`` seconds and retries
+          exponential backoff ``min(2 ** attempt, 30)`` seconds plus jitter
+          (see ``_apply_jitter``) and retries
           until ``server_error_max_retries`` is reached; after that, raises
           :class:`_TransportServerError`. ``server_error_max_retries == 0``
           short-circuits to an immediate raise. This path does NOT honor
@@ -998,14 +1030,19 @@ class ClientCore:
                         and retry_after is not None
                         and rate_limit_retries < self._rate_limit_max_retries
                     ):
+                        # Honor Retry-After, but add jitter on top so a fleet
+                        # of clients rate-limited at the same instant (and
+                        # handed the same Retry-After) don't all wake in
+                        # lockstep and re-stampede the backend.
+                        sleep_for = self._apply_jitter(retry_after)
                         logger.warning(
-                            "%s rate-limited (HTTP 429); sleeping %ds then retrying (%d/%d)",
+                            "%s rate-limited (HTTP 429); sleeping %.1fs then retrying (%d/%d)",
                             log_label,
-                            retry_after,
+                            sleep_for,
                             rate_limit_retries + 1,
                             self._rate_limit_max_retries,
                         )
-                        await asyncio.sleep(retry_after)
+                        await asyncio.sleep(sleep_for)
                         rate_limit_retries += 1
                         continue
                     raise _TransportRateLimited(
@@ -1040,11 +1077,9 @@ class ClientCore:
                         # (every retry beyond ~5 attempts waits exactly 30s),
                         # but the early retries (1s, 2s, 4s, ...) can still
                         # synchronize across clients that all failed on the
-                        # same transient backend blip. Add a small ±20% jitter
-                        # so concurrent retries are spread out.
-                        backoff = min(2**server_error_retries, 30)
-                        backoff += random.uniform(-0.2 * backoff, 0.2 * backoff)  # noqa: S311  # nosec B311 — jitter, not crypto
-                        backoff = max(0.1, backoff)
+                        # same transient backend blip. Add jitter so
+                        # concurrent retries are spread out.
+                        backoff = self._apply_jitter(min(2**server_error_retries, 30))
                         status_label = (
                             f"HTTP {exc.response.status_code}"  # type: ignore[union-attr]
                             if is_server_error
