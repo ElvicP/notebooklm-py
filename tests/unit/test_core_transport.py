@@ -39,16 +39,16 @@ from notebooklm.rpc import RPCMethod
 
 @pytest.fixture(autouse=True)
 def _no_backoff_jitter(monkeypatch):
-    """Pin the 5xx/network backoff jitter to 0 for deterministic sleep assertions.
+    """Pin retry-backoff jitter to 0 for deterministic sleep assertions.
 
-    Production code adds a small ±20% jitter to the exponential backoff to
-    reduce thundering-herd effects across clients. These transport tests
-    assert exact sleep schedules (``[1, 2, 4, ...]``), so we patch
-    ``random.uniform`` inside ``notebooklm._core`` to return 0. The 429 path
-    uses ``Retry-After`` instead of jitter, so this fixture has no effect on
-    those tests.
+    Production code (Spec 0.3) adds non-negative anti-thundering-herd jitter
+    to *every* retry sleep — 5xx/network exponential backoff *and* the 429
+    Retry-After path — via ``ClientCore._apply_jitter``. These transport
+    tests assert exact sleep schedules (``[1, 2, 4, ...]``, ``[5]``), so we
+    neutralize the jitter by making ``_apply_jitter`` the identity. Jitter
+    behavior itself is covered separately in ``test_backoff_jitter.py``.
     """
-    monkeypatch.setattr("notebooklm._core.random.uniform", lambda a, b: 0.0)
+    monkeypatch.setattr(ClientCore, "_apply_jitter", lambda self, base: float(base))
 
 
 def _make_core(
